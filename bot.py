@@ -6,13 +6,13 @@ from telegram.ext import Application, CommandHandler, MessageHandler, ContextTyp
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHANNEL_ID = os.getenv("CHANNEL_ID")
 
 
 def calc(price):
     price21 = round(price)
     price24 = round((price * 8) / 7)
     price18 = round((price * 6) / 7)
-
     return price24, price21, price18
 
 
@@ -25,20 +25,30 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         price = float(update.message.text)
-    except:
+    except ValueError:
         await update.message.reply_text("❌ أرسل رقم صحيح.")
         return
 
     p24, p21, p18 = calc(price)
 
-    text = f"""💎 أسعار الذهب
+    text = f"""💎 أسعار الذهب اليوم
 
-عيار 24 : {p24}
-عيار 21 : {p21}
-عيار 18 : {p18}
+🟡 عيار 24 : {p24}
+🟡 عيار 21 : {p21}
+🟡 عيار 18 : {p18}
+
+📍 مصوغات ومجوهرات الحسيني
+بورسعيد - شارع أسوان أمام صيدلية جلال
 """
 
-    await update.message.reply_text(text)
+    # إرسال للقناة
+    await context.bot.send_message(
+        chat_id=CHANNEL_ID,
+        text=text
+    )
+
+    # تأكيد للمستخدم
+    await update.message.reply_text("✅ تم نشر الأسعار في القناة.")
 
 
 def main():
@@ -48,7 +58,6 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, receive))
 
     print("Bot Started...")
-
     app.run_polling()
 
 
