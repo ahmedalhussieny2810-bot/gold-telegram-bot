@@ -35,7 +35,8 @@ CHANNEL_ID = os.getenv("CHANNEL_ID", "").strip()
 FACEBOOK_PAGE_ID = os.getenv("FACEBOOK_PAGE_ID", "").strip()
 
 FACEBOOK_PAGE_ACCESS_TOKEN = os.getenv(
-    "FACEBOOK_PAGE_TOKEN", ""
+    "FACEBOOK_PAGE_TOKEN",
+    ""
 ).strip()
 
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
@@ -53,6 +54,10 @@ except ValueError:
 TIMEZONE = ZoneInfo("Africa/Cairo")
 
 WEBSITE_LINK = "https://link.gettap.co/alhussienyjewelry"
+
+TELEGRAM_CHANNEL_LINK = (
+    "https://t.me/alhussienyjewelry"
+)
 
 FACEBOOK_LINK = (
     "https://www.facebook.com/alhussienyjewelry"
@@ -501,6 +506,13 @@ def main_menu():
 
         [
             InlineKeyboardButton(
+                "📢 قناة التليجرام",
+                url=TELEGRAM_CHANNEL_LINK,
+            )
+        ],
+
+        [
+            InlineKeyboardButton(
                 "📍 موقع المحل",
                 url=MAPS_LINK,
             ),
@@ -704,28 +716,74 @@ async def show_products_menu(
 
         await query.edit_message_text(
             "💎 المنتجات\n\n"
-            "لا توجد منتجات مضافة حالياً."
+            "لا توجد منتجات مضافة حالياً.",
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "⬅️ الرئيسية",
+                            callback_data="home",
+                        )
+                    ]
+                ]
+            ),
         )
 
         return
 
     keyboard = []
 
-    for category in categories:
+    for index, category in enumerate(
+        categories
+    ):
 
         keyboard.append(
             [
                 InlineKeyboardButton(
                     f"💎 {category}",
                     callback_data=(
-                        "category:"
-                        + category[:50]
+                        f"category_{index}"
                     ),
                 )
             ]
         )
 
+    context_data = {}
+
+    # نحفظ الأقسام في callback data الخاصة بالمستخدم
+    # عن طريق user_data في الـ handler الرئيسي
+    query._bot_data = context_data
+
     keyboard.append(
+        [
+            InlineKeyboardButton(
+                "⬅️ الرئيسية",
+                callback_data="home",
+            )
+        ]
+    )
+
+    # استخدام أسماء الأقسام مباشرة طالما أنها قصيرة
+    # وآمنة داخل callback_data
+    final_keyboard = []
+
+    for category in categories:
+
+        safe_category = category[:50]
+
+        final_keyboard.append(
+            [
+                InlineKeyboardButton(
+                    f"💎 {category}",
+                    callback_data=(
+                        "category:"
+                        + safe_category
+                    ),
+                )
+            ]
+        )
+
+    final_keyboard.append(
         [
             InlineKeyboardButton(
                 "⬅️ الرئيسية",
@@ -737,18 +795,17 @@ async def show_products_menu(
     await query.edit_message_text(
         "💎 اختر القسم:",
         reply_markup=InlineKeyboardMarkup(
-            keyboard
+            final_keyboard
         ),
     )
 
 
 # =========================================================
-# SHOW PRODUCTS
+# SEND PRODUCTS
 # =========================================================
 
 async def send_products(
     query,
-    context,
     category,
 ):
 
@@ -959,11 +1016,11 @@ async def receive(
             ):
 
                 found_category = category
+
                 break
 
         if found_category:
 
-            # Send products directly
             products = get_products(
                 found_category
             )
@@ -1180,7 +1237,6 @@ async def button_handler(
 
         await send_products(
             query,
-            context,
             category,
         )
 
@@ -1260,7 +1316,7 @@ async def button_handler(
         return
 
     # =====================================================
-    # DATA
+    # PRICE DATA
     # =====================================================
 
     text = context.user_data.get(
@@ -1289,6 +1345,7 @@ async def button_handler(
         return
 
     telegram_success = False
+
     facebook_success = False
 
     # =====================================================
@@ -1538,7 +1595,6 @@ def main():
         "Bot Started..."
     )
 
-    # مهم: لا تشغل نسخة ثانية من نفس البوت
     app.run_polling(
         drop_pending_updates=True
     )
