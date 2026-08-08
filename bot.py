@@ -1,10 +1,9 @@
 import os
-import sqlite3
-from datetime import datetime, date
+import json
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
-import requests
 from dotenv import load_dotenv
-
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -12,8 +11,15 @@ from telegram.ext import (
     MessageHandler,
     CallbackQueryHandler,
     ContextTypes,
-    filters,
+    filters
 )
+
+import requests
+
+
+# =========================
+# ENV
+# =========================
 
 load_dotenv()
 
@@ -23,78 +29,26 @@ CHANNEL_ID = os.getenv("CHANNEL_ID")
 FACEBOOK_PAGE_ID = os.getenv("FACEBOOK_PAGE_ID")
 FACEBOOK_PAGE_ACCESS_TOKEN = os.getenv("FACEBOOK_PAGE_TOKEN")
 
-DB_FILE = "gold_prices.db"
+
+# =========================
+# SETTINGS
+# =========================
+
+TIMEZONE = ZoneInfo("Africa/Cairo")
+
+# ملف حفظ أول سعر في كل يوم
+HISTORY_FILE = "gold_history.json"
+
+# رابط الموقع
+WEBSITE_LINK = "https://link.gettap.co/alhussienyjewelry"
 
 
 # =========================
-# قاعدة البيانات
-# =========================
-
-def init_db():
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS daily_prices (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            price21 INTEGER NOT NULL,
-            created_at TEXT NOT NULL
-        )
-    """)
-
-    conn.commit()
-    conn.close()
-
-
-def get_first_price_of_day(day):
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-
-    cursor.execute("""
-        SELECT price21
-        FROM daily_prices
-        WHERE DATE(created_at) = ?
-        ORDER BY created_at ASC
-        LIMIT 1
-    """, (day,))
-
-    result = cursor.fetchone()
-
-    conn.close()
-
-    return result[0] if result else None
-
-
-def save_first_price_of_day(price21):
-    today = date.today().isoformat()
-
-    existing = get_first_price_of_day(today)
-
-    if existing is not None:
-        return False
-
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-
-    cursor.execute("""
-        INSERT INTO daily_prices (price21, created_at)
-        VALUES (?, ?)
-    """, (
-        price21,
-        datetime.now().isoformat()
-    ))
-
-    conn.commit()
-    conn.close()
-
-    return True
-
-
-# =========================
-# حساب الأسعار
+# GOLD CALCULATION
 # =========================
 
 def calc(price):
+
     price21 = round(price)
     price24 = round((price * 8) / 7)
     price18 = round((price * 6) / 7)
@@ -103,65 +57,174 @@ def calc(price):
 
 
 # =========================
-# المقارنة
+# DATE
 # =========================
 
-def get_comparison(price21):
-    today = date.today()
+def today_date():
 
-    # أول سعر أمس
-    previous_day = date.fromordinal(today.toordinal() - 1)
+    return datetime.now(TIMEZONE).strftime("%Y-%m-%d")
 
-    yesterday_price = get_first_price_of_day(
-        previous_day.isoformat()
+
+def yesterday_date():
+
+    from datetime import timedelta
+
+    yesterday = datetime.now(TIMEZONE) - timedelta(days=1)
+
+    return yesterday.strftime("%Y-%m-%d")
+
+
+# =========================
+# HISTORY
+# =========================
+
+def load_history():
+
+    if not os.path.exists(HISTORY_FILE):
+        return {}
+
+    try:
+
+        with open(HISTORY_FILE, "r", encoding="utf-8") as file:
+            return json.load(file)
+
+    except Exception as e:
+
+        print("History Load Error:", e)
+
+        return {}
+
+
+def save_history(history):
+
+    try:
+
+        # نحفظ في ملف مؤقت أولاً
+        temp_file = HISTORY_FILE + ".tmp"
+
+        with open(temp_file, "w", encoding="utf-8") as file:
+
+            json.dump(
+                history,
+                file,
+                ensure_ascii=False,
+                indent=2
+            )
+
+        # استبدال الملف القديم
+        os.replace(temp_file, HISTORY_FILE)
+
+    except Exception as e:
+
+        print("History Save Error:", e)
+
+
+# =========================
+# FIRST PRICE OF DAY
+# =========================
+
+def get_today_first_price():
+
+    history = load_history()
+
+    today = today_date()
+
+    return history.get(today)
+
+
+def get_yesterday_first_price():
+
+    history = load_history()
+
+    yesterday = yesterday_date()
+
+    return history.get(yesterday)
+
+
+def save_first_price_of_today(price):
+
+    history = load_history()
+
+    today = today_date()
+
+    # مهم جداً:
+    # لو فيه سعر مسجل النهارده، ممنوع نغيره
+    if today in history:
+
+        return False
+
+    history[today] = round(price)
+
+    save_history(history)
+
+    print(
+        f"First price saved for {today}: {round(price)}"
     )
 
-    if yesterday_price is None:
-        return None
-
-    difference = price21 - yesterday_price
-
-    if difference > 0:
-        return f"📈 مقارنة بأول سعر أمس:\nعيار 21 ↑ {difference} جنيه"
-
-    elif difference < 0:
-        return f"📉 مقارنة بأول سعر أمس:\nعيار 21 ↓ {abs(difference)} جنيه"
-
-    else:
-        return "➖ مقارنة بأول سعر أمس:\nعيار 21 ثابت بدون تغيير"
+    return True
 
 
 # =========================
-# إنشاء المنشور
+# COMPARISON
+# =========================
+
+def create_comparison_line(current_price):
+
+    yesterday_price = get_yesterday_first_price()
+
+    if yesterday_price is None:
+
+        return None
+
+    difference = round(current_price - yesterday_price)
+
+    if difference > 0:
+
+        return (
+            f"📈 عيار 21 ارتفع {difference} جنيه "
+            f"عن أول سعر أمس"
+        )
+
+    elif difference < 0:
+
+        return (
+            f"📉 عيار 21 انخفض {abs(difference)} جنيه "
+            f"عن أول سعر أمس"
+        )
+
+    else:
+
+        return "➖ عيار 21 مستقر عن أول سعر أمس"
+
+
+# =========================
+# PRICE TEXT
 # =========================
 
 def create_price_text(p24, p21, p18, comparison=None):
 
-    text = ""
+    lines = []
 
+    # المقارنة لازم تكون أول سطر
     if comparison:
-        text += comparison + "\n\n"
 
-    text += f"""💎 أسعار الذهب الآن
+        lines.append(comparison)
+        lines.append("")
 
-🟡 عيار 24 : {p24} جنيه
-🟡 عيار 21 : {p21} جنيه
-🟡 عيار 18 : {p18} جنيه
+    lines.append("💎 أسعار الذهب الآن")
+    lines.append("")
+    lines.append(f"🟡 عيار 24 : {p24}")
+    lines.append(f"🟡 عيار 21 : {p21}")
+    lines.append(f"🟡 عيار 18 : {p18}")
+    lines.append("")
+    lines.append("📍 بورسعيد - شارع أسوان أمام صيدلية جلال")
+    lines.append(WEBSITE_LINK)
 
-✨ أسعار محدثة باستمرار
-
-📍 بورسعيد – شارع أسوان
-أمام صيدلية جلال
-
-📩 للاستفسار والطلب تواصل معنا
-
-https://link.gettap.co/alhussienyjewelry"""
-
-    return text
+    return "\n".join(lines)
 
 
 # =========================
-# Start
+# START
 # =========================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -173,41 +236,36 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================
-# استقبال السعر
+# RECEIVE PRICE
 # =========================
 
 async def receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
 
-        price = float(
-            update.message.text.replace(",", "").strip()
-        )
-
-        if price <= 0:
-            raise ValueError
+        price = float(update.message.text)
 
     except ValueError:
 
         await update.message.reply_text(
-            "❌ أرسل سعر عيار 21 صحيح.\n\n"
-            "مثال:\n6100"
+            "❌ أرسل رقم صحيح."
         )
 
         return
 
     p24, p21, p18 = calc(price)
 
-    today = date.today().isoformat()
+    # نشوف هل ده أول سعر النهارده
+    today_first_price = get_today_first_price()
 
-    # هل تم نشر أول سعر اليوم بالفعل؟
-    first_price_today = get_first_price_of_day(today)
+    is_first_post_today = today_first_price is None
 
     comparison = None
 
-    if first_price_today is None:
+    # المقارنة تظهر فقط في أول بوست في اليوم
+    if is_first_post_today:
 
-        comparison = get_comparison(p21)
+        comparison = create_comparison_line(price)
 
     text = create_price_text(
         p24,
@@ -216,12 +274,10 @@ async def receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
         comparison
     )
 
-    # نحفظ المنشور مؤقتًا
+    # نحفظ البيانات مؤقتاً
     context.user_data["price_text"] = text
-    context.user_data["price21"] = p21
-    context.user_data["is_first_today"] = (
-        first_price_today is None
-    )
+    context.user_data["price"] = round(price)
+    context.user_data["is_first_post_today"] = is_first_post_today
 
     keyboard = [
 
@@ -255,21 +311,17 @@ async def receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     ]
 
-    reply_markup = InlineKeyboardMarkup(
-        keyboard
-    )
+    reply_markup = InlineKeyboardMarkup(keyboard)
 
     await update.message.reply_text(
-        "📋 معاينة المنشور:\n\n"
-        + text
-        + "\n\n"
-        "📢 اختر مكان النشر:",
+        f"السعر: {round(price)}\n\n"
+        "📢 عايز تنشر الأسعار فين؟",
         reply_markup=reply_markup
     )
 
 
 # =========================
-# Facebook
+# FACEBOOK
 # =========================
 
 async def facebook_post(text):
@@ -294,6 +346,8 @@ async def facebook_post(text):
 
         if response.status_code == 200:
 
+            print("Facebook: SUCCESS")
+
             return True
 
         print(
@@ -306,7 +360,7 @@ async def facebook_post(text):
     except Exception as e:
 
         print(
-            "Facebook Connection Error:",
+            "Facebook Request Error:",
             e
         )
 
@@ -314,7 +368,34 @@ async def facebook_post(text):
 
 
 # =========================
-# أزرار النشر
+# TELEGRAM
+# =========================
+
+async def telegram_post(context, text):
+
+    try:
+
+        await context.bot.send_message(
+            chat_id=CHANNEL_ID,
+            text=text
+        )
+
+        print("Telegram: SUCCESS")
+
+        return True
+
+    except Exception as e:
+
+        print(
+            "Telegram Error:",
+            e
+        )
+
+        return False
+
+
+# =========================
+# BUTTON HANDLER
 # =========================
 
 async def button_handler(
@@ -328,7 +409,10 @@ async def button_handler(
 
     choice = query.data
 
-    # إلغاء
+    # -------------------------
+    # CANCEL
+    # -------------------------
+
     if choice == "cancel":
 
         context.user_data.pop(
@@ -337,12 +421,12 @@ async def button_handler(
         )
 
         context.user_data.pop(
-            "price21",
+            "price",
             None
         )
 
         context.user_data.pop(
-            "is_first_today",
+            "is_first_post_today",
             None
         )
 
@@ -352,24 +436,27 @@ async def button_handler(
 
         return
 
+    # -------------------------
+    # GET DATA
+    # -------------------------
+
     text = context.user_data.get(
         "price_text"
     )
 
-    price21 = context.user_data.get(
-        "price21"
+    price = context.user_data.get(
+        "price"
     )
 
-    is_first_today = context.user_data.get(
-        "is_first_today",
+    is_first_post_today = context.user_data.get(
+        "is_first_post_today",
         False
     )
 
-    if not text or price21 is None:
+    if not text or price is None:
 
         await query.edit_message_text(
-            "❌ انتهت صلاحية السعر.\n"
-            "ابعت السعر من جديد."
+            "❌ السعر انتهى. ابعت السعر من جديد."
         )
 
         return
@@ -377,57 +464,35 @@ async def button_handler(
     telegram_success = False
     facebook_success = False
 
-    # =====================
-    # Telegram + Facebook
-    # =====================
+    # =========================
+    # TELEGRAM + FACEBOOK
+    # =========================
 
     if choice == "telegram_facebook":
 
-        try:
-
-            await context.bot.send_message(
-                chat_id=CHANNEL_ID,
-                text=text
-            )
-
-            telegram_success = True
-
-        except Exception as e:
-
-            print(
-                "Telegram Error:",
-                e
-            )
+        telegram_success = await telegram_post(
+            context,
+            text
+        )
 
         facebook_success = await facebook_post(
             text
         )
 
-    # =====================
-    # Telegram فقط
-    # =====================
+    # =========================
+    # TELEGRAM ONLY
+    # =========================
 
     elif choice == "telegram_only":
 
-        try:
+        telegram_success = await telegram_post(
+            context,
+            text
+        )
 
-            await context.bot.send_message(
-                chat_id=CHANNEL_ID,
-                text=text
-            )
-
-            telegram_success = True
-
-        except Exception as e:
-
-            print(
-                "Telegram Error:",
-                e
-            )
-
-    # =====================
-    # Facebook فقط
-    # =====================
+    # =========================
+    # FACEBOOK ONLY
+    # =========================
 
     elif choice == "facebook_only":
 
@@ -435,36 +500,37 @@ async def button_handler(
             text
         )
 
-    # =====================
-    # حفظ أول سعر في اليوم
-    # =====================
+    # =========================
+    # IMPORTANT
+    # SAVE FIRST PRICE
+    # =========================
 
-    # نسجل السعر فقط إذا كان هذا أول منشور اليوم
-    # وتم النشر بنجاح على منصة واحدة على الأقل
+    # السعر يتحفظ فقط إذا حصل نشر ناجح
+    # وممنوع يتغير بعد كده خلال نفس اليوم
+
+    successful_post = (
+        telegram_success or facebook_success
+    )
 
     if (
-        is_first_today
-        and (
-            telegram_success
-            or facebook_success
-        )
+        successful_post
+        and is_first_post_today
     ):
 
-        save_first_price_of_day(
-            price21
+        save_first_price_of_today(
+            price
         )
 
-    # =====================
-    # رسالة النتيجة
-    # =====================
+    # =========================
+    # RESULT
+    # =========================
 
     if choice == "telegram_facebook":
 
         if telegram_success and facebook_success:
 
             result = (
-                "✅ تم النشر في "
-                "تليجرام وفيسبوك."
+                "✅ تم النشر في تليجرام وفيسبوك."
             )
 
         elif telegram_success:
@@ -484,8 +550,7 @@ async def button_handler(
         else:
 
             result = (
-                "❌ حصل خطأ في النشر "
-                "على الاثنين."
+                "❌ حصل خطأ في النشر على الاثنين."
             )
 
     elif choice == "telegram_only":
@@ -499,8 +564,7 @@ async def button_handler(
         else:
 
             result = (
-                "❌ حصل خطأ في النشر "
-                "في تليجرام."
+                "❌ حصل خطأ في النشر في تليجرام."
             )
 
     elif choice == "facebook_only":
@@ -514,15 +578,20 @@ async def button_handler(
         else:
 
             result = (
-                "❌ حصل خطأ في النشر "
-                "في فيسبوك."
+                "❌ حصل خطأ في النشر فيسبوك."
             )
+
+    else:
+
+        result = "❌ اختيار غير معروف."
 
     await query.edit_message_text(
         result
     )
 
-    # تنظيف البيانات المؤقتة
+    # =========================
+    # CLEAR TEMP DATA
+    # =========================
 
     context.user_data.pop(
         "price_text",
@@ -530,23 +599,21 @@ async def button_handler(
     )
 
     context.user_data.pop(
-        "price21",
+        "price",
         None
     )
 
     context.user_data.pop(
-        "is_first_today",
+        "is_first_post_today",
         None
     )
 
 
 # =========================
-# Main
+# MAIN
 # =========================
 
 def main():
-
-    init_db()
 
     app = (
         Application
@@ -564,8 +631,7 @@ def main():
 
     app.add_handler(
         MessageHandler(
-            filters.TEXT
-            & ~filters.COMMAND,
+            filters.TEXT & ~filters.COMMAND,
             receive
         )
     )
@@ -576,9 +642,7 @@ def main():
         )
     )
 
-    print(
-        "Bot Started..."
-    )
+    print("Bot Started...")
 
     app.run_polling()
 
