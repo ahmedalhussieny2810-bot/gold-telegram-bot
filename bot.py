@@ -57,16 +57,13 @@ DATABASE_URL = os.getenv(
 ).strip()
 
 try:
-
     ADMIN_ID = int(
         os.getenv(
             "ADMIN_ID",
             "0"
         ).strip()
     )
-
 except ValueError:
-
     ADMIN_ID = 0
 
 
@@ -126,13 +123,11 @@ def check_environment():
     print("================================")
 
     if not BOT_TOKEN:
-
         raise Exception(
             "BOT_TOKEN is missing"
         )
 
     if ADMIN_ID == 0:
-
         raise Exception(
             "ADMIN_ID is missing or invalid"
         )
@@ -142,50 +137,40 @@ def check_environment():
     )
 
     if DATABASE_URL:
-
         print(
             "DATABASE_URL = FOUND"
         )
-
     else:
-
         print(
             "DATABASE_URL = MISSING"
         )
 
     if FACEBOOK_PAGE_ID:
-
         print(
             "FACEBOOK_PAGE_ID = FOUND"
         )
-
     else:
-
         print(
             "FACEBOOK_PAGE_ID = MISSING"
         )
 
     if FACEBOOK_PAGE_ACCESS_TOKEN:
-
         print(
             "FACEBOOK_PAGE_TOKEN = FOUND"
         )
-
     else:
-
         print(
             "FACEBOOK_PAGE_TOKEN = MISSING"
         )
 
 
 # =========================================================
-# DATABASE
+# DATABASE CONNECTION
 # =========================================================
 
 def get_db_connection():
 
     if not DATABASE_URL:
-
         raise Exception(
             "DATABASE_URL is missing"
         )
@@ -206,6 +191,10 @@ def get_db_connection():
     )
 
 
+# =========================================================
+# DATABASE INIT
+# =========================================================
+
 def init_database():
 
     try:
@@ -216,16 +205,85 @@ def init_database():
 
         with connection.cursor() as cursor:
 
+            # PRODUCTS
             cursor.execute(
                 """
                 CREATE TABLE IF NOT EXISTS Products (
                     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
                     category VARCHAR(255) NOT NULL,
                     Photo_id TEXT NOT NULL,
+                    created_at DATETIME NULL,
                     PRIMARY KEY (id)
                 )
                 """
             )
+
+            # CATEGORIES
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS Categories (
+                    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                    name VARCHAR(255) NOT NULL,
+                    created_at DATETIME NULL,
+                    PRIMARY KEY (id),
+                    UNIQUE KEY unique_category_name (name)
+                )
+                """
+            )
+
+            # USERS
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS Users (
+                    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                    telegram_id BIGINT NOT NULL,
+                    username VARCHAR(255) NULL,
+                    first_name VARCHAR(255) NULL,
+                    last_name VARCHAR(255) NULL,
+                    started_at DATETIME NULL,
+                    last_seen DATETIME NULL,
+                    PRIMARY KEY (id),
+                    UNIQUE KEY unique_telegram_id (telegram_id)
+                )
+                """
+            )
+
+            # MIGRATE OLD CATEGORIES
+            cursor.execute(
+                """
+                SELECT DISTINCT category
+                FROM Products
+                WHERE category IS NOT NULL
+                AND TRIM(category) != ''
+                """
+            )
+
+            old_categories = cursor.fetchall()
+
+            for row in old_categories:
+
+                try:
+
+                    cursor.execute(
+                        """
+                        INSERT IGNORE INTO Categories
+                        (name, created_at)
+                        VALUES (%s, %s)
+                        """,
+                        (
+                            row["category"],
+                            datetime.now(
+                                TIMEZONE
+                            ),
+                        ),
+                    )
+
+                except Exception as e:
+
+                    print(
+                        "Category Migration Error:",
+                        e,
+                    )
 
         connection.close()
 
@@ -239,6 +297,98 @@ def init_database():
             "Database Initialization Error:",
             e,
         )
+
+
+# =========================================================
+# USERS
+# =========================================================
+
+def register_user(
+    user,
+):
+
+    if not user:
+        return
+
+    connection = (
+        get_db_connection()
+    )
+
+    try:
+
+        now = datetime.now(
+            TIMEZONE
+        ).replace(
+            tzinfo=None
+        )
+
+        with connection.cursor() as cursor:
+
+            cursor.execute(
+                """
+                INSERT INTO Users
+                (
+                    telegram_id,
+                    username,
+                    first_name,
+                    last_name,
+                    started_at,
+                    last_seen
+                )
+                VALUES
+                (
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s
+                )
+                ON DUPLICATE KEY UPDATE
+                    username = VALUES(username),
+                    first_name = VALUES(first_name),
+                    last_name = VALUES(last_name),
+                    last_seen = VALUES(last_seen)
+                """,
+                (
+                    user.id,
+                    user.username,
+                    user.first_name,
+                    user.last_name,
+                    now,
+                    now,
+                ),
+            )
+
+    finally:
+
+        connection.close()
+
+
+def get_users_count():
+
+    connection = (
+        get_db_connection()
+    )
+
+    try:
+
+        with connection.cursor() as cursor:
+
+            cursor.execute(
+                """
+                SELECT COUNT(*) AS total
+                FROM Users
+                """
+            )
+
+            row = cursor.fetchone()
+
+            return row["total"]
+
+    finally:
+
+        connection.close()
 
 
 # =========================================================
@@ -256,17 +406,46 @@ def add_product(
 
     try:
 
+        now = datetime.now(
+            TIMEZONE
+        ).replace(
+            tzinfo=None
+        )
+
         with connection.cursor() as cursor:
 
+            # Ensure category exists
             cursor.execute(
                 """
-                INSERT INTO Products
-                (category, Photo_id)
+                INSERT IGNORE INTO Categories
+                (name, created_at)
                 VALUES (%s, %s)
                 """,
                 (
                     category,
+                    now,
+                ),
+            )
+
+            cursor.execute(
+                """
+                INSERT INTO Products
+                (
+                    category,
+                    Photo_id,
+                    created_at
+                )
+                VALUES
+                (
+                    %s,
+                    %s,
+                    %s
+                )
+                """,
+                (
+                    category,
                     photo_id,
+                    now,
                 ),
             )
 
@@ -289,10 +468,15 @@ def get_products(
 
             cursor.execute(
                 """
-                SELECT id, category, Photo_id
+                SELECT
+                    id,
+                    category,
+                    Photo_id,
+                    created_at
                 FROM Products
                 WHERE LOWER(TRIM(category))
-                = LOWER(TRIM(%s))
+                =
+                LOWER(TRIM(%s))
                 ORDER BY id DESC
                 """,
                 (
@@ -319,13 +503,43 @@ def get_all_products():
 
             cursor.execute(
                 """
-                SELECT id, category, Photo_id
+                SELECT
+                    id,
+                    category,
+                    Photo_id,
+                    created_at
                 FROM Products
                 ORDER BY id DESC
                 """
             )
 
             return cursor.fetchall()
+
+    finally:
+
+        connection.close()
+
+
+def get_products_count():
+
+    connection = (
+        get_db_connection()
+    )
+
+    try:
+
+        with connection.cursor() as cursor:
+
+            cursor.execute(
+                """
+                SELECT COUNT(*) AS total
+                FROM Products
+                """
+            )
+
+            row = cursor.fetchone()
+
+            return row["total"]
 
     finally:
 
@@ -361,6 +575,10 @@ def delete_product(
         connection.close()
 
 
+# =========================================================
+# CATEGORIES
+# =========================================================
+
 def get_categories():
 
     connection = (
@@ -373,16 +591,71 @@ def get_categories():
 
             cursor.execute(
                 """
-                SELECT DISTINCT category
-                FROM Products
-                ORDER BY category
+                SELECT
+                    id,
+                    name
+                FROM Categories
+                ORDER BY name
                 """
             )
 
-            return [
-                row["category"]
-                for row in cursor.fetchall()
-            ]
+            return cursor.fetchall()
+
+    finally:
+
+        connection.close()
+
+
+def get_categories_count():
+
+    connection = (
+        get_db_connection()
+    )
+
+    try:
+
+        with connection.cursor() as cursor:
+
+            cursor.execute(
+                """
+                SELECT COUNT(*) AS total
+                FROM Categories
+                """
+            )
+
+            row = cursor.fetchone()
+
+            return row["total"]
+
+    finally:
+
+        connection.close()
+
+
+def get_category_by_id(
+    category_id,
+):
+
+    connection = (
+        get_db_connection()
+    )
+
+    try:
+
+        with connection.cursor() as cursor:
+
+            cursor.execute(
+                """
+                SELECT id, name
+                FROM Categories
+                WHERE id = %s
+                """,
+                (
+                    category_id,
+                ),
+            )
+
+            return cursor.fetchone()
 
     finally:
 
@@ -404,9 +677,10 @@ def category_exists(
             cursor.execute(
                 """
                 SELECT COUNT(*) AS total
-                FROM Products
-                WHERE LOWER(TRIM(category))
-                = LOWER(TRIM(%s))
+                FROM Categories
+                WHERE LOWER(TRIM(name))
+                =
+                LOWER(TRIM(%s))
                 """,
                 (
                     category,
@@ -422,40 +696,7 @@ def category_exists(
         connection.close()
 
 
-def rename_category(
-    old_category,
-    new_category,
-):
-
-    connection = (
-        get_db_connection()
-    )
-
-    try:
-
-        with connection.cursor() as cursor:
-
-            cursor.execute(
-                """
-                UPDATE Products
-                SET category = %s
-                WHERE LOWER(TRIM(category))
-                = LOWER(TRIM(%s))
-                """,
-                (
-                    new_category,
-                    old_category,
-                ),
-            )
-
-            return cursor.rowcount
-
-    finally:
-
-        connection.close()
-
-
-def delete_category(
+def add_category(
     category,
 ):
 
@@ -465,17 +706,143 @@ def delete_category(
 
     try:
 
+        now = datetime.now(
+            TIMEZONE
+        ).replace(
+            tzinfo=None
+        )
+
         with connection.cursor() as cursor:
+
+            cursor.execute(
+                """
+                INSERT INTO Categories
+                (name, created_at)
+                VALUES (%s, %s)
+                """,
+                (
+                    category,
+                    now,
+                ),
+            )
+
+            return True
+
+    except pymysql.IntegrityError:
+
+        return False
+
+    finally:
+
+        connection.close()
+
+
+def rename_category(
+    category_id,
+    new_name,
+):
+
+    connection = (
+        get_db_connection()
+    )
+
+    try:
+
+        with connection.cursor() as cursor:
+
+            cursor.execute(
+                """
+                SELECT name
+                FROM Categories
+                WHERE id = %s
+                """,
+                (
+                    category_id,
+                ),
+            )
+
+            row = cursor.fetchone()
+
+            if not row:
+                return False
+
+            old_name = row["name"]
+
+            cursor.execute(
+                """
+                UPDATE Categories
+                SET name = %s
+                WHERE id = %s
+                """,
+                (
+                    new_name,
+                    category_id,
+                ),
+            )
+
+            cursor.execute(
+                """
+                UPDATE Products
+                SET category = %s
+                WHERE LOWER(TRIM(category))
+                =
+                LOWER(TRIM(%s))
+                """,
+                (
+                    new_name,
+                    old_name,
+                ),
+            )
+
+            return True
+
+    except pymysql.IntegrityError:
+
+        return False
+
+    finally:
+
+        connection.close()
+
+
+def delete_category(
+    category_id,
+):
+
+    connection = (
+        get_db_connection()
+    )
+
+    try:
+
+        with connection.cursor() as cursor:
+
+            cursor.execute(
+                """
+                SELECT name
+                FROM Categories
+                WHERE id = %s
+                """,
+                (
+                    category_id,
+                ),
+            )
+
+            category = cursor.fetchone()
+
+            if not category:
+                return "not_found"
 
             cursor.execute(
                 """
                 SELECT COUNT(*) AS total
                 FROM Products
                 WHERE LOWER(TRIM(category))
-                = LOWER(TRIM(%s))
+                =
+                LOWER(TRIM(%s))
                 """,
                 (
-                    category,
+                    category["name"],
                 ),
             )
 
@@ -483,9 +850,19 @@ def delete_category(
 
             if row["total"] > 0:
 
-                return False
+                return "has_products"
 
-            return True
+            cursor.execute(
+                """
+                DELETE FROM Categories
+                WHERE id = %s
+                """,
+                (
+                    category_id,
+                ),
+            )
+
+            return "deleted"
 
     finally:
 
@@ -493,10 +870,38 @@ def delete_category(
 
 
 # =========================================================
+# CATEGORY LOOKUP FOR PUBLIC MENU
+# =========================================================
+
+def get_category_from_callback(
+    callback_data,
+):
+
+    try:
+
+        category_id = int(
+            callback_data.split(
+                ":",
+                1
+            )[1]
+        )
+
+    except Exception:
+
+        return None
+
+    return get_category_by_id(
+        category_id
+    )
+
+
+# =========================================================
 # GOLD CALCULATION
 # =========================================================
 
-def calc(price):
+def calc(
+    price,
+):
 
     price21 = round(
         price
@@ -619,9 +1024,7 @@ def save_history(
 
 def get_today_first_price():
 
-    history = (
-        load_history()
-    )
+    history = load_history()
 
     return history.get(
         today_date()
@@ -630,9 +1033,7 @@ def get_today_first_price():
 
 def get_yesterday_first_price():
 
-    history = (
-        load_history()
-    )
+    history = load_history()
 
     return history.get(
         yesterday_date()
@@ -643,9 +1044,7 @@ def save_first_price_of_today(
     price,
 ):
 
-    history = (
-        load_history()
-    )
+    history = load_history()
 
     today = today_date()
 
@@ -901,7 +1300,6 @@ def main_menu(
                 callback_data="products",
             )
         ],
-
     ]
 
     if admin:
@@ -970,13 +1368,20 @@ def main_menu(
 
 
 # =========================================================
-# ADMIN PANEL
+# ADMIN DASHBOARD
 # =========================================================
 
 def admin_panel_keyboard():
 
     return InlineKeyboardMarkup(
         [
+
+            [
+                InlineKeyboardButton(
+                    "📊 الإحصائيات",
+                    callback_data="admin_stats",
+                )
+            ],
 
             [
                 InlineKeyboardButton(
@@ -1150,10 +1555,22 @@ async def start(
 ):
 
     if not update.message:
-
         return
 
     context.user_data.clear()
+
+    try:
+
+        register_user(
+            update.effective_user
+        )
+
+    except Exception as e:
+
+        print(
+            "Register User Error:",
+            e,
+        )
 
     text = (
         "💎 مجوهرات الحسيني\n\n"
@@ -1182,14 +1599,9 @@ async def show_id(
 ):
 
     if not update.message:
-
         return
 
-    user_id = (
-        update.effective_user.id
-    )
-
-    if user_id != ADMIN_ID:
+    if not is_admin(update):
 
         await update.message.reply_text(
             "❌ الأمر ده متاح للأدمن فقط."
@@ -1212,7 +1624,6 @@ def is_admin(
 ):
 
     if not update.effective_user:
-
         return False
 
     return (
@@ -1231,12 +1642,9 @@ async def receive_photo(
 ):
 
     if not update.message:
-
         return
 
-    if not is_admin(
-        update
-    ):
+    if not is_admin(update):
 
         await update.message.reply_text(
             "❌ غير مسموح لك بإضافة منتجات."
@@ -1245,24 +1653,20 @@ async def receive_photo(
         return
 
     if not update.message.photo:
-
         return
 
+    action = context.user_data.get(
+        "admin_action"
+    )
+
     # =====================================================
-    # ADD PRODUCT FROM ADMIN PANEL
+    # ADD PRODUCT
     # =====================================================
 
-    if (
-        context.user_data.get(
-            "admin_action"
-        )
-        == "awaiting_product_photo"
-    ):
+    if action == "awaiting_product_photo":
 
-        category = (
-            context.user_data.get(
-                "product_category"
-            )
+        category = context.user_data.get(
+            "product_category"
         )
 
         if not category:
@@ -1271,8 +1675,8 @@ async def receive_photo(
 
             await update.message.reply_text(
                 "❌ حصل خطأ.\n"
-                "ابدأ إضافة المنتج من لوحة التحكم من جديد.",
-                reply_markup=admin_panel_keyboard(),
+                "ابدأ من لوحة التحكم من جديد.",
+                reply_markup=admin_products_keyboard(),
             )
 
             return
@@ -1281,15 +1685,11 @@ async def receive_photo(
             update.message.photo[-1]
         )
 
-        photo_id = (
-            photo.file_id
-        )
-
         try:
 
             add_product(
                 category,
-                photo_id,
+                photo.file_id,
             )
 
             context.user_data.clear()
@@ -1303,7 +1703,7 @@ async def receive_photo(
         except Exception as e:
 
             print(
-                "Admin Add Product Error:",
+                "Add Product Error:",
                 e,
             )
 
@@ -1317,15 +1717,11 @@ async def receive_photo(
         return
 
     # =====================================================
-    # OLD PRODUCT ADD METHOD
+    # OLD METHOD
     # =====================================================
 
     photo = (
         update.message.photo[-1]
-    )
-
-    photo_id = (
-        photo.file_id
     )
 
     category = (
@@ -1347,11 +1743,11 @@ async def receive_photo(
 
         add_product(
             category,
-            photo_id,
+            photo.file_id,
         )
 
         await update.message.reply_text(
-            f"✅ تم حفظ المنتج.\n\n"
+            "✅ تم حفظ المنتج.\n\n"
             f"📂 القسم: {category}"
         )
 
@@ -1368,7 +1764,7 @@ async def receive_photo(
 
 
 # =========================================================
-# SHOW PRODUCTS MENU
+# PUBLIC PRODUCTS MENU
 # =========================================================
 
 async def show_products_menu(
@@ -1408,7 +1804,7 @@ async def show_products_menu(
 
         await query.edit_message_text(
             "💎 المنتجات\n\n"
-            "لا توجد منتجات مضافة حالياً.",
+            "لا توجد منتجات مضافة حاليًا.",
             reply_markup=InlineKeyboardMarkup(
                 [
                     [
@@ -1427,17 +1823,13 @@ async def show_products_menu(
 
     for category in categories:
 
-        safe_category = (
-            category[:50]
-        )
-
         keyboard.append(
             [
                 InlineKeyboardButton(
-                    f"💎 {category}",
+                    f"💎 {category['name']}",
                     callback_data=(
                         "category:"
-                        + safe_category
+                        + str(category["id"])
                     ),
                 )
             ]
@@ -1472,10 +1864,8 @@ async def send_products(
 
     try:
 
-        products = (
-            get_products(
-                category
-            )
+        products = get_products(
+            category["name"]
         )
 
     except Exception as e:
@@ -1493,15 +1883,25 @@ async def send_products(
 
     if not products:
 
-        await query.message.reply_text(
-            f"❌ مفيش منتجات في قسم:\n"
-            f"{category}"
+        await query.edit_message_text(
+            f"📂 {category['name']}\n\n"
+            "لا توجد منتجات في هذا القسم.",
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "⬅️ المنتجات",
+                            callback_data="products",
+                        )
+                    ]
+                ]
+            ),
         )
 
         return
 
     await query.message.reply_text(
-        f"💎 منتجات قسم {category}\n"
+        f"💎 منتجات قسم {category['name']}\n"
         f"عدد الصور: {len(products)}"
     )
 
@@ -1510,9 +1910,7 @@ async def send_products(
         try:
 
             await query.message.reply_photo(
-                photo=product[
-                    "Photo_id"
-                ]
+                photo=product["Photo_id"]
             )
 
         except Exception as e:
@@ -1533,7 +1931,6 @@ async def receive(
 ):
 
     if not update.message:
-
         return
 
     user_id = (
@@ -1552,23 +1949,31 @@ async def receive(
     )
 
     # =====================================================
-    # ADMIN STATE
+    # REGISTER USER
     # =====================================================
 
-    admin_action = (
-        context.user_data.get(
-            "admin_action"
+    try:
+
+        register_user(
+            update.effective_user
         )
+
+    except Exception as e:
+
+        print(
+            "Register User Error:",
+            e,
+        )
+
+    admin_action = context.user_data.get(
+        "admin_action"
     )
 
     # =====================================================
-    # ADMIN UPDATE GOLD PRICE
+    # ADMIN UPDATE GOLD
     # =====================================================
 
-    if (
-        admin_action
-        == "awaiting_gold_price"
-    ):
+    if admin_action == "awaiting_gold_price":
 
         if user_id != ADMIN_ID:
 
@@ -1582,12 +1987,9 @@ async def receive(
 
         try:
 
-            price = float(
-                text
-            )
+            price = float(text)
 
             if price <= 0:
-
                 raise ValueError
 
         except ValueError:
@@ -1609,11 +2011,7 @@ async def receive(
             price
         )
 
-        today_first_price = (
-            get_today_first_price()
-        )
-
-        if today_first_price is None:
+        if get_today_first_price() is None:
 
             save_first_price_of_today(
                 price
@@ -1626,7 +2024,7 @@ async def receive(
             f"🟡 عيار 24: {p24} جنيه\n"
             f"🟡 عيار 21: {p21} جنيه\n"
             f"🟡 عيار 18: {p18} جنيه\n\n"
-            "تقدر دلوقتي تنشر السعر من زر 📢 نشر السعر.",
+            "تقدر دلوقتي تنشر السعر.",
             reply_markup=admin_gold_keyboard(),
         )
 
@@ -1636,10 +2034,7 @@ async def receive(
     # ADMIN ADD CATEGORY
     # =====================================================
 
-    if (
-        admin_action
-        == "awaiting_category_name"
-    ):
+    if admin_action == "awaiting_category_name":
 
         if user_id != ADMIN_ID:
 
@@ -1661,9 +2056,7 @@ async def receive(
 
             return
 
-        if category_exists(
-            category
-        ):
+        if category_exists(category):
 
             context.user_data.clear()
 
@@ -1674,40 +2067,33 @@ async def receive(
 
             return
 
-        # =================================================
-        # CATEGORY TABLE IS NOT NEEDED.
-        # We create a category by inserting a placeholder
-        # only temporarily, then remove it.
-        #
-        # Instead, categories are naturally created when
-        # the first product is added.
-        # =================================================
+        if add_category(category):
 
-        context.user_data[
-            "new_category"
-        ] = category
+            context.user_data.clear()
 
-        context.user_data[
-            "admin_action"
-        ] = "awaiting_category_product"
+            await update.message.reply_text(
+                "✅ تم إنشاء القسم بنجاح.\n\n"
+                f"📂 {category}\n\n"
+                "تقدر دلوقتي تضيف منتجات بداخله.",
+                reply_markup=admin_categories_keyboard(),
+            )
 
-        await update.message.reply_text(
-            "✅ اسم القسم:\n"
-            f"{category}\n\n"
-            "📸 ابعت أول صورة للمنتج في القسم.\n\n"
-            "القسم هيظهر تلقائيًا بعد حفظ المنتج."
-        )
+        else:
+
+            context.user_data.clear()
+
+            await update.message.reply_text(
+                "❌ حصل خطأ أو القسم موجود بالفعل.",
+                reply_markup=admin_categories_keyboard(),
+            )
 
         return
 
     # =====================================================
-    # ADMIN ADD PRODUCT AFTER NEW CATEGORY
+    # ADMIN ADD PRODUCT - CATEGORY
     # =====================================================
 
-    if (
-        admin_action
-        == "awaiting_product_category"
-    ):
+    if admin_action == "awaiting_product_category":
 
         if user_id != ADMIN_ID:
 
@@ -1725,6 +2111,15 @@ async def receive(
 
             await update.message.reply_text(
                 "❌ اكتب اسم القسم."
+            )
+
+            return
+
+        if not category_exists(category):
+
+            await update.message.reply_text(
+                "❌ القسم غير موجود.\n\n"
+                "اكتب اسم قسم موجود أو أضفه من إدارة الأقسام."
             )
 
             return
@@ -1746,28 +2141,10 @@ async def receive(
         return
 
     # =====================================================
-    # ADMIN ADD PRODUCT INTO NEW CATEGORY
-    # =====================================================
-
-    if (
-        admin_action
-        == "awaiting_category_product"
-    ):
-
-        await update.message.reply_text(
-            "📸 ابعت صورة المنتج، مش اسم القسم."
-        )
-
-        return
-
-    # =====================================================
     # ADMIN RENAME CATEGORY
     # =====================================================
 
-    if (
-        admin_action
-        == "awaiting_category_rename"
-    ):
+    if admin_action == "awaiting_category_rename":
 
         if user_id != ADMIN_ID:
 
@@ -1779,21 +2156,19 @@ async def receive(
 
             return
 
-        old_category = (
-            context.user_data.get(
-                "old_category"
-            )
+        category_id = context.user_data.get(
+            "rename_category_id"
         )
 
-        new_category = text.strip()
+        new_name = text.strip()
 
-        if not old_category:
+        if not category_id:
 
             context.user_data.clear()
 
             return
 
-        if not new_category:
+        if not new_name:
 
             await update.message.reply_text(
                 "❌ اكتب الاسم الجديد."
@@ -1801,21 +2176,38 @@ async def receive(
 
             return
 
+        if category_exists(new_name):
+
+            await update.message.reply_text(
+                "⚠️ الاسم ده مستخدم بالفعل.\n"
+                "اكتب اسم مختلف."
+            )
+
+            return
+
         try:
 
-            rename_category(
-                old_category,
-                new_category,
+            success = rename_category(
+                category_id,
+                new_name,
             )
 
             context.user_data.clear()
 
-            await update.message.reply_text(
-                "✅ تم تغيير اسم القسم.\n\n"
-                f"من: {old_category}\n"
-                f"إلى: {new_category}",
-                reply_markup=admin_categories_keyboard(),
-            )
+            if success:
+
+                await update.message.reply_text(
+                    "✅ تم تغيير اسم القسم بنجاح.\n\n"
+                    f"📂 الاسم الجديد: {new_name}",
+                    reply_markup=admin_categories_keyboard(),
+                )
+
+            else:
+
+                await update.message.reply_text(
+                    "❌ حصل خطأ أثناء تغيير الاسم.",
+                    reply_markup=admin_categories_keyboard(),
+                )
 
         except Exception as e:
 
@@ -1839,9 +2231,7 @@ async def receive(
 
     try:
 
-        price = float(
-            text
-        )
+        price = float(text)
 
         is_price = True
 
@@ -1851,7 +2241,7 @@ async def receive(
         price = None
 
     # =====================================================
-    # GOLD PRICE ADMIN - OLD METHOD
+    # OLD GOLD PRICE METHOD
     # =====================================================
 
     if is_price:
@@ -1869,12 +2259,8 @@ async def receive(
             price
         )
 
-        today_first_price = (
-            get_today_first_price()
-        )
-
         is_first_post_today = (
-            today_first_price
+            get_today_first_price()
             is None
         )
 
@@ -1888,13 +2274,11 @@ async def receive(
                 )
             )
 
-        price_text = (
-            create_price_text(
-                p24,
-                p21,
-                p18,
-                comparison,
-            )
+        price_text = create_price_text(
+            p24,
+            p21,
+            p18,
+            comparison,
         )
 
         context.user_data[
@@ -1903,9 +2287,7 @@ async def receive(
 
         context.user_data[
             "price"
-        ] = round(
-            price
-        )
+        ] = round(price)
 
         context.user_data[
             "is_first_post_today"
@@ -1916,27 +2298,21 @@ async def receive(
             [
                 InlineKeyboardButton(
                     "📱 تليجرام + فيسبوك",
-                    callback_data=(
-                        "telegram_facebook"
-                    ),
+                    callback_data="telegram_facebook",
                 )
             ],
 
             [
                 InlineKeyboardButton(
                     "📱 تليجرام فقط",
-                    callback_data=(
-                        "telegram_only"
-                    ),
+                    callback_data="telegram_only",
                 )
             ],
 
             [
                 InlineKeyboardButton(
                     "📘 فيسبوك فقط",
-                    callback_data=(
-                        "facebook_only"
-                    ),
+                    callback_data="facebook_only",
                 )
             ],
 
@@ -1946,7 +2322,6 @@ async def receive(
                     callback_data="cancel",
                 )
             ],
-
         ]
 
         await update.message.reply_text(
@@ -1960,69 +2335,31 @@ async def receive(
         return
 
     # =====================================================
-    # CATEGORY
+    # CATEGORY TEXT SEARCH
     # =====================================================
 
     try:
 
-        categories = (
-            get_categories()
-        )
+        categories = get_categories()
 
         found_category = None
 
         for category in categories:
 
             if (
-                category.strip().lower()
+                category["name"].strip().lower()
                 == text.strip().lower()
             ):
 
-                found_category = (
-                    category
-                )
-
+                found_category = category
                 break
 
         if found_category:
 
-            products = (
-                get_products(
-                    found_category
-                )
+            await send_products(
+                update,
+                found_category,
             )
-
-            if not products:
-
-                await update.message.reply_text(
-                    "❌ مفيش منتجات في القسم."
-                )
-
-                return
-
-            await update.message.reply_text(
-                f"💎 منتجات قسم "
-                f"{found_category}\n"
-                f"عدد الصور: "
-                f"{len(products)}"
-            )
-
-            for product in products:
-
-                try:
-
-                    await update.message.reply_photo(
-                        photo=product[
-                            "Photo_id"
-                        ]
-                    )
-
-                except Exception as e:
-
-                    print(
-                        "Send Photo Error:",
-                        e,
-                    )
 
             return
 
@@ -2152,6 +2489,108 @@ async def telegram_post(
 
 
 # =========================================================
+# ADMIN STATS
+# =========================================================
+
+async def show_admin_stats(
+    query,
+):
+
+    try:
+
+        users_count = get_users_count()
+
+        products_count = get_products_count()
+
+        categories_count = get_categories_count()
+
+        latest_price = get_latest_gold_price()
+
+        updated_at = get_latest_price_updated_at()
+
+    except Exception as e:
+
+        print(
+            "Stats Error:",
+            e,
+        )
+
+        await query.edit_message_text(
+            "❌ حصل خطأ أثناء تحميل الإحصائيات.",
+            reply_markup=admin_panel_keyboard(),
+        )
+
+        return
+
+    if latest_price is None:
+
+        gold_text = (
+            "لا يوجد سعر محفوظ"
+        )
+
+    else:
+
+        p24, p21, p18 = calc(
+            latest_price
+        )
+
+        gold_text = (
+            f"🟡 24: {p24}\n"
+            f"🟡 21: {p21}\n"
+            f"🟡 18: {p18}"
+        )
+
+    text = (
+        "📊 إحصائيات مجوهرات الحسيني\n\n"
+
+        f"👥 المستخدمين: "
+        f"{users_count}\n\n"
+
+        f"💍 المنتجات: "
+        f"{products_count}\n\n"
+
+        f"📂 الأقسام: "
+        f"{categories_count}\n\n"
+
+        "💰 آخر أسعار الذهب:\n"
+        f"{gold_text}\n\n"
+    )
+
+    if updated_at:
+
+        text += (
+            f"🕐 آخر تحديث:\n"
+            f"{updated_at}"
+        )
+
+    else:
+
+        text += (
+            "🕐 لم يتم تحديث السعر بعد."
+        )
+
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "🔄 تحديث",
+                        callback_data="admin_stats",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "⬅️ لوحة التحكم",
+                        callback_data="admin_panel",
+                    )
+                ],
+            ]
+        ),
+    )
+
+
+# =========================================================
 # BUTTON HANDLER
 # =========================================================
 
@@ -2211,8 +2650,29 @@ async def button_handler(
 
         await query.edit_message_text(
             "👑 لوحة تحكم مجوهرات الحسيني\n\n"
-            "اختار القسم اللي عايز تديره:",
+            "من هنا تقدر تدير البوت بالكامل 👇",
             reply_markup=admin_panel_keyboard(),
+        )
+
+        return
+
+    # =====================================================
+    # ADMIN STATS
+    # =====================================================
+
+    if choice == "admin_stats":
+
+        if not is_admin(update):
+
+            await query.answer(
+                "❌ غير مسموح.",
+                show_alert=True,
+            )
+
+            return
+
+        await show_admin_stats(
+            query
         )
 
         return
@@ -2305,7 +2765,7 @@ async def button_handler(
             "ابعت سعر عيار 21 الجديد فقط.\n\n"
             "مثال:\n"
             "7000\n\n"
-            "❌ للإلغاء اضغط /start",
+            "❌ للإلغاء اكتب /start",
         )
 
         return
@@ -2325,9 +2785,7 @@ async def button_handler(
 
             return
 
-        history = (
-            load_history()
-        )
+        history = load_history()
 
         if not history:
 
@@ -2348,7 +2806,7 @@ async def button_handler(
                 "",
             ]
 
-            for date, price in sorted_history[:20]:
+            for date, price in sorted_history[:30]:
 
                 lines.append(
                     f"📅 {date} — "
@@ -2414,13 +2872,11 @@ async def button_handler(
             )
         )
 
-        price_text = (
-            create_price_text(
-                p24,
-                p21,
-                p18,
-                comparison,
-            )
+        price_text = create_price_text(
+            p24,
+            p21,
+            p18,
+            comparison,
         )
 
         context.user_data[
@@ -2442,27 +2898,21 @@ async def button_handler(
             [
                 InlineKeyboardButton(
                     "📱 تليجرام + فيسبوك",
-                    callback_data=(
-                        "telegram_facebook"
-                    ),
+                    callback_data="telegram_facebook",
                 )
             ],
 
             [
                 InlineKeyboardButton(
                     "📱 تليجرام فقط",
-                    callback_data=(
-                        "telegram_only"
-                    ),
+                    callback_data="telegram_only",
                 )
             ],
 
             [
                 InlineKeyboardButton(
                     "📘 فيسبوك فقط",
-                    callback_data=(
-                        "facebook_only"
-                    ),
+                    callback_data="facebook_only",
                 )
             ],
 
@@ -2472,7 +2922,6 @@ async def button_handler(
                     callback_data="cancel",
                 )
             ],
-
         ]
 
         await query.edit_message_text(
@@ -2533,10 +2982,9 @@ async def button_handler(
 
         await query.edit_message_text(
             "➕ إضافة منتج\n\n"
-            "اكتب اسم القسم.\n\n"
+            "اكتب اسم القسم الموجود.\n\n"
             "مثال:\n"
-            "خواتم\n\n"
-            "بعدها هطلب منك صورة المنتج.",
+            "خواتم",
         )
 
         return
@@ -2565,7 +3013,7 @@ async def button_handler(
         except Exception as e:
 
             print(
-                "Admin View Products Error:",
+                "View Products Error:",
                 e,
             )
 
@@ -2600,19 +3048,15 @@ async def button_handler(
 
         if len(products) > 50:
 
-            lines.append(
-                ""
-            )
+            lines.append("")
 
             lines.append(
-                f"عرض أول 50 من "
-                f"{len(products)} منتج."
+                f"إجمالي المنتجات: "
+                f"{len(products)}"
             )
 
         await query.edit_message_text(
-            "\n".join(
-                lines
-            ),
+            "\n".join(lines),
             reply_markup=admin_products_keyboard(),
         )
 
@@ -2633,25 +3077,7 @@ async def button_handler(
 
             return
 
-        try:
-
-            products = (
-                get_all_products()
-            )
-
-        except Exception as e:
-
-            print(
-                "Admin Delete Product Error:",
-                e,
-            )
-
-            await query.edit_message_text(
-                "❌ حصل خطأ في قاعدة البيانات.",
-                reply_markup=admin_products_keyboard(),
-            )
-
-            return
+        products = get_all_products()
 
         if not products:
 
@@ -2691,7 +3117,7 @@ async def button_handler(
 
         await query.edit_message_text(
             "🗑 حذف منتج\n\n"
-            "اختار المنتج المراد حذفه:",
+            "اختار المنتج:",
             reply_markup=InlineKeyboardMarkup(
                 keyboard
             ),
@@ -2700,7 +3126,7 @@ async def button_handler(
         return
 
     # =====================================================
-    # DELETE PRODUCT CONFIRM
+    # DELETE PRODUCT SELECTED
     # =====================================================
 
     if choice.startswith(
@@ -2708,12 +3134,6 @@ async def button_handler(
     ):
 
         if not is_admin(update):
-
-            await query.answer(
-                "❌ غير مسموح.",
-                show_alert=True,
-            )
-
             return
 
         try:
@@ -2733,10 +3153,6 @@ async def button_handler(
             )
 
             return
-
-        context.user_data[
-            "delete_product_id"
-        ] = product_id
 
         await query.edit_message_text(
             "⚠️ تأكيد حذف المنتج\n\n"
@@ -2769,7 +3185,7 @@ async def button_handler(
         return
 
     # =====================================================
-    # CONFIRM DELETE PRODUCT
+    # CONFIRM DELETE
     # =====================================================
 
     if choice.startswith(
@@ -2777,12 +3193,6 @@ async def button_handler(
     ):
 
         if not is_admin(update):
-
-            await query.answer(
-                "❌ غير مسموح.",
-                show_alert=True,
-            )
-
             return
 
         try:
@@ -2812,6 +3222,8 @@ async def button_handler(
 
             return
 
+        context.user_data.clear()
+
         if deleted:
 
             result = (
@@ -2823,8 +3235,6 @@ async def button_handler(
             result = (
                 "⚠️ المنتج غير موجود."
             )
-
-        context.user_data.clear()
 
         await query.edit_message_text(
             result,
@@ -2865,12 +3275,6 @@ async def button_handler(
     if choice == "admin_add_category":
 
         if not is_admin(update):
-
-            await query.answer(
-                "❌ غير مسموح.",
-                show_alert=True,
-            )
-
             return
 
         context.user_data.clear()
@@ -2880,8 +3284,8 @@ async def button_handler(
         ] = "awaiting_category_name"
 
         await query.edit_message_text(
-            "➕ إضافة قسم\n\n"
-            "اكتب اسم القسم الجديد.\n\n"
+            "➕ إضافة قسم جديد\n\n"
+            "اكتب اسم القسم.\n\n"
             "مثال:\n"
             "أساور",
         )
@@ -2895,19 +3299,11 @@ async def button_handler(
     if choice == "admin_view_categories":
 
         if not is_admin(update):
-
-            await query.answer(
-                "❌ غير مسموح.",
-                show_alert=True,
-            )
-
             return
 
         try:
 
-            categories = (
-                get_categories()
-            )
+            categories = get_categories()
 
         except Exception as e:
 
@@ -2937,13 +3333,15 @@ async def button_handler(
                 "",
             ]
 
-            for index, category in enumerate(
-                categories,
-                start=1
-            ):
+            for category in categories:
+
+                products = get_products(
+                    category["name"]
+                )
 
                 lines.append(
-                    f"{index}. {category}"
+                    f"📂 {category['name']} "
+                    f"— {len(products)} منتج"
                 )
 
             text = "\n".join(
@@ -2958,39 +3356,15 @@ async def button_handler(
         return
 
     # =====================================================
-    # RENAME CATEGORY
+    # RENAME CATEGORY MENU
     # =====================================================
 
     if choice == "admin_rename_category":
 
         if not is_admin(update):
-
-            await query.answer(
-                "❌ غير مسموح.",
-                show_alert=True,
-            )
-
             return
 
-        try:
-
-            categories = (
-                get_categories()
-            )
-
-        except Exception as e:
-
-            print(
-                "Rename Categories Error:",
-                e,
-            )
-
-            await query.edit_message_text(
-                "❌ حصل خطأ في قاعدة البيانات.",
-                reply_markup=admin_categories_keyboard(),
-            )
-
-            return
+        categories = get_categories()
 
         if not categories:
 
@@ -3008,10 +3382,10 @@ async def button_handler(
             keyboard.append(
                 [
                     InlineKeyboardButton(
-                        f"✏️ {category}",
+                        f"✏️ {category['name']}",
                         callback_data=(
                             "admin_rename:"
-                            + category[:40]
+                            + str(category["id"])
                         ),
                     )
                 ]
@@ -3045,20 +3419,33 @@ async def button_handler(
     ):
 
         if not is_admin(update):
+            return
 
-            await query.answer(
-                "❌ غير مسموح.",
-                show_alert=True,
+        try:
+
+            category_id = int(
+                choice.split(
+                    ":",
+                    1
+                )[1]
             )
+
+        except ValueError:
 
             return
 
-        old_category = (
-            choice.split(
-                ":",
-                1
-            )[1]
+        category = get_category_by_id(
+            category_id
         )
+
+        if not category:
+
+            await query.edit_message_text(
+                "❌ القسم غير موجود.",
+                reply_markup=admin_categories_keyboard(),
+            )
+
+            return
 
         context.user_data.clear()
 
@@ -3067,52 +3454,28 @@ async def button_handler(
         ] = "awaiting_category_rename"
 
         context.user_data[
-            "old_category"
-        ] = old_category
+            "rename_category_id"
+        ] = category_id
 
         await query.edit_message_text(
             "✏️ تغيير اسم القسم\n\n"
             f"القسم الحالي:\n"
-            f"{old_category}\n\n"
+            f"{category['name']}\n\n"
             "اكتب الاسم الجديد:",
         )
 
         return
 
     # =====================================================
-    # DELETE CATEGORY
+    # DELETE CATEGORY MENU
     # =====================================================
 
     if choice == "admin_delete_category":
 
         if not is_admin(update):
-
-            await query.answer(
-                "❌ غير مسموح.",
-                show_alert=True,
-            )
-
             return
 
-        try:
-
-            categories = (
-                get_categories()
-            )
-
-        except Exception as e:
-
-            print(
-                "Delete Categories Error:",
-                e,
-            )
-
-            await query.edit_message_text(
-                "❌ حصل خطأ في قاعدة البيانات.",
-                reply_markup=admin_categories_keyboard(),
-            )
-
-            return
+        categories = get_categories()
 
         if not categories:
 
@@ -3130,10 +3493,10 @@ async def button_handler(
             keyboard.append(
                 [
                     InlineKeyboardButton(
-                        f"🗑 {category}",
+                        f"🗑 {category['name']}",
                         callback_data=(
                             "admin_delete_cat:"
-                            + category[:40]
+                            + str(category["id"])
                         ),
                     )
                 ]
@@ -3150,7 +3513,8 @@ async def button_handler(
 
         await query.edit_message_text(
             "🗑 حذف قسم\n\n"
-            "⚠️ لا يمكن حذف قسم يحتوي على منتجات.\n\n"
+            "⚠️ القسم الذي يحتوي على منتجات "
+            "لن يمكن حذفه.\n\n"
             "اختار القسم:",
             reply_markup=InlineKeyboardMarkup(
                 keyboard
@@ -3168,65 +3532,54 @@ async def button_handler(
     ):
 
         if not is_admin(update):
-
-            await query.answer(
-                "❌ غير مسموح.",
-                show_alert=True,
-            )
-
             return
-
-        category = (
-            choice.split(
-                ":",
-                1
-            )[1]
-        )
 
         try:
 
-            has_products = category_exists(
-                category
+            category_id = int(
+                choice.split(
+                    ":",
+                    1
+                )[1]
             )
 
-        except Exception as e:
-
-            print(
-                "Check Category Error:",
-                e,
-            )
-
-            await query.edit_message_text(
-                "❌ حصل خطأ في قاعدة البيانات.",
-                reply_markup=admin_categories_keyboard(),
-            )
+        except ValueError:
 
             return
 
-        if has_products:
+        result = delete_category(
+            category_id
+        )
 
-            await query.edit_message_text(
+        if result == "deleted":
+
+            text = (
+                "✅ تم حذف القسم بنجاح."
+            )
+
+        elif result == "has_products":
+
+            text = (
                 "⚠️ لا يمكن حذف القسم.\n\n"
-                f"📂 {category}\n\n"
                 "القسم يحتوي على منتجات.\n"
-                "احذف المنتجات أولاً.",
-                reply_markup=admin_categories_keyboard(),
+                "احذف المنتجات أولاً."
             )
 
-            return
+        else:
+
+            text = (
+                "❌ القسم غير موجود."
+            )
 
         await query.edit_message_text(
-            "ℹ️ الأقسام عندنا يتم إنشاؤها تلقائيًا "
-            "مع أول منتج.\n\n"
-            "بما إن القسم لا يحتوي على منتجات، "
-            "فهو غير موجود فعليًا في قاعدة البيانات.",
+            text,
             reply_markup=admin_categories_keyboard(),
         )
 
         return
 
     # =====================================================
-    # PRODUCTS
+    # PUBLIC PRODUCTS
     # =====================================================
 
     if choice == "products":
@@ -3238,7 +3591,7 @@ async def button_handler(
         return
 
     # =====================================================
-    # CATEGORY
+    # PUBLIC CATEGORY
     # =====================================================
 
     if choice.startswith(
@@ -3246,11 +3599,21 @@ async def button_handler(
     ):
 
         category = (
-            choice.split(
-                ":",
-                1
-            )[1]
+            get_category_from_callback(
+                choice
+            )
         )
+
+        if not category:
+
+            await query.edit_message_text(
+                "❌ القسم غير موجود.",
+                reply_markup=main_menu(
+                    admin=is_admin(update)
+                ),
+            )
+
+            return
 
         await send_products(
             query,
@@ -3300,13 +3663,11 @@ async def button_handler(
             )
         )
 
-        price_text = (
-            create_price_text(
-                p24,
-                p21,
-                p18,
-                comparison,
-            )
+        price_text = create_price_text(
+            p24,
+            p21,
+            p18,
+            comparison,
         )
 
         await query.edit_message_text(
@@ -3346,7 +3707,6 @@ async def button_handler(
                     callback_data="home",
                 )
             ],
-
         ]
 
         await query.edit_message_text(
@@ -3379,19 +3739,15 @@ async def button_handler(
         return
 
     # =====================================================
-    # PRICE DATA
+    # PUBLISH PRICE
     # =====================================================
 
-    text = (
-        context.user_data.get(
-            "price_text"
-        )
+    text = context.user_data.get(
+        "price_text"
     )
 
-    price = (
-        context.user_data.get(
-            "price"
-        )
+    price = context.user_data.get(
+        "price"
     )
 
     is_first_post_today = (
@@ -3414,7 +3770,6 @@ async def button_handler(
         return
 
     telegram_success = False
-
     facebook_success = False
 
     # =====================================================
@@ -3466,7 +3821,7 @@ async def button_handler(
         return
 
     # =====================================================
-    # SAVE LATEST PRICE
+    # SAVE PRICE
     # =====================================================
 
     successful_post = (
@@ -3597,21 +3952,9 @@ async def error_handler(
 
 def main():
 
-    # =====================================================
-    # ENV
-    # =====================================================
-
     check_environment()
 
-    # =====================================================
-    # DATABASE
-    # =====================================================
-
     init_database()
-
-    # =====================================================
-    # APPLICATION
-    # =====================================================
 
     app = (
         Application
@@ -3674,7 +4017,7 @@ def main():
     )
 
     # =====================================================
-    # ERROR HANDLER
+    # ERRORS
     # =====================================================
 
     app.add_error_handler(
@@ -3682,7 +4025,7 @@ def main():
     )
 
     # =====================================================
-    # START BOT
+    # START
     # =====================================================
 
     print(
