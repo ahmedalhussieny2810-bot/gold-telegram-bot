@@ -1,11 +1,16 @@
 import os
-import json
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from urllib.parse import urlparse
 
 from dotenv import load_dotenv
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup
+)
+
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -19,9 +24,9 @@ import requests
 import pymysql
 
 
-# =========================
+# =========================================================
 # ENV
-# =========================
+# =========================================================
 
 load_dotenv()
 
@@ -29,32 +34,38 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 
 FACEBOOK_PAGE_ID = os.getenv("FACEBOOK_PAGE_ID")
-FACEBOOK_PAGE_ACCESS_TOKEN = os.getenv("FACEBOOK_PAGE_TOKEN")
+FACEBOOK_PAGE_ACCESS_TOKEN = os.getenv(
+    "FACEBOOK_PAGE_TOKEN"
+)
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+ADMIN_ID = int(
+    os.getenv("ADMIN_ID", "0")
+)
 
 
-# =========================
+# =========================================================
 # SETTINGS
-# =========================
+# =========================================================
 
 TIMEZONE = ZoneInfo("Africa/Cairo")
 
-HISTORY_FILE = "gold_history.json"
+WEBSITE_LINK = (
+    "https://link.gettap.co/alhussienyjewelry"
+)
 
-WEBSITE_LINK = "https://link.gettap.co/alhussienyjewelry"
 
-
-# =========================
-# DATABASE
-# =========================
+# =========================================================
+# DATABASE CONNECTION
+# =========================================================
 
 def get_db_connection():
 
     if not DATABASE_URL:
-        raise Exception("DATABASE_URL is missing")
+        raise Exception(
+            "DATABASE_URL is missing"
+        )
 
     url = urlparse(DATABASE_URL)
 
@@ -70,13 +81,23 @@ def get_db_connection():
     )
 
 
+# =========================================================
+# INITIALIZE DATABASE
+# =========================================================
+
 def init_database():
+
+    connection = None
 
     try:
 
         connection = get_db_connection()
 
         with connection.cursor() as cursor:
+
+            # -------------------------
+            # PRODUCTS
+            # -------------------------
 
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS Products (
@@ -87,20 +108,40 @@ def init_database():
                 )
             """)
 
-        connection.close()
+            # -------------------------
+            # GOLD HISTORY
+            # -------------------------
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS Gold_history (
+                    Date DATE NOT NULL,
+                    Price INT NOT NULL
+                )
+            """)
 
         print("Database: READY")
 
     except Exception as e:
 
-        print("Database Error:", e)
+        print(
+            "Database Initialization Error:",
+            e
+        )
+
+    finally:
+
+        if connection:
+            connection.close()
 
 
-# =========================
+# =========================================================
 # PRODUCT FUNCTIONS
-# =========================
+# =========================================================
 
-def add_product(category, photo_id):
+def add_product(
+    category,
+    photo_id
+):
 
     connection = get_db_connection()
 
@@ -114,7 +155,10 @@ def add_product(category, photo_id):
                 (category, Photo_id)
                 VALUES (%s, %s)
                 """,
-                (category, photo_id)
+                (
+                    category,
+                    photo_id
+                )
             )
 
         print(
@@ -136,10 +180,13 @@ def get_products(category):
 
             cursor.execute(
                 """
-                SELECT id, category, Photo_id
+                SELECT
+                    id,
+                    category,
+                    Photo_id
                 FROM Products
                 WHERE LOWER(TRIM(category))
-                = LOWER(TRIM(%s))
+                    = LOWER(TRIM(%s))
                 ORDER BY id DESC
                 """,
                 (category,)
@@ -178,9 +225,9 @@ def get_categories():
         connection.close()
 
 
-# =========================
+# =========================================================
 # GOLD CALCULATION
-# =========================
+# =========================================================
 
 def calc(price):
 
@@ -194,12 +241,16 @@ def calc(price):
         (price * 6) / 7
     )
 
-    return price24, price21, price18
+    return (
+        price24,
+        price21,
+        price18
+    )
 
 
-# =========================
+# =========================================================
 # DATE
-# =========================
+# =========================================================
 
 def today_date():
 
@@ -220,112 +271,147 @@ def yesterday_date():
     )
 
 
-# =========================
-# HISTORY
-# =========================
-
-def load_history():
-
-    if not os.path.exists(
-        HISTORY_FILE
-    ):
-        return {}
-
-    try:
-
-        with open(
-            HISTORY_FILE,
-            "r",
-            encoding="utf-8"
-        ) as file:
-
-            return json.load(file)
-
-    except Exception as e:
-
-        print(
-            "History Load Error:",
-            e
-        )
-
-        return {}
-
-
-def save_history(history):
-
-    try:
-
-        temp_file = (
-            HISTORY_FILE + ".tmp"
-        )
-
-        with open(
-            temp_file,
-            "w",
-            encoding="utf-8"
-        ) as file:
-
-            json.dump(
-                history,
-                file,
-                ensure_ascii=False,
-                indent=2
-            )
-
-        os.replace(
-            temp_file,
-            HISTORY_FILE
-        )
-
-    except Exception as e:
-
-        print(
-            "History Save Error:",
-            e
-        )
-
-
-# =========================
-# FIRST PRICE
-# =========================
+# =========================================================
+# GOLD HISTORY
+# =========================================================
 
 def get_today_first_price():
 
-    history = load_history()
+    connection = get_db_connection()
 
-    return history.get(
-        today_date()
-    )
+    try:
+
+        with connection.cursor() as cursor:
+
+            cursor.execute(
+                """
+                SELECT Price
+                FROM Gold_history
+                WHERE Date = %s
+                LIMIT 1
+                """,
+                (
+                    today_date(),
+                )
+            )
+
+            row = cursor.fetchone()
+
+            if row:
+
+                return row["Price"]
+
+            return None
+
+    finally:
+
+        connection.close()
 
 
 def get_yesterday_first_price():
 
-    history = load_history()
+    connection = get_db_connection()
 
-    return history.get(
-        yesterday_date()
-    )
+    try:
+
+        with connection.cursor() as cursor:
+
+            cursor.execute(
+                """
+                SELECT Price
+                FROM Gold_history
+                WHERE Date = %s
+                LIMIT 1
+                """,
+                (
+                    yesterday_date(),
+                )
+            )
+
+            row = cursor.fetchone()
+
+            if row:
+
+                return row["Price"]
+
+            return None
+
+    finally:
+
+        connection.close()
 
 
-def save_first_price_of_today(price):
+def save_first_price_of_today(
+    price
+):
 
-    history = load_history()
+    connection = get_db_connection()
 
-    today = today_date()
+    try:
 
-    if today in history:
-        return False
+        with connection.cursor() as cursor:
 
-    history[today] = round(price)
+            # -------------------------
+            # CHECK IF TODAY EXISTS
+            # -------------------------
 
-    save_history(history)
+            cursor.execute(
+                """
+                SELECT Price
+                FROM Gold_history
+                WHERE Date = %s
+                LIMIT 1
+                """,
+                (
+                    today_date(),
+                )
+            )
 
-    return True
+            existing = cursor.fetchone()
+
+            # السعر موجود بالفعل
+            # ممنوع تغييره
+            if existing:
+
+                print(
+                    "Gold History: "
+                    "Today's price already exists"
+                )
+
+                return False
+
+            # -------------------------
+            # SAVE FIRST PRICE
+            # -------------------------
+
+            cursor.execute(
+                """
+                INSERT INTO Gold_history
+                (Date, Price)
+                VALUES (%s, %s)
+                """,
+                (
+                    today_date(),
+                    round(price)
+                )
+            )
+
+            print(
+                f"Gold History Saved: "
+                f"{today_date()} = "
+                f"{round(price)}"
+            )
+
+            return True
+
+    finally:
+
+        connection.close()
 
 
-# =========================
+# =========================================================
 # COMPARISON
-# =========================
+# =========================================================
 
 def create_comparison_line(
     current_price
@@ -336,6 +422,7 @@ def create_comparison_line(
     )
 
     if yesterday_price is None:
+
         return None
 
     difference = round(
@@ -347,24 +434,27 @@ def create_comparison_line(
 
         return (
             f"📈 عيار 21 ارتفع "
-            f"{difference} جنيه عن أول سعر أمس"
+            f"{difference} جنيه "
+            f"عن أول سعر أمس"
         )
 
     elif difference < 0:
 
         return (
             f"📉 عيار 21 انخفض "
-            f"{abs(difference)} جنيه عن أول سعر أمس"
+            f"{abs(difference)} جنيه "
+            f"عن أول سعر أمس"
         )
 
     return (
-        "➖ عيار 21 مستقر عن أول سعر أمس"
+        "➖ عيار 21 مستقر "
+        "عن أول سعر أمس"
     )
 
 
-# =========================
+# =========================================================
 # PRICE TEXT
-# =========================
+# =========================================================
 
 def create_price_text(
     p24,
@@ -375,9 +465,13 @@ def create_price_text(
 
     lines = []
 
+    # المقارنة أول سطر
     if comparison:
 
-        lines.append(comparison)
+        lines.append(
+            comparison
+        )
+
         lines.append("")
 
     lines.append(
@@ -401,7 +495,8 @@ def create_price_text(
     lines.append("")
 
     lines.append(
-        "📍 بورسعيد - شارع أسوان أمام صيدلية جلال"
+        "📍 بورسعيد - شارع أسوان "
+        "أمام صيدلية جلال"
     )
 
     lines.append(
@@ -411,9 +506,9 @@ def create_price_text(
     return "\n".join(lines)
 
 
-# =========================
+# =========================================================
 # START
-# =========================
+# =========================================================
 
 async def start(
     update: Update,
@@ -422,7 +517,8 @@ async def start(
 
     await update.message.reply_text(
         "👋 أهلاً بك في بوت الحسيني\n\n"
-        "💎 يمكنك إرسال اسم القسم لرؤية المنتجات.\n\n"
+        "💎 يمكنك إرسال اسم القسم "
+        "لرؤية المنتجات.\n\n"
         "مثال:\n"
         "خواتم\n"
         "سلاسل\n"
@@ -433,9 +529,9 @@ async def start(
     )
 
 
-# =========================
+# =========================================================
 # ADMIN PHOTO
-# =========================
+# =========================================================
 
 async def receive_photo(
     update: Update,
@@ -444,7 +540,10 @@ async def receive_photo(
 
     user_id = update.effective_user.id
 
-    # ممنوع أي شخص غير الأدمن يضيف صور
+    # ---------------------------------
+    # ADMIN ONLY
+    # ---------------------------------
+
     if user_id != ADMIN_ID:
 
         await update.message.reply_text(
@@ -465,7 +564,8 @@ async def receive_photo(
     if not category:
 
         await update.message.reply_text(
-            "❌ اكتب اسم القسم في Caption الصورة.\n\n"
+            "❌ اكتب اسم القسم في "
+            "Caption الصورة.\n\n"
             "مثال:\n"
             "خواتم"
         )
@@ -496,9 +596,9 @@ async def receive_photo(
         )
 
 
-# =========================
+# =========================================================
 # SHOW PRODUCTS
-# =========================
+# =========================================================
 
 async def show_products(
     update: Update,
@@ -554,9 +654,9 @@ async def show_products(
             )
 
 
-# =========================
+# =========================================================
 # RECEIVE TEXT
-# =========================
+# =========================================================
 
 async def receive(
     update: Update,
@@ -568,9 +668,9 @@ async def receive(
         or ""
     ).strip()
 
-    # =========================
+    # =====================================================
     # CHECK IF PRICE
-    # =========================
+    # =====================================================
 
     try:
 
@@ -583,9 +683,9 @@ async def receive(
         is_price = False
 
 
-    # =========================
-    # PRODUCT CATEGORY
-    # =========================
+    # =====================================================
+    # IF NOT PRICE → PRODUCT CATEGORY
+    # =====================================================
 
     if not is_price:
 
@@ -605,6 +705,7 @@ async def receive(
                 ):
 
                     found_category = category
+
                     break
 
             if found_category:
@@ -635,11 +736,33 @@ async def receive(
         return
 
 
-    # =========================
-    # GOLD PRICE
-    # =========================
+    # =====================================================
+    # GOLD PRICE ADMIN ONLY
+    # =====================================================
 
-    p24, p21, p18 = calc(price)
+    user_id = update.effective_user.id
+
+    if user_id != ADMIN_ID:
+
+        await update.message.reply_text(
+            "❌ أسعار الذهب متاحة للأدمن فقط."
+        )
+
+        return
+
+
+    # =====================================================
+    # CALCULATE GOLD
+    # =====================================================
+
+    p24, p21, p18 = calc(
+        price
+    )
+
+
+    # =====================================================
+    # CHECK FIRST PRICE OF TODAY
+    # =====================================================
 
     today_first_price = (
         get_today_first_price()
@@ -648,6 +771,11 @@ async def receive(
     is_first_post_today = (
         today_first_price is None
     )
+
+
+    # =====================================================
+    # COMPARISON
+    # =====================================================
 
     comparison = None
 
@@ -659,16 +787,26 @@ async def receive(
             )
         )
 
-    text = create_price_text(
+
+    # =====================================================
+    # CREATE MESSAGE
+    # =====================================================
+
+    price_text = create_price_text(
         p24,
         p21,
         p18,
         comparison
     )
 
+
+    # =====================================================
+    # SAVE TEMPORARY DATA
+    # =====================================================
+
     context.user_data[
         "price_text"
-    ] = text
+    ] = price_text
 
     context.user_data[
         "price"
@@ -678,6 +816,10 @@ async def receive(
         "is_first_post_today"
     ] = is_first_post_today
 
+
+    # =====================================================
+    # BUTTONS
+    # =====================================================
 
     keyboard = [
 
@@ -711,11 +853,13 @@ async def receive(
 
     ]
 
+
     reply_markup = (
         InlineKeyboardMarkup(
             keyboard
         )
     )
+
 
     await update.message.reply_text(
         f"السعر: {round(price)}\n\n"
@@ -724,11 +868,13 @@ async def receive(
     )
 
 
-# =========================
+# =========================================================
 # FACEBOOK
-# =========================
+# =========================================================
 
-async def facebook_post(text):
+async def facebook_post(
+    text
+):
 
     url = (
         "https://graph.facebook.com/v23.0/"
@@ -776,9 +922,9 @@ async def facebook_post(text):
         return False
 
 
-# =========================
+# =========================================================
 # TELEGRAM
-# =========================
+# =========================================================
 
 async def telegram_post(
     context,
@@ -808,9 +954,9 @@ async def telegram_post(
         return False
 
 
-# =========================
+# =========================================================
 # BUTTON HANDLER
-# =========================
+# =========================================================
 
 async def button_handler(
     update: Update,
@@ -823,6 +969,11 @@ async def button_handler(
 
     choice = query.data
 
+
+    # =====================================================
+    # CANCEL
+    # =====================================================
+
     if choice == "cancel":
 
         context.user_data.clear()
@@ -833,6 +984,10 @@ async def button_handler(
 
         return
 
+
+    # =====================================================
+    # GET TEMP DATA
+    # =====================================================
 
     text = context.user_data.get(
         "price_text"
@@ -849,18 +1004,32 @@ async def button_handler(
         )
     )
 
-    if not text or price is None:
+
+    if (
+        not text
+        or price is None
+    ):
 
         await query.edit_message_text(
-            "❌ السعر انتهى. ابعت السعر من جديد."
+            "❌ السعر انتهى. "
+            "ابعت السعر من جديد."
         )
 
         return
 
 
+    # =====================================================
+    # RESULTS
+    # =====================================================
+
     telegram_success = False
+
     facebook_success = False
 
+
+    # =====================================================
+    # TELEGRAM + FACEBOOK
+    # =====================================================
 
     if choice == "telegram_facebook":
 
@@ -877,6 +1046,10 @@ async def button_handler(
             )
         )
 
+
+    # =====================================================
+    # TELEGRAM ONLY
+    # =====================================================
 
     elif choice == "telegram_only":
 
@@ -888,6 +1061,10 @@ async def button_handler(
         )
 
 
+    # =====================================================
+    # FACEBOOK ONLY
+    # =====================================================
+
     elif choice == "facebook_only":
 
         facebook_success = (
@@ -897,21 +1074,42 @@ async def button_handler(
         )
 
 
+    # =====================================================
+    # CHECK SUCCESS
+    # =====================================================
+
     successful_post = (
         telegram_success
         or facebook_success
     )
 
 
+    # =====================================================
+    # SAVE FIRST PRICE
+    # =====================================================
+
     if (
         successful_post
         and is_first_post_today
     ):
 
-        save_first_price_of_today(
-            price
-        )
+        try:
 
+            save_first_price_of_today(
+                price
+            )
+
+        except Exception as e:
+
+            print(
+                "Gold History Save Error:",
+                e
+            )
+
+
+    # =====================================================
+    # RESULT MESSAGE
+    # =====================================================
 
     if choice == "telegram_facebook":
 
@@ -921,7 +1119,8 @@ async def button_handler(
         ):
 
             result = (
-                "✅ تم النشر في تليجرام وفيسبوك."
+                "✅ تم النشر "
+                "في تليجرام وفيسبوك."
             )
 
         elif telegram_success:
@@ -941,51 +1140,82 @@ async def button_handler(
         else:
 
             result = (
-                "❌ حصل خطأ في النشر على الاثنين."
+                "❌ حصل خطأ في النشر "
+                "على الاثنين."
             )
 
 
     elif choice == "telegram_only":
 
-        result = (
-            "✅ تم النشر في تليجرام."
-            if telegram_success
-            else
-            "❌ حصل خطأ في النشر في تليجرام."
-        )
+        if telegram_success:
+
+            result = (
+                "✅ تم النشر في تليجرام."
+            )
+
+        else:
+
+            result = (
+                "❌ حصل خطأ في النشر "
+                "في تليجرام."
+            )
 
 
     elif choice == "facebook_only":
 
-        result = (
-            "✅ تم النشر في فيسبوك."
-            if facebook_success
-            else
-            "❌ حصل خطأ في النشر فيسبوك."
-        )
+        if facebook_success:
+
+            result = (
+                "✅ تم النشر في فيسبوك."
+            )
+
+        else:
+
+            result = (
+                "❌ حصل خطأ في النشر "
+                "في فيسبوك."
+            )
 
 
     else:
 
-        result = "❌ اختيار غير معروف."
+        result = (
+            "❌ اختيار غير معروف."
+        )
 
+
+    # =====================================================
+    # SHOW RESULT
+    # =====================================================
 
     await query.edit_message_text(
         result
     )
 
+
+    # =====================================================
+    # CLEAR TEMP DATA
+    # =====================================================
+
     context.user_data.clear()
 
 
-# =========================
+# =========================================================
 # MAIN
-# =========================
+# =========================================================
 
 def main():
 
-    # تجهيز قاعدة البيانات
+    # ---------------------------------
+    # DATABASE
+    # ---------------------------------
+
     init_database()
 
+
+    # ---------------------------------
+    # TELEGRAM APP
+    # ---------------------------------
 
     app = (
         Application
@@ -995,7 +1225,10 @@ def main():
     )
 
 
+    # ---------------------------------
     # START
+    # ---------------------------------
+
     app.add_handler(
         CommandHandler(
             "start",
@@ -1004,7 +1237,10 @@ def main():
     )
 
 
+    # ---------------------------------
     # ADMIN PHOTO
+    # ---------------------------------
+
     app.add_handler(
         MessageHandler(
             filters.PHOTO,
@@ -1013,7 +1249,10 @@ def main():
     )
 
 
+    # ---------------------------------
     # TEXT
+    # ---------------------------------
+
     app.add_handler(
         MessageHandler(
             filters.TEXT
@@ -1023,7 +1262,10 @@ def main():
     )
 
 
+    # ---------------------------------
     # BUTTONS
+    # ---------------------------------
+
     app.add_handler(
         CallbackQueryHandler(
             button_handler
@@ -1035,8 +1277,17 @@ def main():
         "Bot Started..."
     )
 
+
+    # ---------------------------------
+    # START POLLING
+    # ---------------------------------
+
     app.run_polling()
 
+
+# =========================================================
+# RUN
+# =========================================================
 
 if __name__ == "__main__":
 
