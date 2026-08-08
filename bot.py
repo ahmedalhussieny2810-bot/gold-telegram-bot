@@ -25,15 +25,20 @@ import pymysql
 
 load_dotenv()
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHANNEL_ID = os.getenv("CHANNEL_ID")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+CHANNEL_ID = os.getenv("CHANNEL_ID", "").strip()
 
-FACEBOOK_PAGE_ID = os.getenv("FACEBOOK_PAGE_ID")
-FACEBOOK_PAGE_ACCESS_TOKEN = os.getenv("FACEBOOK_PAGE_TOKEN")
+FACEBOOK_PAGE_ID = os.getenv("FACEBOOK_PAGE_ID", "").strip()
+FACEBOOK_PAGE_ACCESS_TOKEN = os.getenv(
+    "FACEBOOK_PAGE_TOKEN", ""
+).strip()
 
-DATABASE_URL = os.getenv("DATABASE_URL")
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+try:
+    ADMIN_ID = int(os.getenv("ADMIN_ID", "0").strip())
+except ValueError:
+    ADMIN_ID = 0
 
 
 # =========================================================
@@ -45,6 +50,43 @@ TIMEZONE = ZoneInfo("Africa/Cairo")
 WEBSITE_LINK = "https://link.gettap.co/alhussienyjewelry"
 
 HISTORY_FILE = "gold_history.json"
+
+
+# =========================================================
+# STARTUP CHECK
+# =========================================================
+
+def check_environment():
+
+    print("================================")
+    print("Starting Alhussieny Gold Bot")
+    print("================================")
+
+    if not BOT_TOKEN:
+        raise Exception("BOT_TOKEN is missing")
+
+    if not CHANNEL_ID:
+        print("WARNING: CHANNEL_ID is missing")
+
+    if ADMIN_ID == 0:
+        raise Exception("ADMIN_ID is missing or invalid")
+
+    print(f"ADMIN_ID = {ADMIN_ID}")
+
+    if DATABASE_URL:
+        print("DATABASE_URL = FOUND")
+    else:
+        print("DATABASE_URL = MISSING")
+
+    if FACEBOOK_PAGE_ID:
+        print("FACEBOOK_PAGE_ID = FOUND")
+    else:
+        print("FACEBOOK_PAGE_ID = MISSING")
+
+    if FACEBOOK_PAGE_ACCESS_TOKEN:
+        print("FACEBOOK_PAGE_TOKEN = FOUND")
+    else:
+        print("FACEBOOK_PAGE_TOKEN = MISSING")
 
 
 # =========================================================
@@ -78,14 +120,16 @@ def init_database():
 
         with connection.cursor() as cursor:
 
-            cursor.execute("""
+            cursor.execute(
+                """
                 CREATE TABLE IF NOT EXISTS Products (
                     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
                     category VARCHAR(255) NOT NULL,
                     Photo_id TEXT NOT NULL,
                     PRIMARY KEY (id)
                 )
-            """)
+                """
+            )
 
         connection.close()
 
@@ -93,7 +137,7 @@ def init_database():
 
     except Exception as e:
 
-        print("Database Error:", e)
+        print("Database Initialization Error:", e)
 
 
 # =========================================================
@@ -211,7 +255,9 @@ def yesterday_date():
         - timedelta(days=1)
     )
 
-    return yesterday.strftime("%Y-%m-%d")
+    return yesterday.strftime(
+        "%Y-%m-%d"
+    )
 
 
 # =========================================================
@@ -235,7 +281,10 @@ def load_history():
 
     except Exception as e:
 
-        print("History Load Error:", e)
+        print(
+            "History Load Error:",
+            e,
+        )
 
         return {}
 
@@ -266,21 +315,28 @@ def save_history(history):
 
     except Exception as e:
 
-        print("History Save Error:", e)
+        print(
+            "History Save Error:",
+            e,
+        )
 
 
 def get_today_first_price():
 
     history = load_history()
 
-    return history.get(today_date())
+    return history.get(
+        today_date()
+    )
 
 
 def get_yesterday_first_price():
 
     history = load_history()
 
-    return history.get(yesterday_date())
+    return history.get(
+        yesterday_date()
+    )
 
 
 def save_first_price_of_today(price):
@@ -297,7 +353,8 @@ def save_first_price_of_today(price):
     save_history(history)
 
     print(
-        f"First gold price saved: {today} = {round(price)}"
+        f"First gold price saved: "
+        f"{today} = {round(price)}"
     )
 
     return True
@@ -309,30 +366,38 @@ def save_first_price_of_today(price):
 
 def create_comparison_line(current_price):
 
-    yesterday_price = get_yesterday_first_price()
+    yesterday_price = (
+        get_yesterday_first_price()
+    )
 
     if yesterday_price is None:
         return None
 
     difference = round(
-        current_price - yesterday_price
+        current_price
+        - yesterday_price
     )
 
     if difference > 0:
 
         return (
-            f"📈 عيار 21 ارتفع {difference} جنيه "
+            f"📈 عيار 21 ارتفع "
+            f"{difference} جنيه "
             f"عن أول سعر أمس"
         )
 
     if difference < 0:
 
         return (
-            f"📉 عيار 21 انخفض {abs(difference)} جنيه "
+            f"📉 عيار 21 انخفض "
+            f"{abs(difference)} جنيه "
             f"عن أول سعر أمس"
         )
 
-    return "➖ عيار 21 مستقر عن أول سعر أمس"
+    return (
+        "➖ عيار 21 مستقر "
+        "عن أول سعر أمس"
+    )
 
 
 # =========================================================
@@ -353,20 +418,34 @@ def create_price_text(
         lines.append(comparison)
         lines.append("")
 
-    lines.append("💎 أسعار الذهب الآن")
-    lines.append("")
-
-    lines.append(f"🟡 عيار 24 : {p24}")
-    lines.append(f"🟡 عيار 21 : {p21}")
-    lines.append(f"🟡 عيار 18 : {p18}")
+    lines.append(
+        "💎 أسعار الذهب الآن"
+    )
 
     lines.append("")
 
     lines.append(
-        "📍 بورسعيد - شارع أسوان أمام صيدلية جلال"
+        f"🟡 عيار 24 : {p24}"
     )
 
-    lines.append(WEBSITE_LINK)
+    lines.append(
+        f"🟡 عيار 21 : {p21}"
+    )
+
+    lines.append(
+        f"🟡 عيار 18 : {p18}"
+    )
+
+    lines.append("")
+
+    lines.append(
+        "📍 بورسعيد - شارع أسوان "
+        "أمام صيدلية جلال"
+    )
+
+    lines.append(
+        WEBSITE_LINK
+    )
 
     return "\n".join(lines)
 
@@ -375,7 +454,13 @@ def create_price_text(
 # START
 # =========================================================
 
-async def start(update, context):
+async def start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    if not update.message:
+        return
 
     await update.message.reply_text(
         "👋 أهلاً بك في بوت الحسيني\n\n"
@@ -385,7 +470,7 @@ async def start(update, context):
         "سلاسل\n"
         "غوايش\n"
         "أطقم\n\n"
-        "ولمعرفة رقم حسابك:\n"
+        "🆔 لمعرفة رقم حسابك:\n"
         "/id"
     )
 
@@ -394,14 +479,19 @@ async def start(update, context):
 # SHOW ID
 # =========================================================
 
-async def show_id(update, context):
+async def show_id(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    if not update.message:
+        return
 
     user_id = update.effective_user.id
 
     await update.message.reply_text(
         f"🆔 Telegram ID الخاص بك:\n\n"
-        f"`{user_id}`",
-        parse_mode="Markdown",
+        f"{user_id}"
     )
 
     print(
@@ -410,14 +500,38 @@ async def show_id(update, context):
 
 
 # =========================================================
-# ADMIN PHOTO
+# ADMIN CHECK
 # =========================================================
 
-async def receive_photo(update, context):
+def is_admin(update: Update):
+
+    if not update.effective_user:
+        return False
 
     user_id = update.effective_user.id
 
-    if user_id != ADMIN_ID:
+    return user_id == ADMIN_ID
+
+
+# =========================================================
+# ADMIN PHOTO
+# =========================================================
+
+async def receive_photo(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    if not update.message:
+        return
+
+    user_id = update.effective_user.id
+
+    print(
+        f"Photo received from user: {user_id}"
+    )
+
+    if not is_admin(update):
 
         await update.message.reply_text(
             "❌ غير مسموح لك بإضافة منتجات."
@@ -425,12 +539,16 @@ async def receive_photo(update, context):
 
         return
 
+    if not update.message.photo:
+        return
+
     photo = update.message.photo[-1]
 
     photo_id = photo.file_id
 
     category = (
-        update.message.caption or ""
+        update.message.caption
+        or ""
     ).strip()
 
     if not category:
@@ -471,11 +589,16 @@ async def receive_photo(update, context):
 # SHOW PRODUCTS
 # =========================================================
 
-async def show_products(update, category):
+async def show_products(
+    update: Update,
+    category,
+):
 
     try:
 
-        products = get_products(category)
+        products = get_products(
+            category
+        )
 
     except Exception as e:
 
@@ -493,7 +616,8 @@ async def show_products(update, category):
     if not products:
 
         await update.message.reply_text(
-            f"❌ مفيش منتجات في قسم:\n{category}"
+            f"❌ مفيش منتجات في قسم:\n"
+            f"{category}"
         )
 
         return
@@ -523,16 +647,29 @@ async def show_products(update, category):
 # RECEIVE TEXT
 # =========================================================
 
-async def receive(update, context):
+async def receive(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    if not update.message:
+        return
 
     user_id = update.effective_user.id
 
     text = (
-        update.message.text or ""
+        update.message.text
+        or ""
     ).strip()
 
+    print(
+        f"Message received | "
+        f"USER_ID={user_id} | "
+        f"TEXT={text}"
+    )
+
     # =====================================================
-    # GOLD PRICE
+    # CHECK PRICE
     # =====================================================
 
     try:
@@ -544,23 +681,47 @@ async def receive(update, context):
     except ValueError:
 
         is_price = False
+        price = None
 
 
     # =====================================================
-    # PRICE = ADMIN ONLY
+    # GOLD PRICE
     # =====================================================
 
     if is_price:
 
+        print(
+            f"Price request from "
+            f"USER_ID={user_id}"
+        )
+
+        print(
+            f"Configured ADMIN_ID="
+            f"{ADMIN_ID}"
+        )
+
+        # ADMIN ONLY
         if user_id != ADMIN_ID:
 
+            print(
+                "ACCESS DENIED: "
+                f"{user_id} != {ADMIN_ID}"
+            )
+
             await update.message.reply_text(
-                "❌ أسعار الذهب متاحة للأدمن فقط."
+                "❌ أسعار الذهب متاحة "
+                "للأدمن فقط."
             )
 
             return
 
-        p24, p21, p18 = calc(price)
+        print(
+            "ADMIN ACCESS GRANTED"
+        )
+
+        p24, p21, p18 = calc(
+            price
+        )
 
         today_first_price = (
             get_today_first_price()
@@ -574,8 +735,10 @@ async def receive(update, context):
 
         if is_first_post_today:
 
-            comparison = create_comparison_line(
-                price
+            comparison = (
+                create_comparison_line(
+                    price
+                )
             )
 
         price_text = create_price_text(
@@ -585,8 +748,14 @@ async def receive(update, context):
             comparison,
         )
 
-        context.user_data["price_text"] = price_text
-        context.user_data["price"] = round(price)
+        context.user_data[
+            "price_text"
+        ] = price_text
+
+        context.user_data[
+            "price"
+        ] = round(price)
+
         context.user_data[
             "is_first_post_today"
         ] = is_first_post_today
@@ -596,21 +765,27 @@ async def receive(update, context):
             [
                 InlineKeyboardButton(
                     "📱 تليجرام + فيسبوك",
-                    callback_data="telegram_facebook",
+                    callback_data=(
+                        "telegram_facebook"
+                    ),
                 )
             ],
 
             [
                 InlineKeyboardButton(
                     "📱 تليجرام فقط",
-                    callback_data="telegram_only",
+                    callback_data=(
+                        "telegram_only"
+                    ),
                 )
             ],
 
             [
                 InlineKeyboardButton(
                     "📘 فيسبوك فقط",
-                    callback_data="facebook_only",
+                    callback_data=(
+                        "facebook_only"
+                    ),
                 )
             ],
 
@@ -620,13 +795,16 @@ async def receive(update, context):
                     callback_data="cancel",
                 )
             ],
+
         ]
 
         await update.message.reply_text(
             f"السعر: {round(price)}\n\n"
             "📢 عايز تنشر الأسعار فين؟",
-            reply_markup=InlineKeyboardMarkup(
-                keyboard
+            reply_markup=(
+                InlineKeyboardMarkup(
+                    keyboard
+                )
             ),
         )
 
@@ -639,7 +817,9 @@ async def receive(update, context):
 
     try:
 
-        categories = get_categories()
+        categories = (
+            get_categories()
+        )
 
         found_category = None
 
@@ -647,7 +827,7 @@ async def receive(update, context):
 
             if (
                 category.strip().lower()
-                == text.lower()
+                == text.strip().lower()
             ):
 
                 found_category = category
@@ -688,11 +868,19 @@ async def receive(update, context):
 async def facebook_post(text):
 
     if not FACEBOOK_PAGE_ID:
-        print("Facebook Page ID missing")
+
+        print(
+            "Facebook Page ID missing"
+        )
+
         return False
 
     if not FACEBOOK_PAGE_ACCESS_TOKEN:
-        print("Facebook Page Token missing")
+
+        print(
+            "Facebook Page Token missing"
+        )
+
         return False
 
     url = (
@@ -701,8 +889,12 @@ async def facebook_post(text):
     )
 
     data = {
+
         "message": text,
-        "access_token": FACEBOOK_PAGE_ACCESS_TOKEN,
+
+        "access_token":
+            FACEBOOK_PAGE_ACCESS_TOKEN,
+
     }
 
     try:
@@ -715,12 +907,15 @@ async def facebook_post(text):
 
         if response.status_code == 200:
 
-            print("Facebook: SUCCESS")
+            print(
+                "Facebook: SUCCESS"
+            )
 
             return True
 
         print(
             "Facebook Error:",
+            response.status_code,
             response.text,
         )
 
@@ -737,10 +932,21 @@ async def facebook_post(text):
 
 
 # =========================================================
-# TELEGRAM
+# TELEGRAM CHANNEL
 # =========================================================
 
-async def telegram_post(context, text):
+async def telegram_post(
+    context,
+    text,
+):
+
+    if not CHANNEL_ID:
+
+        print(
+            "CHANNEL_ID missing"
+        )
+
+        return False
 
     try:
 
@@ -749,14 +955,16 @@ async def telegram_post(context, text):
             text=text,
         )
 
-        print("Telegram: SUCCESS")
+        print(
+            "Telegram Channel: SUCCESS"
+        )
 
         return True
 
     except Exception as e:
 
         print(
-            "Telegram Error:",
+            "Telegram Channel Error:",
             e,
         )
 
@@ -767,13 +975,21 @@ async def telegram_post(context, text):
 # BUTTON HANDLER
 # =========================================================
 
-async def button_handler(update, context):
+async def button_handler(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
 
     query = update.callback_query
 
     await query.answer()
 
     choice = query.data
+
+    print(
+        f"Button pressed: {choice}"
+    )
+
 
     # =====================================================
     # CANCEL
@@ -802,21 +1018,26 @@ async def button_handler(update, context):
         "price"
     )
 
-    is_first_post_today = context.user_data.get(
-        "is_first_post_today",
-        False,
+    is_first_post_today = (
+        context.user_data.get(
+            "is_first_post_today",
+            False,
+        )
     )
+
 
     if not text or price is None:
 
         await query.edit_message_text(
-            "❌ السعر انتهى. ابعت السعر من جديد."
+            "❌ السعر انتهى. "
+            "ابعت السعر من جديد."
         )
 
         return
 
 
     telegram_success = False
+
     facebook_success = False
 
 
@@ -826,13 +1047,17 @@ async def button_handler(update, context):
 
     if choice == "telegram_facebook":
 
-        telegram_success = await telegram_post(
-            context,
-            text,
+        telegram_success = (
+            await telegram_post(
+                context,
+                text,
+            )
         )
 
-        facebook_success = await facebook_post(
-            text,
+        facebook_success = (
+            await facebook_post(
+                text,
+            )
         )
 
 
@@ -842,9 +1067,11 @@ async def button_handler(update, context):
 
     elif choice == "telegram_only":
 
-        telegram_success = await telegram_post(
-            context,
-            text,
+        telegram_success = (
+            await telegram_post(
+                context,
+                text,
+            )
         )
 
 
@@ -854,8 +1081,10 @@ async def button_handler(update, context):
 
     elif choice == "facebook_only":
 
-        facebook_success = await facebook_post(
-            text,
+        facebook_success = (
+            await facebook_post(
+                text,
+            )
         )
 
 
@@ -884,30 +1113,37 @@ async def button_handler(update, context):
 
     if choice == "telegram_facebook":
 
-        if telegram_success and facebook_success:
+        if (
+            telegram_success
+            and facebook_success
+        ):
 
             result = (
-                "✅ تم النشر في تليجرام وفيسبوك."
+                "✅ تم النشر "
+                "في تليجرام وفيسبوك."
             )
 
         elif telegram_success:
 
             result = (
-                "⚠️ تم النشر في تليجرام فقط.\n"
+                "⚠️ تم النشر "
+                "في تليجرام فقط.\n"
                 "❌ حصل خطأ في فيسبوك."
             )
 
         elif facebook_success:
 
             result = (
-                "⚠️ تم النشر في فيسبوك فقط.\n"
+                "⚠️ تم النشر "
+                "في فيسبوك فقط.\n"
                 "❌ حصل خطأ في تليجرام."
             )
 
         else:
 
             result = (
-                "❌ حصل خطأ في النشر على الاثنين."
+                "❌ حصل خطأ في النشر "
+                "على الاثنين."
             )
 
 
@@ -922,7 +1158,8 @@ async def button_handler(update, context):
         else:
 
             result = (
-                "❌ حصل خطأ في النشر في تليجرام."
+                "❌ حصل خطأ في "
+                "النشر في تليجرام."
             )
 
 
@@ -937,13 +1174,16 @@ async def button_handler(update, context):
         else:
 
             result = (
-                "❌ حصل خطأ في النشر فيسبوك."
+                "❌ حصل خطأ في "
+                "النشر في فيسبوك."
             )
 
 
     else:
 
-        result = "❌ اختيار غير معروف."
+        result = (
+            "❌ اختيار غير معروف."
+        )
 
 
     await query.edit_message_text(
@@ -957,11 +1197,22 @@ async def button_handler(update, context):
 # ERROR HANDLER
 # =========================================================
 
-async def error_handler(update, context):
+async def error_handler(
+    update: object,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    print(
+        "================================"
+    )
 
     print(
         "BOT ERROR:",
         context.error,
+    )
+
+    print(
+        "================================"
     )
 
 
@@ -971,15 +1222,23 @@ async def error_handler(update, context):
 
 def main():
 
-    print("================================")
-    print("Starting Alhussieny Gold Bot")
-    print("================================")
+    # =====================================================
+    # ENV CHECK
+    # =====================================================
 
-    print(
-        f"ADMIN_ID = {ADMIN_ID}"
-    )
+    check_environment()
+
+
+    # =====================================================
+    # DATABASE
+    # =====================================================
 
     init_database()
+
+
+    # =====================================================
+    # APPLICATION
+    # =====================================================
 
     app = (
         Application
@@ -988,7 +1247,11 @@ def main():
         .build()
     )
 
-    # START
+
+    # =====================================================
+    # COMMANDS
+    # =====================================================
+
     app.add_handler(
         CommandHandler(
             "start",
@@ -996,7 +1259,6 @@ def main():
         )
     )
 
-    # ID
     app.add_handler(
         CommandHandler(
             "id",
@@ -1004,7 +1266,11 @@ def main():
         )
     )
 
+
+    # =====================================================
     # PHOTOS
+    # =====================================================
+
     app.add_handler(
         MessageHandler(
             filters.PHOTO,
@@ -1012,30 +1278,56 @@ def main():
         )
     )
 
+
+    # =====================================================
     # TEXT
+    # =====================================================
+
     app.add_handler(
         MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
+            filters.TEXT
+            & ~filters.COMMAND,
             receive,
         )
     )
 
+
+    # =====================================================
     # BUTTONS
+    # =====================================================
+
     app.add_handler(
         CallbackQueryHandler(
-            button_handler,
+            button_handler
         )
     )
 
-    # ERRORS
+
+    # =====================================================
+    # ERROR HANDLER
+    # =====================================================
+
     app.add_error_handler(
         error_handler
     )
 
-    print("Bot Started...")
 
-    app.run_polling()
+    # =====================================================
+    # START BOT
+    # =====================================================
 
+    print(
+        "Bot Started..."
+    )
+
+    app.run_polling(
+        drop_pending_updates=True
+    )
+
+
+# =========================================================
+# RUN
+# =========================================================
 
 if __name__ == "__main__":
     main()
