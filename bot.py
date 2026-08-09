@@ -20,7 +20,7 @@ from telegram.ext import (
 # =========================================================
 # VERSION
 # =========================================================
-VERSION = "ALHUSSIENY_FACEBOOK_FIX_2026_08_09_V6"
+VERSION = "ALHUSSIENY_FACEBOOK_TIMELINE_FIX_2026_08_09_V7"
 
 # =========================================================
 # ENV
@@ -558,18 +558,14 @@ async def show_id(update, context):
 
 async def facebook(text):
     """
-    Publish a text post directly to the Facebook Page Feed.
-
-    Flow:
-    1) POST /PAGE_ID/feed
-    2) Read the exact Post ID returned by Meta
-    3) Verify that exact Post ID
-    4) Always build a fallback post URL if Meta does not return permalink_url
+    Publish -> normalize timeline visibility -> verify exact post ->
+    check Page /posts edge -> return complete diagnostics.
     """
 
     print("\n========================================", flush=True)
     print("FACEBOOK PUBLISH START", flush=True)
     print(f"BOT VERSION: {VERSION}", flush=True)
+    print(f"RUNNING FILE: bot.py", flush=True)
     print(f"FACEBOOK_PAGE_ID: {FACEBOOK_PAGE_ID}", flush=True)
     print(
         f"FACEBOOK_PAGE_TOKEN present: {bool(FACEBOOK_PAGE_ACCESS_TOKEN)}",
@@ -578,14 +574,16 @@ async def facebook(text):
     print("========================================", flush=True)
 
     if not FACEBOOK_PAGE_ID:
-        msg = "❌ FACEBOOK_PAGE_ID غير موجود في Railway Variables."
-        print(msg, flush=True)
-        return {"ok": False, "message": msg}
+        return {
+            "ok": False,
+            "message": "❌ FACEBOOK_PAGE_ID غير موجود في Railway Variables.",
+        }
 
     if not FACEBOOK_PAGE_ACCESS_TOKEN:
-        msg = "❌ FACEBOOK_PAGE_TOKEN غير موجود في Railway Variables."
-        print(msg, flush=True)
-        return {"ok": False, "message": msg}
+        return {
+            "ok": False,
+            "message": "❌ FACEBOOK_PAGE_TOKEN غير موجود في Railway Variables.",
+        }
 
     graph_version = os.getenv("FACEBOOK_GRAPH_VERSION", "v23.0").strip()
     if not graph_version.startswith("v"):
@@ -595,9 +593,7 @@ async def facebook(text):
     feed_url = f"{base_url}/{FACEBOOK_PAGE_ID}/feed"
 
     try:
-        # -----------------------------------------------------
-        # 1) CREATE POST
-        # -----------------------------------------------------
+        # 1) CREATE
         response = requests.post(
             feed_url,
             data={
@@ -618,37 +614,36 @@ async def facebook(text):
 
         if not (200 <= response.status_code < 300):
             err = data.get("error", {}) if isinstance(data, dict) else {}
-            msg = (
-                "❌ Facebook رفض إنشاء المنشور.\n\n"
-                f"الرسالة: {err.get('message', response.text)}\n"
-                f"Type: {err.get('type', '')}\n"
-                f"Code: {err.get('code', '')}\n"
-                f"Subcode: {err.get('error_subcode', '')}"
-            )
-            print(msg, flush=True)
-            return {"ok": False, "message": msg}
+            return {
+                "ok": False,
+                "message": (
+                    "❌ Facebook رفض إنشاء المنشور.\n\n"
+                    f"الرسالة: {err.get('message', response.text)}\n"
+                    f"Type: {err.get('type', '')}\n"
+                    f"Code: {err.get('code', '')}\n"
+                    f"Subcode: {err.get('error_subcode', '')}"
+                ),
+            }
 
-        post_id = None
-        if isinstance(data, dict):
-            post_id = data.get("id") or data.get("post_id")
-
+        post_id = data.get("id") or data.get("post_id")
         if not post_id:
-            msg = (
-                "⚠️ Facebook رجع نجاح لكن لم يرجع Post ID.\n\n"
-                f"Response:\n{response.text}"
-            )
-            print(msg, flush=True)
-            return {"ok": False, "message": msg}
+            return {
+                "ok": False,
+                "message": (
+                    "⚠️ Facebook رجع نجاح لكن لم يرجع Post ID.\n\n"
+                    f"Response:\n{response.text}"
+                ),
+            }
 
         print(f"Facebook Post ID: {post_id}", flush=True)
 
-        # -----------------------------------------------------
-        # 2) VERIFY THE EXACT POST ID
-        # -----------------------------------------------------
+        # 2) Explicitly request normal timeline visibility.
+        normalize_ok = await facebook_force_timeline(post_id, base_url)
+
+        # 3) Verify exact object.
         permalink = None
         is_published = None
         is_hidden = None
-        verify_message = None
 
         verify_url = f"{base_url}/{post_id}"
 
@@ -674,25 +669,16 @@ async def facebook(text):
                 flush=True,
             )
 
-            try:
-                verify_data = verify_response.json()
-            except Exception:
-                verify_data = {}
+            verify_data = verify_response.json()
 
-            if isinstance(verify_data, dict):
-                permalink = verify_data.get("permalink_url")
-                is_published = verify_data.get("is_published")
-                is_hidden = verify_data.get("is_hidden")
-                verify_message = verify_data.get("message")
+            permalink = verify_data.get("permalink_url")
+            is_published = verify_data.get("is_published")
+            is_hidden = verify_data.get("is_hidden")
 
         except Exception as e:
             print(f"Facebook Verify Warning: {repr(e)}", flush=True)
 
-        # -----------------------------------------------------
-        # 3) FALLBACK URL
-        # -----------------------------------------------------
-        # Meta normally returns a permalink. If it doesn't, construct
-        # the standard Page post URL from the returned Page Post ID.
+        # 4) Fallback permalink.
         if not permalink:
             post_part = str(post_id).split("_", 1)[-1]
             permalink = (
@@ -700,9 +686,12 @@ async def facebook(text):
                 f"{FACEBOOK_PAGE_ID}/posts/{post_part}"
             )
 
-        # -----------------------------------------------------
-        # 4) BUILD RESULT FOR TELEGRAM
-        # -----------------------------------------------------
+        # 5) Diagnostic: does the Page /posts edge contain this exact ID?
+        page_posts_contains = await facebook_check_page_posts(
+            post_id,
+            base_url,
+        )
+
         result_lines = [
             "✅ تم نشر المنشور على صفحة Facebook.",
             "",
@@ -711,31 +700,23 @@ async def facebook(text):
             "",
             "🔗 رابط المنشور:",
             permalink,
+            "",
+            f"📌 Published: {'نعم' if is_published else 'لا' if is_published is not None else 'غير معروف'}",
+            f"👁 Hidden: {'نعم' if is_hidden else 'لا' if is_hidden is not None else 'غير معروف'}",
+            "",
+            (
+                "🟢 تم طلب إظهاره في Timeline."
+                if normalize_ok
+                else
+                "🟡 طلب Timeline visibility لم تقبله Meta/لم تؤكده."
+            ),
+            (
+                "🟢 Meta أرجعت المنشور من Page /posts."
+                if page_posts_contains
+                else
+                "🟡 Meta لم تُرجع المنشور ضمن أول 100 من Page /posts."
+            ),
         ]
-
-        if is_published is not None:
-            result_lines += [
-                "",
-                f"📌 Published: {'نعم' if is_published else 'لا'}",
-            ]
-
-        if is_hidden is not None:
-            result_lines.append(
-                f"👁 Hidden: {'نعم' if is_hidden else 'لا'}"
-            )
-
-        if verify_message:
-            # Only show a short confirmation that the exact object was read.
-            result_lines += [
-                "",
-                "✅ تم التحقق من نفس Post ID عبر Meta Graph API.",
-            ]
-        else:
-            result_lines += [
-                "",
-                "ℹ️ Meta أنشأت الـ Post ID بنجاح، "
-                "لكن لم تُرجع بيانات التحقق الكاملة.",
-            ]
 
         result = "\n".join(result_lines)
 
@@ -750,6 +731,8 @@ async def facebook(text):
             "permalink": permalink,
             "is_published": is_published,
             "is_hidden": is_hidden,
+            "timeline_normalize_ok": normalize_ok,
+            "page_posts_contains": page_posts_contains,
         }
 
     except requests.RequestException as e:
@@ -761,6 +744,94 @@ async def facebook(text):
         msg = f"❌ Exception أثناء النشر على Facebook:\n{repr(e)}"
         print(msg, flush=True)
         return {"ok": False, "message": msg}
+
+
+
+async def facebook_force_timeline(post_id, base_url):
+    """
+    Best-effort visibility normalization for the exact Page post.
+
+    The post is already created by /PAGE_ID/feed. We explicitly request
+    normal timeline visibility and is_hidden=false, then read the object
+    again. If Meta does not support one of these update parameters for the
+    current API/token, we log the response and keep the original post.
+    """
+    url = f"{base_url}/{post_id}"
+
+    try:
+        response = requests.post(
+            url,
+            data={
+                "timeline_visibility": "normal",
+                "is_hidden": "false",
+                "access_token": FACEBOOK_PAGE_ACCESS_TOKEN,
+            },
+            timeout=30,
+        )
+
+        print(
+            f"Facebook Timeline Normalize Status: {response.status_code}",
+            flush=True,
+        )
+        print(
+            f"Facebook Timeline Normalize Response: {response.text}",
+            flush=True,
+        )
+
+        return response.status_code < 300
+
+    except Exception as e:
+        print(
+            f"Facebook Timeline Normalize Warning: {repr(e)}",
+            flush=True,
+        )
+        return False
+
+
+async def facebook_check_page_posts(post_id, base_url):
+    """
+    Check whether the exact post is returned by the Page's /posts edge.
+    This is diagnostic only and never changes the post.
+    """
+    url = f"{base_url}/{FACEBOOK_PAGE_ID}/posts"
+
+    try:
+        response = requests.get(
+            url,
+            params={
+                "fields": "id,message,created_time,permalink_url,is_published,is_hidden",
+                "limit": "100",
+                "access_token": FACEBOOK_PAGE_ACCESS_TOKEN,
+            },
+            timeout=30,
+        )
+
+        print(
+            f"Facebook Page Posts Check Status: {response.status_code}",
+            flush=True,
+        )
+        print(
+            f"Facebook Page Posts Check Response: {response.text}",
+            flush=True,
+        )
+
+        if response.status_code >= 300:
+            return False
+
+        data = response.json()
+        for item in data.get("data", []):
+            if str(item.get("id")) == str(post_id):
+                return True
+
+        return False
+
+    except Exception as e:
+        print(
+            f"Facebook Page Posts Check Warning: {repr(e)}",
+            flush=True,
+        )
+        return False
+
 
 
 # =========================================================
@@ -1674,6 +1745,7 @@ def main():
 
     print("========================================", flush=True)
     print("Alhussieny Gold Bot Starting...", flush=True)
+    print("RUNNING FILE: bot.py", flush=True)
     print(f"RUNNING FILE: bot.py", flush=True)
     print(f"BOT VERSION: {VERSION}", flush=True)
     print("========================================", flush=True)
@@ -1690,6 +1762,7 @@ def main():
     app.add_error_handler(error)
 
     print("Alhussieny Gold Bot Started...", flush=True)
+    print(f"READY VERSION: {VERSION}", flush=True)
     print(f"READY VERSION: {VERSION}", flush=True)
 
     app.run_polling(drop_pending_updates=True)
