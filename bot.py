@@ -20,9 +20,7 @@ from telegram.ext import (
 # =========================================================
 # VERSION
 # =========================================================
-# IMPORTANT: This marker must appear in Railway logs.
-# If you do not see it, Railway is NOT running this file.
-VERSION = "FB_DEBUG_2026_08_09_V2"
+VERSION = "FB_PAGE_PUBLISH_2026_08_09_V3"
 
 # =========================================================
 # ENV
@@ -555,7 +553,7 @@ async def show_id(update, context):
 
 
 # =========================================================
-# FACEBOOK - FINAL DEBUG FUNCTION
+# FACEBOOK - PAGE FEED PUBLISH + VERIFY
 # =========================================================
 
 async def facebook(text):
@@ -563,7 +561,10 @@ async def facebook(text):
     print("FACEBOOK PUBLISH START", flush=True)
     print(f"BOT VERSION: {VERSION}", flush=True)
     print(f"FACEBOOK_PAGE_ID present: {bool(FACEBOOK_PAGE_ID)}", flush=True)
-    print(f"FACEBOOK_PAGE_TOKEN present: {bool(FACEBOOK_PAGE_ACCESS_TOKEN)}", flush=True)
+    print(
+        f"FACEBOOK_PAGE_TOKEN present: {bool(FACEBOOK_PAGE_ACCESS_TOKEN)}",
+        flush=True,
+    )
     print("========================================", flush=True)
 
     if not FACEBOOK_PAGE_ID:
@@ -576,28 +577,39 @@ async def facebook(text):
         print(msg, flush=True)
         return {"ok": False, "message": msg}
 
-    url = f"https://graph.facebook.com/v23.0/{FACEBOOK_PAGE_ID}/feed"
+    feed_url = f"https://graph.facebook.com/v23.0/{FACEBOOK_PAGE_ID}/feed"
+
+    payload = {
+        "message": text,
+        "access_token": FACEBOOK_PAGE_ACCESS_TOKEN,
+        "published": "true",
+    }
 
     try:
+        # 1) Create the post directly on the Page feed.
         response = requests.post(
-            url,
-            data={
-                "message": text,
-                "access_token": FACEBOOK_PAGE_ACCESS_TOKEN,
-            },
+            feed_url,
+            data=payload,
             timeout=30,
         )
 
-        print(f"Facebook HTTP Status: {response.status_code}", flush=True)
-        print(f"Facebook Raw Response: {response.text}", flush=True)
+        print(
+            f"Facebook Publish HTTP Status: {response.status_code}",
+            flush=True,
+        )
+        print(
+            f"Facebook Publish Raw Response: {response.text}",
+            flush=True,
+        )
 
         try:
             data = response.json()
         except Exception:
             data = {}
 
-        if response.status_code < 200 or response.status_code >= 300:
+        if not (200 <= response.status_code < 300):
             err = data.get("error", {}) if isinstance(data, dict) else {}
+
             msg = (
                 "❌ Facebook رفض النشر.\n\n"
                 f"الرسالة: {err.get('message', response.text)}\n"
@@ -605,60 +617,156 @@ async def facebook(text):
                 f"Code: {err.get('code', '')}\n"
                 f"Subcode: {err.get('error_subcode', '')}"
             )
+
             print(msg, flush=True)
             return {"ok": False, "message": msg}
 
         post_id = None
+
         if isinstance(data, dict):
             post_id = data.get("id") or data.get("post_id")
 
-        print(f"Facebook Post ID: {post_id}", flush=True)
+        print(f"Facebook Created Post ID: {post_id}", flush=True)
 
-        permalink = None
-
-        if post_id:
-            verify_url = f"https://graph.facebook.com/v23.0/{post_id}"
-            verify_response = requests.get(
-                verify_url,
-                params={
-                    "fields": "id,message,from,created_time,permalink_url",
-                    "access_token": FACEBOOK_PAGE_ACCESS_TOKEN,
-                },
-                timeout=30,
-            )
-
-            print(
-                f"Facebook Verify Status: {verify_response.status_code}",
-                flush=True,
-            )
-            print(
-                f"Facebook Verify Response: {verify_response.text}",
-                flush=True,
-            )
-
-            try:
-                verify_data = verify_response.json()
-            except Exception:
-                verify_data = {}
-
-            if isinstance(verify_data, dict):
-                permalink = verify_data.get("permalink_url")
-
-        if post_id:
-            result = (
-                "✅ Facebook قبل النشر.\n\n"
-                f"🆔 Post ID:\n{post_id}"
-            )
-            if permalink:
-                result += f"\n\n🔗 رابط المنشور:\n{permalink}"
-            result += "\n\n📌 Meta أكدت إنشاء المنشور."
-        else:
-            result = (
+        if not post_id:
+            msg = (
                 "⚠️ Facebook رجع نجاح لكن لم يرجع Post ID.\n\n"
                 f"Response:\n{response.text}"
             )
+            print(msg, flush=True)
+            return {
+                "ok": False,
+                "message": msg,
+            }
 
-        print(f"FACEBOOK FINAL RESULT: {result}", flush=True)
+        # 2) Verify that Meta can read the created post.
+        verify_url = f"https://graph.facebook.com/v23.0/{post_id}"
+
+        verify_response = requests.get(
+            verify_url,
+            params={
+                "fields": "id,message,from,created_time,permalink_url,is_published",
+                "access_token": FACEBOOK_PAGE_ACCESS_TOKEN,
+            },
+            timeout=30,
+        )
+
+        print(
+            f"Facebook Verify HTTP Status: {verify_response.status_code}",
+            flush=True,
+        )
+        print(
+            f"Facebook Verify Response: {verify_response.text}",
+            flush=True,
+        )
+
+        try:
+            verify_data = verify_response.json()
+        except Exception:
+            verify_data = {}
+
+        permalink = None
+        is_published = None
+        from_page = None
+
+        if isinstance(verify_data, dict):
+            permalink = verify_data.get("permalink_url")
+            is_published = verify_data.get("is_published")
+            from_data = verify_data.get("from")
+
+            if isinstance(from_data, dict):
+                from_page = from_data.get("id")
+
+        # 3) Verify the post appears in the Page feed itself.
+        feed_verify_response = requests.get(
+            feed_url,
+            params={
+                "fields": "id,message,created_time,permalink_url,is_published",
+                "limit": 10,
+                "access_token": FACEBOOK_PAGE_ACCESS_TOKEN,
+            },
+            timeout=30,
+        )
+
+        print(
+            f"Facebook Page Feed Verify Status: "
+            f"{feed_verify_response.status_code}",
+            flush=True,
+        )
+        print(
+            f"Facebook Page Feed Verify Response: "
+            f"{feed_verify_response.text}",
+            flush=True,
+        )
+
+        feed_contains_post = False
+
+        try:
+            feed_data = feed_verify_response.json()
+        except Exception:
+            feed_data = {}
+
+        if isinstance(feed_data, dict):
+            for item in feed_data.get("data", []):
+                if isinstance(item, dict) and item.get("id") == post_id:
+                    feed_contains_post = True
+
+                    if not permalink:
+                        permalink = item.get("permalink_url")
+
+                    if is_published is None:
+                        is_published = item.get("is_published")
+
+                    break
+
+        print(
+            f"Facebook post found in Page feed: {feed_contains_post}",
+            flush=True,
+        )
+        print(
+            f"Facebook is_published: {is_published}",
+            flush=True,
+        )
+        print(
+            f"Facebook from page ID: {from_page}",
+            flush=True,
+        )
+
+        # The important success condition is that Meta created the post.
+        result_lines = [
+            "✅ تم نشر المنشور على صفحة Facebook.",
+            "",
+            f"🆔 Post ID:",
+            str(post_id),
+        ]
+
+        if permalink:
+            result_lines += [
+                "",
+                "🔗 رابط المنشور:",
+                permalink,
+            ]
+
+        if is_published is not None:
+            result_lines += [
+                "",
+                f"📌 Published: {'نعم' if is_published else 'لا'}",
+            ]
+
+        result_lines += [
+            "",
+            (
+                "✅ Meta أكد وجود المنشور في Page Feed."
+                if feed_contains_post
+                else
+                "⚠️ Meta أنشأ المنشور، لكن فحص Page Feed لم يجده ضمن آخر 10 منشورات."
+            ),
+        ]
+
+        result = "\n".join(result_lines)
+
+        print("FACEBOOK FINAL RESULT:", flush=True)
+        print(result, flush=True)
         print("========================================\n", flush=True)
 
         return {
@@ -666,7 +774,14 @@ async def facebook(text):
             "message": result,
             "post_id": post_id,
             "permalink": permalink,
+            "is_published": is_published,
+            "feed_contains_post": feed_contains_post,
         }
+
+    except requests.RequestException as e:
+        msg = f"❌ خطأ شبكة أثناء الاتصال بـ Facebook:\n{repr(e)}"
+        print(msg, flush=True)
+        return {"ok": False, "message": msg}
 
     except Exception as e:
         msg = f"❌ Exception أثناء الاتصال بـ Facebook:\n{repr(e)}"
@@ -1477,7 +1592,6 @@ async def buttons(update, context):
             if context.user_data.get("first"):
                 save_first(p)
 
-        # Keep result before clearing user data.
         context.user_data.clear()
 
         if c == "pub_fb":
@@ -1520,6 +1634,11 @@ async def buttons(update, context):
             if fb_result.get("permalink"):
                 result_lines.append(
                     f"\n🔗 رابط المنشور:\n{fb_result['permalink']}"
+                )
+
+            if fb_result.get("feed_contains_post"):
+                result_lines.append(
+                    "\n📌 المنشور ظهر داخل Page Feed."
                 )
         else:
             result_lines.append(
