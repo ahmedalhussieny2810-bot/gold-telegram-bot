@@ -22,7 +22,7 @@ from telegram.ext import (
 # =========================================================
 # VERSION
 # =========================================================
-VERSION = "ALHUSSIENY_SHOP_SYSTEM_2026_08_13_V25"
+VERSION = "ALHUSSIENY_SHOP_SYSTEM_2026_08_13_V26"
 
 # =========================================================
 # ENV
@@ -1591,9 +1591,66 @@ def fb_request(method, url, *, params=None, data=None, timeout=30):
     return r, payload
 
 
+async def facebook_story(image_bytes, base, graph_version):
+    """
+    Publishes the given image bytes to the Facebook Page Story.
+    Two-step flow: upload an unpublished photo to get a photo_id,
+    then attach that photo_id to /{page_id}/photo_stories.
+    Best-effort — failures here never affect the main feed post.
+    """
+    photos_url = f"{base}/{FACEBOOK_PAGE_ID}/photos"
+    story_url = f"{base}/{FACEBOOK_PAGE_ID}/photo_stories"
+
+    try:
+        r = requests.post(
+            photos_url,
+            data={
+                "published": "false",
+                "access_token": FACEBOOK_PAGE_ACCESS_TOKEN,
+            },
+            files={"source": ("story.jpg", image_bytes, "image/jpeg")},
+            timeout=30,
+        )
+        try:
+            uploaded = r.json()
+        except Exception:
+            uploaded = {}
+
+        print(f"FB STORY UPLOAD STATUS: {r.status_code}", flush=True)
+        print(f"FB STORY UPLOAD RESPONSE: {r.text}", flush=True)
+
+        if r.status_code >= 300 or not uploaded.get("id"):
+            return {"ok": False, "message": fb_error_text(uploaded)}
+
+        r2 = requests.post(
+            story_url,
+            data={
+                "photo_id": uploaded["id"],
+                "access_token": FACEBOOK_PAGE_ACCESS_TOKEN,
+            },
+            timeout=30,
+        )
+        try:
+            published = r2.json()
+        except Exception:
+            published = {}
+
+        print(f"FB STORY PUBLISH STATUS: {r2.status_code}", flush=True)
+        print(f"FB STORY PUBLISH RESPONSE: {r2.text}", flush=True)
+
+        if r2.status_code >= 300:
+            return {"ok": False, "message": fb_error_text(published)}
+
+        return {"ok": True, "post_id": published.get("post_id")}
+
+    except requests.RequestException as e:
+        return {"ok": False, "message": repr(e)}
+
+
 async def facebook_photo(text, photo_url):
     """
-    Publishes a photo post to the Facebook Page feed.
+    Publishes a photo post to the Facebook Page feed, then
+    best-effort publishes the same image to the Facebook Page Story.
 
     IMPORTANT: We download the image bytes ourselves and upload them
     directly (multipart/form-data) instead of passing a Telegram URL
@@ -1662,17 +1719,98 @@ async def facebook_photo(text, photo_url):
 
         post_id = created.get("post_id") or created.get("id")
 
-        return {
+        out = {
             "ok": True,
-            "message": "✅ تم نشر الصورة على Facebook.",
+            "message": "✅ تم نشر الصورة على Facebook (فيد).",
             "post_id": post_id,
         }
+
+        story_result = await facebook_story(img.content, base, graph_version)
+        out["story_ok"] = story_result.get("ok", False)
+        out["story_message"] = (
+            "✅ اتنشرت في ستوري فيسبوك كمان."
+            if story_result.get("ok") else
+            "⚠️ الفيد اتنشر، بس ستوري فيسبوك فشل: "
+            + story_result.get("message", "")
+        )
+
+        return out
 
     except requests.RequestException as e:
         return {
             "ok": False,
             "message": f"❌ خطأ شبكة أثناء نشر الصورة على Facebook:\n{repr(e)}",
         }
+
+
+async def _ig_container_publish(base, data, timeout_polls=10):
+    """
+    Shared helper: creates an Instagram media container, waits for
+    Instagram to finish processing it (status_code == FINISHED),
+    then publishes it. Returns (ok, result_dict).
+    Used for both feed photos and Instagram Stories — they use the
+    exact same container flow, only the media_type differs.
+    """
+    media_url = f"{base}/{INSTAGRAM_BUSINESS_ID}/media"
+    publish_url = f"{base}/{INSTAGRAM_BUSINESS_ID}/media_publish"
+
+    r, created = fb_request("POST", media_url, data=data)
+
+    print(f"IG MEDIA STATUS: {r.status_code}", flush=True)
+    print(f"IG MEDIA RESPONSE: {r.text}", flush=True)
+
+    if r.status_code >= 300 or not created.get("id"):
+        return False, {"message": fb_error_text(created)}
+
+    creation_id = created["id"]
+    status_url = f"{base}/{creation_id}"
+
+    ready = False
+    last_status = None
+    for _ in range(timeout_polls):
+        try:
+            sr, sdata = fb_request(
+                "GET",
+                status_url,
+                params={
+                    "fields": "status_code",
+                    "access_token": FACEBOOK_PAGE_ACCESS_TOKEN,
+                },
+            )
+            last_status = sdata.get("status_code")
+            print(f"IG CONTAINER STATUS: {last_status}", flush=True)
+
+            if last_status == "FINISHED":
+                ready = True
+                break
+            if last_status in ("ERROR", "EXPIRED"):
+                break
+        except requests.RequestException:
+            pass
+
+        await asyncio.sleep(2)
+
+    if not ready and last_status not in (None, "IN_PROGRESS"):
+        return False, {
+            "message": f"الحالة: {last_status or 'غير معروفة'}"
+        }
+
+    r2, published = fb_request(
+        "POST",
+        publish_url,
+        data={
+            "creation_id": creation_id,
+            "access_token": FACEBOOK_PAGE_ACCESS_TOKEN,
+        },
+    )
+
+    print(f"IG PUBLISH STATUS: {r2.status_code}", flush=True)
+    print(f"IG PUBLISH RESPONSE: {r2.text}", flush=True)
+
+    if r2.status_code >= 300:
+        return False, {"message": fb_error_text(published)}
+
+    return True, {"post_id": published.get("id")}
 
 
 async def instagram_photo(text, photo_url):
@@ -1687,6 +1825,11 @@ async def instagram_photo(text, photo_url):
     container's status_code until it's FINISHED (or a short timeout
     passes) instead of publishing immediately, which otherwise fails
     with "Media ID is not available" (code 9007).
+
+    After the feed post succeeds, this also best-effort publishes
+    the same image to the Instagram Story. A story failure does NOT
+    make the overall result fail — the feed post already succeeded —
+    but is reported back via the "story_message" key.
     """
 
     if not INSTAGRAM_BUSINESS_ID:
@@ -1706,99 +1849,49 @@ async def instagram_photo(text, photo_url):
         graph_version = "v" + graph_version
 
     base = f"https://graph.facebook.com/{graph_version}"
-    media_url = f"{base}/{INSTAGRAM_BUSINESS_ID}/media"
-    publish_url = f"{base}/{INSTAGRAM_BUSINESS_ID}/media_publish"
 
     try:
-        r, created = fb_request(
-            "POST",
-            media_url,
-            data={
-                "image_url": photo_url,
-                "caption": text or "",
-                "access_token": FACEBOOK_PAGE_ACCESS_TOKEN,
-            },
-        )
+        ok, result = await _ig_container_publish(base, {
+            "image_url": photo_url,
+            "caption": text or "",
+            "access_token": FACEBOOK_PAGE_ACCESS_TOKEN,
+        })
 
-        print(f"IG MEDIA STATUS: {r.status_code}", flush=True)
-        print(f"IG MEDIA RESPONSE: {r.text}", flush=True)
-
-        if r.status_code >= 300 or not created.get("id"):
-            return {
-                "ok": False,
-                "message": (
-                    "❌ فشل تجهيز الصورة على Instagram.\n\n"
-                    + fb_error_text(created)
-                ),
-            }
-
-        creation_id = created["id"]
-        status_url = f"{base}/{creation_id}"
-
-        # Poll until Instagram finishes downloading/processing the
-        # image (status_code == FINISHED), up to ~20 seconds.
-        ready = False
-        last_status = None
-        for _ in range(10):
-            try:
-                sr, sdata = fb_request(
-                    "GET",
-                    status_url,
-                    params={
-                        "fields": "status_code",
-                        "access_token": FACEBOOK_PAGE_ACCESS_TOKEN,
-                    },
-                )
-                last_status = sdata.get("status_code")
-                print(f"IG CONTAINER STATUS: {last_status}", flush=True)
-
-                if last_status == "FINISHED":
-                    ready = True
-                    break
-                if last_status in ("ERROR", "EXPIRED"):
-                    break
-            except requests.RequestException:
-                pass
-
-            await asyncio.sleep(2)
-
-        if not ready and last_status not in (None, "IN_PROGRESS"):
-            return {
-                "ok": False,
-                "message": (
-                    "❌ فشل تجهيز الصورة على Instagram "
-                    f"(الحالة: {last_status or 'غير معروفة'})."
-                ),
-            }
-        # If still IN_PROGRESS after the timeout, try publishing anyway —
-        # Instagram sometimes finishes right around this point.
-
-        r2, published = fb_request(
-            "POST",
-            publish_url,
-            data={
-                "creation_id": creation_id,
-                "access_token": FACEBOOK_PAGE_ACCESS_TOKEN,
-            },
-        )
-
-        print(f"IG PUBLISH STATUS: {r2.status_code}", flush=True)
-        print(f"IG PUBLISH RESPONSE: {r2.text}", flush=True)
-
-        if r2.status_code >= 300:
+        if not ok:
             return {
                 "ok": False,
                 "message": (
                     "❌ فشل نشر الصورة على Instagram.\n\n"
-                    + fb_error_text(published)
+                    + result.get("message", "")
                 ),
             }
 
-        return {
+        out = {
             "ok": True,
-            "message": "✅ تم النشر على Instagram.",
-            "post_id": published.get("id"),
+            "message": "✅ تم النشر على Instagram (فيد).",
+            "post_id": result.get("post_id"),
         }
+
+        # Best-effort: also publish the same image as an Instagram
+        # Story. Stories don't take a caption via the API.
+        try:
+            story_ok, story_result = await _ig_container_publish(base, {
+                "image_url": photo_url,
+                "media_type": "STORIES",
+                "access_token": FACEBOOK_PAGE_ACCESS_TOKEN,
+            })
+            out["story_ok"] = story_ok
+            out["story_message"] = (
+                "✅ اتنشرت في الستوري كمان."
+                if story_ok else
+                "⚠️ الفيد اتنشر، بس الستوري فشل: "
+                + story_result.get("message", "")
+            )
+        except Exception as e:
+            out["story_ok"] = False
+            out["story_message"] = f"⚠️ الفيد اتنشر، بس الستوري فشل: {repr(e)}"
+
+        return out
 
     except requests.RequestException as e:
         return {
@@ -4426,8 +4519,11 @@ async def buttons(update, context):
 
         # Single-platform selections: show that platform's own message
         if c == "npub_fb":
+            lines = [fb_result.get("message", "❌ فشل النشر على Facebook.")]
+            if fb_ok and "story_message" in fb_result:
+                lines.append(fb_result["story_message"])
             await q.edit_message_text(
-                fb_result.get("message", "❌ فشل النشر على Facebook."),
+                "\n".join(lines),
                 reply_markup=admin_menu(),
             )
             return
@@ -4442,8 +4538,11 @@ async def buttons(update, context):
             return
 
         if c == "npub_ig":
+            lines = [ig_result.get("message", "❌ فشل النشر على Instagram.")]
+            if ig_ok and "story_message" in ig_result:
+                lines.append(ig_result["story_message"])
             await q.edit_message_text(
-                ig_result.get("message", "❌ فشل النشر على Instagram."),
+                "\n".join(lines),
                 reply_markup=admin_menu(),
             )
             return
@@ -4465,6 +4564,8 @@ async def buttons(update, context):
                     if fb_result else "لم يتم التنفيذ."
                 )
             )
+            if fb_ok and fb_result and "story_message" in fb_result:
+                result_lines.append("   " + fb_result["story_message"])
 
         if want_ig:
             result_lines.append(
@@ -4474,6 +4575,8 @@ async def buttons(update, context):
                     if ig_result else "لم يتم التنفيذ."
                 )
             )
+            if ig_ok and ig_result and "story_message" in ig_result:
+                result_lines.append("   " + ig_result["story_message"])
 
         await q.edit_message_text(
             "\n".join(result_lines),
