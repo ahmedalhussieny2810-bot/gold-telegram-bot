@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import asyncio
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -21,7 +22,7 @@ from telegram.ext import (
 # =========================================================
 # VERSION
 # =========================================================
-VERSION = "ALHUSSIENY_GENERAL_POST_2026_08_12_V15"
+VERSION = "ALHUSSIENY_SHOP_SYSTEM_2026_08_13_V20"
 
 # =========================================================
 # ENV
@@ -32,6 +33,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 CHANNEL_ID = os.getenv("CHANNEL_ID", "").strip()
 FACEBOOK_PAGE_ID = os.getenv("FACEBOOK_PAGE_ID", "").strip()
 FACEBOOK_PAGE_ACCESS_TOKEN = os.getenv("FACEBOOK_PAGE_TOKEN", "").strip()
+INSTAGRAM_BUSINESS_ID = os.getenv("INSTAGRAM_BUSINESS_ID", "").strip()
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 
 try:
@@ -109,6 +111,14 @@ def init_db():
                 "ALTER TABLE Products ADD COLUMN code VARCHAR(100) NULL",
                 "ALTER TABLE Products ADD COLUMN price DECIMAL(15,2) NULL",
                 "ALTER TABLE Products ADD COLUMN description TEXT NULL",
+                "ALTER TABLE Products ADD COLUMN status VARCHAR(20) NOT NULL DEFAULT 'available'",
+                "ALTER TABLE Products ADD COLUMN views_count INT UNSIGNED NOT NULL DEFAULT 0",
+                "ALTER TABLE Products ADD COLUMN inquiries_count INT UNSIGNED NOT NULL DEFAULT 0",
+                "ALTER TABLE Products ADD COLUMN whatsapp_clicks INT UNSIGNED NOT NULL DEFAULT 0",
+                "ALTER TABLE Products ADD COLUMN created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP",
+                "ALTER TABLE Products ADD COLUMN updated_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP",
+                "ALTER TABLE Products ADD INDEX(status)",
+                "ALTER TABLE Products ADD INDEX(code)",
             ]
 
             for q in upgrades:
@@ -116,6 +126,93 @@ def init_db():
                     x.execute(q)
                 except Exception:
                     pass
+
+            # Backfill any NULL status rows created before this migration
+            try:
+                x.execute(
+                    "UPDATE Products SET status='available' "
+                    "WHERE status IS NULL OR TRIM(status)=''"
+                )
+            except Exception:
+                pass
+
+            x.execute("""
+                CREATE TABLE IF NOT EXISTS Users(
+                    telegram_id BIGINT NOT NULL PRIMARY KEY,
+                    first_name VARCHAR(255) NULL,
+                    last_name VARCHAR(255) NULL,
+                    username VARCHAR(255) NULL,
+                    first_seen TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
+                    last_seen TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP
+                        ON UPDATE CURRENT_TIMESTAMP,
+                    total_interactions INT UNSIGNED NOT NULL DEFAULT 0,
+                    inquiries_count INT UNSIGNED NOT NULL DEFAULT 0
+                )
+            """)
+
+            x.execute("""
+                CREATE TABLE IF NOT EXISTS GoldPriceHistory(
+                    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                    price_21 DECIMAL(15,2) NOT NULL,
+                    price_24 DECIMAL(15,2) NOT NULL,
+                    price_18 DECIMAL(15,2) NOT NULL,
+                    admin_id BIGINT NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    INDEX(created_at)
+                )
+            """)
+
+            x.execute("""
+                CREATE TABLE IF NOT EXISTS AdminLogs(
+                    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                    admin_id BIGINT NULL,
+                    action VARCHAR(100) NOT NULL,
+                    old_value TEXT NULL,
+                    new_value TEXT NULL,
+                    object_type VARCHAR(50) NULL,
+                    object_id BIGINT NULL,
+                    status VARCHAR(20) NOT NULL DEFAULT 'success',
+                    error TEXT NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    INDEX(action),
+                    INDEX(created_at)
+                )
+            """)
+
+            x.execute("""
+                CREATE TABLE IF NOT EXISTS PublishLogs(
+                    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                    platform VARCHAR(20) NOT NULL,
+                    post_id VARCHAR(255) NULL,
+                    permalink TEXT NULL,
+                    status VARCHAR(20) NOT NULL,
+                    error TEXT NULL,
+                    content_snippet VARCHAR(255) NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    INDEX(platform),
+                    INDEX(created_at)
+                )
+            """)
+
+            x.execute("""
+                CREATE TABLE IF NOT EXISTS Settings(
+                    setting_key VARCHAR(100) NOT NULL PRIMARY KEY,
+                    setting_value TEXT NULL
+                )
+            """)
+
+            x.execute("""
+                CREATE TABLE IF NOT EXISTS ScheduledPosts(
+                    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                    time_str VARCHAR(5) NOT NULL,
+                    label VARCHAR(50) NULL,
+                    platforms VARCHAR(50) NOT NULL DEFAULT 'tg,fb',
+                    template_key VARCHAR(50) NOT NULL DEFAULT 'normal',
+                    enabled TINYINT(1) NOT NULL DEFAULT 1,
+                    last_run_date DATE NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
 
             x.execute("""
                 SELECT DISTINCT category
@@ -344,10 +441,599 @@ def del_product(pid):
 
 def product(pid):
     return one("""
-        SELECT id,Photo_id,name,code,price,description
+        SELECT id,Photo_id,name,code,price,description,
+               status,views_count,inquiries_count,whatsapp_clicks,
+               category_id
         FROM Products
         WHERE id=%s
     """, (pid,))
+
+
+STATUS_LABELS = {
+    "available": "🟢 متاح",
+    "reserved": "🟡 محجوز",
+    "sold": "🔴 مباع",
+    "hidden": "⚪ مخفي",
+}
+
+STATUS_ORDER = ["available", "reserved", "sold", "hidden"]
+
+EDITABLE_FIELDS = {
+    "name": "name",
+    "code": "code",
+    "price": "price",
+    "desc": "description",
+}
+
+
+def set_product_status(pid, status):
+    if status not in STATUS_LABELS:
+        return False
+    c = db()
+    try:
+        with c.cursor() as x:
+            x.execute(
+                "UPDATE Products SET status=%s WHERE id=%s",
+                (status, pid),
+            )
+            return bool(x.rowcount)
+    finally:
+        c.close()
+
+
+def update_product_field(pid, field, value):
+    column = EDITABLE_FIELDS.get(field)
+    if not column:
+        return False
+    c = db()
+    try:
+        with c.cursor() as x:
+            x.execute(
+                f"UPDATE Products SET {column}=%s WHERE id=%s",
+                (value, pid),
+            )
+            return bool(x.rowcount)
+    finally:
+        c.close()
+
+
+def update_product_photo(pid, photo_id):
+    c = db()
+    try:
+        with c.cursor() as x:
+            x.execute(
+                "UPDATE Products SET Photo_id=%s WHERE id=%s",
+                (photo_id, pid),
+            )
+            return bool(x.rowcount)
+    finally:
+        c.close()
+
+
+def move_product_category(pid, cid):
+    c = db()
+    try:
+        with c.cursor() as x:
+            parent = cat(cid)
+            x.execute(
+                "UPDATE Products SET category_id=%s,category=%s WHERE id=%s",
+                (cid, parent["name"] if parent else "", pid),
+            )
+            return bool(x.rowcount)
+    finally:
+        c.close()
+
+
+def inc_product_counter(pid, field):
+    if field not in ("views_count", "inquiries_count", "whatsapp_clicks"):
+        return
+    c = db()
+    try:
+        with c.cursor() as x:
+            x.execute(
+                f"UPDATE Products SET {field}={field}+1 WHERE id=%s",
+                (pid,),
+            )
+    except Exception as e:
+        print("Counter Error:", repr(e), flush=True)
+    finally:
+        c.close()
+
+
+def search_products(query, limit=200):
+    q = f"%{query.strip()}%"
+    return many("""
+        SELECT p.*,c.name sub_name,m.name main_name
+        FROM Products p
+        LEFT JOIN Categories c ON c.id=p.category_id
+        LEFT JOIN Categories m ON m.id=c.parent_id
+        WHERE p.code LIKE %s
+           OR p.name LIKE %s
+           OR c.name LIKE %s
+           OR m.name LIKE %s
+        ORDER BY p.id DESC
+        LIMIT %s
+    """, (q, q, q, q, limit))
+
+
+def customer_products(cid):
+    """Products visible to customers (hidden ones excluded)."""
+    return many("""
+        SELECT id,Photo_id,name,code,price,description,status
+        FROM Products
+        WHERE category_id=%s AND status<>'hidden'
+        ORDER BY id DESC
+    """, (cid,))
+
+
+# =========================================================
+# USERS
+# =========================================================
+
+def track_user(update):
+    u = update.effective_user
+    if not u:
+        return
+    try:
+        c = db()
+        try:
+            with c.cursor() as x:
+                x.execute(
+                    "SELECT telegram_id FROM Users WHERE telegram_id=%s",
+                    (u.id,),
+                )
+                if x.fetchone():
+                    x.execute("""
+                        UPDATE Users
+                        SET first_name=%s, last_name=%s, username=%s,
+                            total_interactions=total_interactions+1
+                        WHERE telegram_id=%s
+                    """, (u.first_name, u.last_name, u.username, u.id))
+                else:
+                    x.execute("""
+                        INSERT INTO Users
+                        (telegram_id,first_name,last_name,username,
+                         total_interactions)
+                        VALUES(%s,%s,%s,%s,1)
+                    """, (u.id, u.first_name, u.last_name, u.username))
+        finally:
+            c.close()
+    except Exception as e:
+        print("Track User Error:", repr(e), flush=True)
+
+
+def inc_user_inquiries(telegram_id):
+    try:
+        c = db()
+        try:
+            with c.cursor() as x:
+                x.execute(
+                    "UPDATE Users SET inquiries_count=inquiries_count+1 "
+                    "WHERE telegram_id=%s",
+                    (telegram_id,),
+                )
+        finally:
+            c.close()
+    except Exception as e:
+        print("User Inquiry Count Error:", repr(e), flush=True)
+
+
+# =========================================================
+# LOGS
+# =========================================================
+
+def log_action(admin_id, action, old_value=None, new_value=None,
+                object_type=None, object_id=None, status="success",
+                error=None):
+    try:
+        c = db()
+        try:
+            with c.cursor() as x:
+                x.execute("""
+                    INSERT INTO AdminLogs
+                    (admin_id,action,old_value,new_value,
+                     object_type,object_id,status,error)
+                    VALUES(%s,%s,%s,%s,%s,%s,%s,%s)
+                """, (
+                    admin_id, action,
+                    None if old_value is None else str(old_value)[:2000],
+                    None if new_value is None else str(new_value)[:2000],
+                    object_type, object_id, status,
+                    None if error is None else str(error)[:2000],
+                ))
+        finally:
+            c.close()
+    except Exception as e:
+        print("Log Action Error:", repr(e), flush=True)
+
+
+def log_publish(platform, post_id=None, permalink=None,
+                 status="success", error=None, content=""):
+    try:
+        c = db()
+        try:
+            with c.cursor() as x:
+                x.execute("""
+                    INSERT INTO PublishLogs
+                    (platform,post_id,permalink,status,error,content_snippet)
+                    VALUES(%s,%s,%s,%s,%s,%s)
+                """, (
+                    platform, post_id, permalink, status,
+                    None if error is None else str(error)[:2000],
+                    (content or "")[:255],
+                ))
+        finally:
+            c.close()
+    except Exception as e:
+        print("Log Publish Error:", repr(e), flush=True)
+
+
+def record_gold_price(p21, p24, p18, admin_id=None):
+    try:
+        c = db()
+        try:
+            with c.cursor() as x:
+                x.execute("""
+                    INSERT INTO GoldPriceHistory
+                    (price_21,price_24,price_18,admin_id)
+                    VALUES(%s,%s,%s,%s)
+                """, (p21, p24, p18, admin_id))
+        finally:
+            c.close()
+    except Exception as e:
+        print("Gold History Log Error:", repr(e), flush=True)
+
+
+def gold_history_range(start_dt, end_dt):
+    return many("""
+        SELECT price_21,price_24,price_18,admin_id,created_at
+        FROM GoldPriceHistory
+        WHERE created_at BETWEEN %s AND %s
+        ORDER BY created_at ASC
+    """, (start_dt, end_dt))
+
+
+def gold_period_stats(days_back):
+    """days_back=0 -> today, 1 -> yesterday only, N -> last N days incl today."""
+    now = datetime.now(TZ)
+
+    if days_back == 0:
+        start = now.strftime("%Y-%m-%d 00:00:00")
+        end = now.strftime("%Y-%m-%d 23:59:59")
+    elif days_back == 1:
+        y = now - timedelta(days=1)
+        start = y.strftime("%Y-%m-%d 00:00:00")
+        end = y.strftime("%Y-%m-%d 23:59:59")
+    else:
+        start = (now - timedelta(days=days_back - 1)).strftime(
+            "%Y-%m-%d 00:00:00"
+        )
+        end = now.strftime("%Y-%m-%d 23:59:59")
+
+    rows = gold_history_range(start, end)
+    if not rows:
+        return None
+
+    prices = [float(r["price_21"]) for r in rows]
+    first_p = prices[0]
+    last_p = prices[-1]
+    change = last_p - first_p
+    pct = (change / first_p * 100) if first_p else 0
+
+    return {
+        "first": round(first_p),
+        "last": round(last_p),
+        "high": round(max(prices)),
+        "low": round(min(prices)),
+        "change": round(change),
+        "pct": round(pct, 2),
+        "count": len(prices),
+        "rows": rows,
+    }
+
+
+# =========================================================
+# SETTINGS
+# =========================================================
+
+def get_setting(key, default=None):
+    try:
+        row = one(
+            "SELECT setting_value FROM Settings WHERE setting_key=%s",
+            (key,),
+        )
+        return row["setting_value"] if row else default
+    except Exception as e:
+        print("Get Setting Error:", repr(e), flush=True)
+        return default
+
+
+def set_setting(key, value):
+    c = db()
+    try:
+        with c.cursor() as x:
+            x.execute("""
+                INSERT INTO Settings(setting_key,setting_value)
+                VALUES(%s,%s)
+                ON DUPLICATE KEY UPDATE setting_value=%s
+            """, (key, value, value))
+    finally:
+        c.close()
+
+
+def gold_alert_threshold():
+    v = get_setting("gold_alert_threshold", "0")
+    try:
+        return float(v)
+    except Exception:
+        return 0
+
+
+# =========================================================
+# POST TEMPLATES
+# =========================================================
+
+TEMPLATES = {
+    "normal": {
+        "name": "قالب أسعار عادي",
+        "body": (
+            "💎 أسعار الذهب اليوم\n\n"
+            "🟡 عيار 24 : {price_24}\n"
+            "🟡 عيار 21 : {price_21}\n"
+            "🟡 عيار 18 : {price_18}\n\n"
+            "📍 {shop_name}\n\n"
+            "🌐 {website}"
+        ),
+    },
+    "luxury": {
+        "name": "قالب فاخر",
+        "body": (
+            "✨💍 مجوهرات الحسيني — أسعار الذهب ✨\n\n"
+            "📅 {date} — 🕐 {time}\n\n"
+            "🟡 عيار 24 : {price_24} جنيه\n"
+            "🟡 عيار 21 : {price_21} جنيه\n"
+            "🟡 عيار 18 : {price_18} جنيه\n\n"
+            "💫 جمال يدوم... يليق بك\n"
+            "📍 {shop_name}\n"
+            "💬 {whatsapp}"
+        ),
+    },
+    "short": {
+        "name": "قالب مختصر",
+        "body": (
+            "💰 عيار 21: {price_21} | "
+            "عيار 24: {price_24} | "
+            "عيار 18: {price_18}"
+        ),
+    },
+    "links": {
+        "name": "قالب أسعار + روابط المحل",
+        "body": (
+            "💎 أسعار الذهب اليوم\n\n"
+            "🟡 عيار 24 : {price_24}\n"
+            "🟡 عيار 21 : {price_21}\n"
+            "🟡 عيار 18 : {price_18}\n\n"
+            "📍 {shop_name}\n"
+            "🌐 الموقع: {website}\n"
+            "💬 واتساب: {whatsapp}\n"
+            "📍 الموقع على الخريطة: {maps}"
+        ),
+    },
+    "offer": {
+        "name": "قالب عروض",
+        "body": (
+            "🔥 عرض خاص اليوم في مجوهرات الحسيني 🔥\n\n"
+            "💎 أسعار الذهب:\n"
+            "🟡 عيار 24 : {price_24}\n"
+            "🟡 عيار 21 : {price_21}\n"
+            "🟡 عيار 18 : {price_18}\n\n"
+            "زورونا اليوم في {shop_name}\n"
+            "🌐 {website}"
+        ),
+    },
+}
+
+
+def render_template(key, price21):
+    tpl = TEMPLATES.get(key, TEMPLATES["normal"])
+    p24, p21, p18 = calc(price21)
+    now = datetime.now(TZ)
+
+    return tpl["body"].format(
+        price_24=p24,
+        price_21=p21,
+        price_18=p18,
+        date=now.strftime("%Y-%m-%d"),
+        time=now.strftime("%H:%M"),
+        shop_name="مجوهرات الحسيني - بورسعيد",
+        website=WEBSITE,
+        whatsapp=WHATSAPP,
+        maps=MAPS,
+    )
+
+
+def template_pick_menu():
+    k = [
+        [InlineKeyboardButton(t["name"], callback_data=f"tpl:{key}")]
+        for key, t in TEMPLATES.items()
+    ]
+    k.append([InlineKeyboardButton("⬅️ رجوع", callback_data="agold")])
+    return InlineKeyboardMarkup(k)
+
+
+# =========================================================
+# SCHEDULED AUTO-POSTING
+# =========================================================
+
+def scheduled_posts():
+    return many(
+        "SELECT * FROM ScheduledPosts ORDER BY time_str ASC"
+    )
+
+
+def scheduled_post(sid):
+    return one(
+        "SELECT * FROM ScheduledPosts WHERE id=%s", (sid,)
+    )
+
+
+def add_scheduled_post(time_str, platforms="tg,fb", template_key="normal"):
+    c = db()
+    try:
+        with c.cursor() as x:
+            x.execute("""
+                INSERT INTO ScheduledPosts(time_str,platforms,template_key)
+                VALUES(%s,%s,%s)
+            """, (time_str, platforms, template_key))
+            return x.lastrowid
+    finally:
+        c.close()
+
+
+def delete_scheduled_post(sid):
+    c = db()
+    try:
+        with c.cursor() as x:
+            x.execute("DELETE FROM ScheduledPosts WHERE id=%s", (sid,))
+            return bool(x.rowcount)
+    finally:
+        c.close()
+
+
+def toggle_scheduled_post(sid):
+    c = db()
+    try:
+        with c.cursor() as x:
+            x.execute(
+                "UPDATE ScheduledPosts SET enabled=1-enabled WHERE id=%s",
+                (sid,),
+            )
+            return bool(x.rowcount)
+    finally:
+        c.close()
+
+
+def mark_scheduled_post_ran(sid, date_str):
+    c = db()
+    try:
+        with c.cursor() as x:
+            x.execute(
+                "UPDATE ScheduledPosts SET last_run_date=%s WHERE id=%s",
+                (date_str, sid),
+            )
+    finally:
+        c.close()
+
+
+def gold_today_stats():
+    rows = gold_history_range(
+        datetime.now(TZ).strftime("%Y-%m-%d 00:00:00"),
+        datetime.now(TZ).strftime("%Y-%m-%d 23:59:59"),
+    )
+    if not rows:
+        return None
+
+    prices = [float(r["price_21"]) for r in rows]
+    first_p = prices[0]
+    last_p = prices[-1]
+    change = last_p - first_p
+    pct = (change / first_p * 100) if first_p else 0
+
+    return {
+        "first": round(first_p),
+        "last": round(last_p),
+        "high": round(max(prices)),
+        "low": round(min(prices)),
+        "change": round(change),
+        "pct": round(pct, 2),
+        "count": len(prices),
+    }
+
+
+# =========================================================
+# ANALYTICS
+# =========================================================
+
+def top_viewed_products(limit=10):
+    return many("""
+        SELECT id,name,code,views_count
+        FROM Products
+        WHERE views_count > 0
+        ORDER BY views_count DESC
+        LIMIT %s
+    """, (limit,))
+
+
+def top_inquired_products(limit=10):
+    return many("""
+        SELECT id,name,code,inquiries_count
+        FROM Products
+        WHERE inquiries_count > 0
+        ORDER BY inquiries_count DESC
+        LIMIT %s
+    """, (limit,))
+
+
+def top_viewed_categories(limit=10):
+    return many("""
+        SELECT m.name main_name, c.name sub_name,
+               COALESCE(SUM(p.views_count),0) total_views
+        FROM Categories c
+        LEFT JOIN Categories m ON m.id=c.parent_id
+        LEFT JOIN Products p ON p.category_id=c.id
+        WHERE c.parent_id IS NOT NULL
+        GROUP BY c.id, m.name, c.name
+        HAVING total_views > 0
+        ORDER BY total_views DESC
+        LIMIT %s
+    """, (limit,))
+
+
+def product_totals():
+    row = one("""
+        SELECT
+            COUNT(*) total,
+            SUM(status='available') available,
+            SUM(status='reserved') reserved,
+            SUM(status='sold') sold,
+            SUM(status='hidden') hidden,
+            COALESCE(SUM(views_count),0) views,
+            COALESCE(SUM(inquiries_count),0) inquiries
+        FROM Products
+    """)
+    return row or {}
+
+
+def user_totals():
+    row = one("""
+        SELECT
+            COUNT(*) total,
+            SUM(last_seen >= NOW() - INTERVAL 7 DAY) active_7d,
+            COALESCE(SUM(inquiries_count),0) inquiries
+        FROM Users
+    """)
+    return row or {}
+
+
+def top_inquiring_users(limit=10):
+    return many("""
+        SELECT telegram_id,first_name,username,inquiries_count
+        FROM Users
+        WHERE inquiries_count > 0
+        ORDER BY inquiries_count DESC
+        LIMIT %s
+    """, (limit,))
+
+
+def publish_totals():
+    row = one("""
+        SELECT
+            COUNT(*) total,
+            SUM(status='success') success,
+            SUM(status='failed') failed
+        FROM PublishLogs
+    """)
+    return row or {}
 
 
 # =========================================================
@@ -400,11 +1086,13 @@ def latest():
     return load_json(LATEST).get("price")
 
 
-def save_latest(p):
+def save_latest(p, admin_id=None):
     save_json(LATEST, {
         "price": round(p),
         "updated_at": datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S"),
     })
+    p24, p21, p18 = calc(p)
+    record_gold_price(p21, p24, p18, admin_id)
 
 
 def comparison(p):
@@ -478,7 +1166,51 @@ def admin_menu():
         [InlineKeyboardButton("💰 إدارة أسعار الذهب", callback_data="agold")],
         [InlineKeyboardButton("💍 إدارة المنتجات", callback_data="aprod")],
         [InlineKeyboardButton("📂 إدارة الأقسام", callback_data="acat")],
+        [InlineKeyboardButton("⏰ النشر التلقائي", callback_data="schedmenu")],
+        [InlineKeyboardButton("📊 الإحصائيات", callback_data="stats")],
         [InlineKeyboardButton("⬅️ الرئيسية", callback_data="home")],
+    ])
+
+
+def scheduler_menu():
+    rows = scheduled_posts()
+
+    k = []
+    for sp in rows:
+        onoff = "🟢" if sp["enabled"] else "⏸"
+        k.append([InlineKeyboardButton(
+            f"{onoff} {sp['time_str']} ({sp['platforms']})",
+            callback_data=f"schedopen:{sp['id']}"
+        )])
+
+    k.append([InlineKeyboardButton("➕ إضافة موعد", callback_data="schedadd")])
+    k.append([InlineKeyboardButton("👑 لوحة التحكم", callback_data="admin")])
+    return InlineKeyboardMarkup(k)
+
+
+def scheduler_item_menu(sid):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⏯ تشغيل/إيقاف", callback_data=f"schedtoggle:{sid}")],
+        [InlineKeyboardButton("🗑 حذف الموعد", callback_data=f"scheddel:{sid}")],
+        [InlineKeyboardButton("⬅️ رجوع", callback_data="schedmenu")],
+    ])
+
+
+def stats_menu():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            "🔥 أكثر المنتجات مشاهدة", callback_data="statsview"
+        )],
+        [InlineKeyboardButton(
+            "🔥 أكثر المنتجات استعلامات", callback_data="statsinq"
+        )],
+        [InlineKeyboardButton(
+            "📂 أكثر الأقسام مشاهدة", callback_data="statscat"
+        )],
+        [InlineKeyboardButton(
+            "👥 أكثر العملاء استعلامات", callback_data="statsusers"
+        )],
+        [InlineKeyboardButton("👑 لوحة التحكم", callback_data="admin")],
     ])
 
 
@@ -499,17 +1231,104 @@ def prod_menu():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("➕ إضافة منتج", callback_data="addprod")],
         [InlineKeyboardButton("📋 عرض المنتجات", callback_data="viewprod")],
+        [InlineKeyboardButton("✏️ تعديل منتج", callback_data="editprod:0")],
+        [InlineKeyboardButton("🔎 بحث عن منتج", callback_data="searchprod")],
         [InlineKeyboardButton("🗑 حذف منتج", callback_data="deleteprod")],
         [InlineKeyboardButton("⬅️ لوحة التحكم", callback_data="admin")],
     ])
 
 
+def product_pick_kb(ps, page, callback_prefix, back_cb, page_size=10):
+    """Paginated keyboard for picking a product from a list."""
+    start_i = page * page_size
+    chunk = ps[start_i:start_i + page_size]
+
+    k = [
+        [InlineKeyboardButton(
+            f"{STATUS_LABELS.get(p.get('status') or 'available', '')} "
+            f"#{p['id']} {p['name'] or 'بدون اسم'}",
+            callback_data=f"{callback_prefix}:{p['id']}"
+        )]
+        for p in chunk
+    ]
+
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(
+            "⬅️ السابق", callback_data=f"{callback_prefix}p:{page-1}"
+        ))
+    if start_i + page_size < len(ps):
+        nav.append(InlineKeyboardButton(
+            "➡️ التالي", callback_data=f"{callback_prefix}p:{page+1}"
+        ))
+    if nav:
+        k.append(nav)
+
+    k.append([InlineKeyboardButton("🏠 رجوع", callback_data=back_cb)])
+    return InlineKeyboardMarkup(k)
+
+
+def product_edit_menu(pid):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✏️ الاسم", callback_data=f"ef:name:{pid}")],
+        [InlineKeyboardButton("💰 السعر", callback_data=f"ef:price:{pid}")],
+        [InlineKeyboardButton("🔖 الكود", callback_data=f"ef:code:{pid}")],
+        [InlineKeyboardButton("📝 الوصف", callback_data=f"ef:desc:{pid}")],
+        [InlineKeyboardButton("📸 الصورة", callback_data=f"ef:photo:{pid}")],
+        [InlineKeyboardButton("🔄 الحالة", callback_data=f"stat:{pid}")],
+        [InlineKeyboardButton(
+            "⬅️ رجوع لقائمة المنتجات", callback_data="editprod:0"
+        )],
+        [InlineKeyboardButton("👑 لوحة التحكم", callback_data="admin")],
+    ])
+
+
+def status_pick_kb(pid):
+    k = [
+        [InlineKeyboardButton(
+            label, callback_data=f"sset:{pid}:{key}"
+        )]
+        for key, label in STATUS_LABELS.items()
+    ]
+    k.append([InlineKeyboardButton(
+        "⬅️ رجوع", callback_data=f"editprod_open:{pid}"
+    )])
+    return InlineKeyboardMarkup(k)
+
+
 def gold_menu():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("✏️ تحديث السعر", callback_data="updategold")],
-        [InlineKeyboardButton("📜 سجل الأسعار", callback_data="history")],
+        [InlineKeyboardButton("📊 أسعار اليوم", callback_data="goldtoday")],
+        [InlineKeyboardButton("📅 تاريخ الأسعار", callback_data="histmenu")],
+        [InlineKeyboardButton("🔔 تنبيهات السعر", callback_data="alertmenu")],
         [InlineKeyboardButton("📢 نشر السعر", callback_data="publish")],
         [InlineKeyboardButton("⬅️ لوحة التحكم", callback_data="admin")],
+    ])
+
+
+def hist_period_menu():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("اليوم", callback_data="histp:0")],
+        [InlineKeyboardButton("أمس", callback_data="histp:1")],
+        [InlineKeyboardButton("آخر 7 أيام", callback_data="histp:7")],
+        [InlineKeyboardButton("آخر 30 يوم", callback_data="histp:30")],
+        [InlineKeyboardButton("⬅️ رجوع", callback_data="agold")],
+    ])
+
+
+def alert_menu():
+    current = gold_alert_threshold()
+    status = f"الحد الحالي: {int(current)} جنيه" if current else "متوقفة"
+
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"ℹ️ {status}", callback_data="alertmenu")],
+        [InlineKeyboardButton("10 جنيه", callback_data="alertset:10")],
+        [InlineKeyboardButton("20 جنيه", callback_data="alertset:20")],
+        [InlineKeyboardButton("50 جنيه", callback_data="alertset:50")],
+        [InlineKeyboardButton("100 جنيه", callback_data="alertset:100")],
+        [InlineKeyboardButton("⏸ إيقاف التنبيهات", callback_data="alertset:0")],
+        [InlineKeyboardButton("⬅️ رجوع", callback_data="agold")],
     ])
 
 
@@ -522,7 +1341,19 @@ def publish_menu():
     ])
 
 
-def newpost_menu():
+def newpost_menu(has_photo=False):
+    if has_photo:
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton(
+                "🌐 الكل (تليجرام + فيسبوك + انستجرام)",
+                callback_data="npub_all"
+            )],
+            [InlineKeyboardButton("📱 تليجرام فقط", callback_data="npub_tg")],
+            [InlineKeyboardButton("📘 فيسبوك فقط", callback_data="npub_fb")],
+            [InlineKeyboardButton("📸 انستجرام فقط", callback_data="npub_ig")],
+            [InlineKeyboardButton("❌ إلغاء", callback_data="admin")],
+        ])
+
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📱 تليجرام + فيسبوك", callback_data="npub_both")],
         [InlineKeyboardButton("📱 تليجرام فقط", callback_data="npub_tg")],
@@ -542,8 +1373,106 @@ def is_admin(update):
     )
 
 
+async def auto_post_tick(context):
+    """Runs every minute via JobQueue. Fires any due scheduled posts,
+    guarded against duplicate sends after a restart."""
+    try:
+        now = datetime.now(TZ)
+        hhmm = now.strftime("%H:%M")
+        today_str = now.strftime("%Y-%m-%d")
+
+        for sp in scheduled_posts():
+            if not sp.get("enabled"):
+                continue
+            if sp.get("time_str") != hhmm:
+                continue
+
+            last_run = sp.get("last_run_date")
+            last_run_str = (
+                last_run.strftime("%Y-%m-%d")
+                if hasattr(last_run, "strftime") else last_run
+            )
+            if last_run_str == today_str:
+                continue
+
+            p = latest()
+            if not p:
+                mark_scheduled_post_ran(sp["id"], today_str)
+                continue
+
+            txt = render_template(sp.get("template_key") or "normal", p)
+            platforms = (sp.get("platforms") or "tg,fb").split(",")
+
+            tg_ok = False
+            fb_result = None
+
+            if "tg" in platforms:
+                tg_ok = await tg(context, txt)
+
+            if "fb" in platforms:
+                fb_result = await facebook(txt)
+
+            fb_ok = bool(fb_result and fb_result.get("ok"))
+
+            log_publish(
+                "auto_telegram", status="success" if tg_ok else "failed",
+                content=txt,
+            ) if "tg" in platforms else None
+            log_publish(
+                "auto_facebook",
+                post_id=(fb_result or {}).get("post_id"),
+                permalink=(fb_result or {}).get("permalink"),
+                status="success" if fb_ok else "failed",
+                error=None if fb_ok else (fb_result or {}).get("message"),
+                content=txt,
+            ) if "fb" in platforms else None
+
+            log_action(
+                ADMIN_ID, "AUTO_POST_SENT",
+                object_type="schedule", object_id=sp["id"],
+                new_value=f"tg={tg_ok} fb={fb_ok}",
+            )
+
+            mark_scheduled_post_ran(sp["id"], today_str)
+    except Exception as e:
+        print("Auto Post Tick Error:", repr(e), flush=True)
+
+
+async def maybe_send_gold_alert(context, prev_price, new_price):
+    threshold = gold_alert_threshold()
+    if not threshold or prev_price is None:
+        return
+
+    diff = round(new_price - prev_price)
+    if abs(diff) < threshold:
+        return
+
+    arrow = "📈" if diff > 0 else "📉"
+    sign = "+" if diff > 0 else ""
+
+    try:
+        if ADMIN_ID:
+            await context.bot.send_message(
+                chat_id=ADMIN_ID,
+                text=(
+                    f"🔔 تغير سعر الذهب\n\n"
+                    f"عيار 21:\n"
+                    f"السابق: {round(prev_price)}\n"
+                    f"الجديد: {round(new_price)}\n\n"
+                    f"التغير:\n{arrow} {sign}{diff} جنيه"
+                ),
+            )
+        log_action(
+            ADMIN_ID, "GOLD_ALERT_TRIGGERED",
+            old_value=round(prev_price), new_value=round(new_price),
+        )
+    except Exception as e:
+        print("Gold Alert Error:", repr(e), flush=True)
+
+
 async def start(update, context):
     context.user_data.clear()
+    track_user(update)
     await update.message.reply_text(
         "💎 مجوهرات الحسيني\n\n"
         "أهلاً بيك في البوت الرسمي لمجوهرات الحسيني - بورسعيد ✨\n\n"
@@ -654,6 +1583,93 @@ async def facebook_photo(text, photo_url):
         return {
             "ok": False,
             "message": f"❌ خطأ شبكة أثناء نشر الصورة على Facebook:\n{repr(e)}",
+        }
+
+
+async def instagram_photo(text, photo_url):
+    """
+    Publishes a photo post to Instagram using the two-step
+    Graph API flow: create a media container, then publish it.
+    Requires an Instagram professional account connected to the
+    Facebook Page, and INSTAGRAM_BUSINESS_ID set in env vars.
+    """
+
+    if not INSTAGRAM_BUSINESS_ID:
+        return {
+            "ok": False,
+            "message": "❌ INSTAGRAM_BUSINESS_ID غير موجود في Railway Variables.",
+        }
+
+    if not FACEBOOK_PAGE_ACCESS_TOKEN:
+        return {
+            "ok": False,
+            "message": "❌ FACEBOOK_PAGE_TOKEN غير موجود في Railway Variables.",
+        }
+
+    graph_version = os.getenv("FACEBOOK_GRAPH_VERSION", "v26.0").strip()
+    if not graph_version.startswith("v"):
+        graph_version = "v" + graph_version
+
+    base = f"https://graph.facebook.com/{graph_version}"
+    media_url = f"{base}/{INSTAGRAM_BUSINESS_ID}/media"
+    publish_url = f"{base}/{INSTAGRAM_BUSINESS_ID}/media_publish"
+
+    try:
+        r, created = fb_request(
+            "POST",
+            media_url,
+            data={
+                "image_url": photo_url,
+                "caption": text or "",
+                "access_token": FACEBOOK_PAGE_ACCESS_TOKEN,
+            },
+        )
+
+        print(f"IG MEDIA STATUS: {r.status_code}", flush=True)
+        print(f"IG MEDIA RESPONSE: {r.text}", flush=True)
+
+        if r.status_code >= 300 or not created.get("id"):
+            return {
+                "ok": False,
+                "message": (
+                    "❌ فشل تجهيز الصورة على Instagram.\n\n"
+                    + fb_error_text(created)
+                ),
+            }
+
+        creation_id = created["id"]
+
+        r2, published = fb_request(
+            "POST",
+            publish_url,
+            data={
+                "creation_id": creation_id,
+                "access_token": FACEBOOK_PAGE_ACCESS_TOKEN,
+            },
+        )
+
+        print(f"IG PUBLISH STATUS: {r2.status_code}", flush=True)
+        print(f"IG PUBLISH RESPONSE: {r2.text}", flush=True)
+
+        if r2.status_code >= 300:
+            return {
+                "ok": False,
+                "message": (
+                    "❌ فشل نشر الصورة على Instagram.\n\n"
+                    + fb_error_text(published)
+                ),
+            }
+
+        return {
+            "ok": True,
+            "message": "✅ تم النشر على Instagram.",
+            "post_id": published.get("id"),
+        }
+
+    except requests.RequestException as e:
+        return {
+            "ok": False,
+            "message": f"❌ خطأ شبكة أثناء النشر على Instagram:\n{repr(e)}",
         }
 
 
@@ -1315,6 +2331,34 @@ async def photo(update, context):
 
     state = context.user_data.get("state")
 
+    if state == "edit_photo":
+        pid = context.user_data.get("edit_pid")
+
+        if not pid:
+            context.user_data.clear()
+            await update.message.reply_text(
+                "❌ حصل خطأ، ابدأ التعديل من جديد.",
+                reply_markup=prod_menu(),
+            )
+            return
+
+        ok = update_product_photo(pid, update.message.photo[-1].file_id)
+
+        if ok:
+            log_action(
+                update.effective_user.id, "ADMIN_UPDATED_PRODUCT",
+                new_value="photo changed",
+                object_type="product", object_id=pid,
+            )
+
+        context.user_data.clear()
+
+        await update.message.reply_text(
+            "✅ تم تغيير الصورة." if ok else "⚠️ المنتج غير موجود.",
+            reply_markup=product_edit_menu(pid),
+        )
+        return
+
     if state == "new_post":
         context.user_data["post_text"] = update.message.caption or ""
         context.user_data["post_photo"] = update.message.photo[-1].file_id
@@ -1322,7 +2366,7 @@ async def photo(update, context):
 
         await update.message.reply_text(
             "📝 المنشور جاهز.\nاختار مكان النشر:",
-            reply_markup=newpost_menu(),
+            reply_markup=newpost_menu(has_photo=True),
         )
         return
 
@@ -1346,12 +2390,21 @@ async def photo(update, context):
 
         context.user_data.clear()
 
+        log_action(
+            update.effective_user.id, "ADMIN_CREATED_PRODUCT",
+            object_type="product", object_id=pid,
+        )
+
         await update.message.reply_text(
             f"✅ تم إضافة المنتج بنجاح.\n🆔 #{pid}",
             reply_markup=prod_menu(),
         )
     except Exception as e:
         print("Product error:", repr(e), flush=True)
+        log_action(
+            update.effective_user.id, "ADMIN_CREATED_PRODUCT",
+            status="failed", error=repr(e),
+        )
         context.user_data.clear()
         await update.message.reply_text(
             "❌ حصل خطأ أثناء حفظ المنتج.",
@@ -1408,7 +2461,13 @@ async def text(update, context):
             )
             return
 
-        save_latest(p)
+        prev_p = latest()
+
+        save_latest(p, admin_id=update.effective_user.id)
+        log_action(
+            update.effective_user.id, "ADMIN_CHANGED_GOLD_PRICE",
+            old_value=prev_p, new_value=f"price_21={round(p)}",
+        )
 
         if first_today() is None:
             save_first(p)
@@ -1419,6 +2478,7 @@ async def text(update, context):
             "✅ تم تحديث السعر.\n\n" + price_text(p),
             reply_markup=gold_menu(),
         )
+        await maybe_send_gold_alert(context, prev_p, p)
         return
 
     if s == "main":
@@ -1525,6 +2585,115 @@ async def text(update, context):
         )
         return
 
+    if s == "edit_field":
+        if not is_admin(update):
+            context.user_data.clear()
+            await update.message.reply_text("❌ غير مسموح.")
+            return
+
+        pid = context.user_data.get("edit_pid")
+        field = context.user_data.get("edit_field")
+
+        if not pid or not field:
+            context.user_data.clear()
+            await update.message.reply_text(
+                "❌ حصل خطأ، ابدأ التعديل من جديد.",
+                reply_markup=prod_menu(),
+            )
+            return
+
+        old = product(pid) or {}
+
+        if field == "price":
+            if t.lower() == "بدون":
+                value = None
+            else:
+                try:
+                    value = float(t)
+                    if value < 0:
+                        raise ValueError
+                except Exception:
+                    await update.message.reply_text(
+                        "❌ اكتب رقم صحيح أو: بدون"
+                    )
+                    return
+        else:
+            value = None if t.lower() == "بدون" else t
+
+        ok = update_product_field(pid, field, value)
+
+        if ok and is_admin(update):
+            log_action(
+                update.effective_user.id, "ADMIN_UPDATED_PRODUCT",
+                old_value=old.get(EDITABLE_FIELDS.get(field, field)),
+                new_value=value,
+                object_type="product", object_id=pid,
+            )
+
+        context.user_data.clear()
+
+        await update.message.reply_text(
+            "✅ تم التعديل بنجاح." if ok else "⚠️ المنتج غير موجود.",
+            reply_markup=product_edit_menu(pid),
+        )
+        return
+
+    if s == "search_query":
+        if not is_admin(update):
+            context.user_data.clear()
+            await update.message.reply_text("❌ غير مسموح.")
+            return
+
+        if not t:
+            await update.message.reply_text("❌ اكتب كلمة البحث.")
+            return
+
+        ps = search_products(t)
+        context.user_data.clear()
+        context.user_data["search_results"] = ps
+
+        if not ps:
+            await update.message.reply_text(
+                f"🔎 لا توجد نتائج لـ: {t}",
+                reply_markup=prod_menu(),
+            )
+            return
+
+        await update.message.reply_text(
+            f"🔎 نتائج البحث ({len(ps)} منتج):",
+            reply_markup=product_pick_kb(
+                ps, 0, "searchprodo", "aprod"
+            ),
+        )
+        return
+
+    if s == "sched_time":
+        if not is_admin(update):
+            context.user_data.clear()
+            await update.message.reply_text("❌ غير مسموح.")
+            return
+
+        if not re.match(r"^([01]\d|2[0-3]):([0-5]\d)$", t):
+            await update.message.reply_text(
+                "❌ الصيغة غلط. اكتب الموعد بصيغة HH:MM.\nمثال: 18:00"
+            )
+            return
+
+        sid = add_scheduled_post(t, platforms="tg,fb", template_key="normal")
+        log_action(
+            update.effective_user.id, "ADMIN_ADDED_SCHEDULE",
+            new_value=t, object_type="schedule", object_id=sid,
+        )
+
+        context.user_data.clear()
+
+        await update.message.reply_text(
+            f"✅ تم إضافة موعد النشر التلقائي: {t}\n"
+            "(هينشر بأسعار الذهب على تليجرام + فيسبوك بالقالب العادي)",
+            reply_markup=scheduler_menu(),
+        )
+        return
+
     try:
         p = float(t)
         numeric = True
@@ -1565,6 +2734,7 @@ async def buttons(update, context):
     q = update.callback_query
     await q.answer()
     c = q.data
+    track_user(update)
 
     if c == "home":
         context.user_data.clear()
@@ -1672,7 +2842,7 @@ async def buttons(update, context):
     if c.startswith("cs:"):
         sid = int(c.split(":")[1])
         s = cat(sid)
-        ps = products(sid)
+        ps = customer_products(sid)
 
         if not ps:
             await q.edit_message_text(
@@ -1695,20 +2865,44 @@ async def buttons(update, context):
 
             if p["name"]:
                 parts.append(f"💍 {p['name']}")
+            if p["code"]:
+                parts.append(f"🔖 الكود: {p['code']}")
+
+            parts.append(
+                f"💰 السعر: {round(float(p['price']))} جنيه"
+                if p.get("price") not in (None, "")
+                else "💰 السعر: للاستعلام"
+            )
+
+            status = p.get("status") or "available"
+            if status != "available":
+                parts.append(STATUS_LABELS.get(status, ""))
+
             if p["description"]:
                 parts.append(f"\n{p['description']}")
+
+            buttons_rows = []
+            if status not in ("sold", "hidden"):
+                buttons_rows.append([InlineKeyboardButton(
+                    "📩 استعلام عن المنتج",
+                    callback_data=f"inq:{p['id']}"
+                )])
+
+            buttons_rows.append([
+                InlineKeyboardButton("💬 واتساب", url=WHATSAPP),
+                InlineKeyboardButton("📍 الموقع", url=MAPS),
+            ])
+            buttons_rows.append([
+                InlineKeyboardButton("🌐 الموقع الإلكتروني", url=WEBSITE),
+            ])
 
             try:
                 await q.message.reply_photo(
                     photo=p["Photo_id"],
                     caption="\n".join(parts) or None,
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton(
-                            "📩 استعلام",
-                            callback_data=f"inq:{p['id']}"
-                        )]
-                    ]),
+                    reply_markup=InlineKeyboardMarkup(buttons_rows),
                 )
+                inc_product_counter(p["id"], "views_count")
             except Exception as e:
                 print("Product Photo Error:", repr(e), flush=True)
         return
@@ -1736,6 +2930,117 @@ async def buttons(update, context):
         await q.edit_message_text(
             "✏️ ابعت سعر عيار 21 الجديد.\nمثال: 7000"
         )
+        return
+
+    if c == "goldtoday":
+        if not is_admin(update):
+            return
+
+        st = gold_today_stats()
+
+        if not st:
+            await q.edit_message_text(
+                "📊 لا يوجد سعر مسجل اليوم حتى الآن.",
+                reply_markup=gold_menu(),
+            )
+            return
+
+        txt = (
+            "📊 أسعار اليوم (عيار 21)\n\n"
+            f"🟢 أول سعر: {st['first']}\n"
+            f"🔵 آخر سعر: {st['last']}\n"
+            f"⬆️ أعلى سعر: {st['high']}\n"
+            f"⬇️ أقل سعر: {st['low']}\n"
+            f"📈 مقدار التغير: {st['change']:+d} جنيه\n"
+            f"📊 نسبة التغير: {st['pct']:+.2f}%\n"
+            f"🔄 عدد مرات التحديث: {st['count']}"
+        )
+
+        await q.edit_message_text(txt, reply_markup=gold_menu())
+        return
+
+    if c == "histmenu":
+        if not is_admin(update):
+            return
+
+        await q.edit_message_text(
+            "📅 اختار الفترة:",
+            reply_markup=hist_period_menu(),
+        )
+        return
+
+    if c.startswith("histp:"):
+        if not is_admin(update):
+            return
+
+        days = int(c.split(":")[1])
+        period_names = {0: "اليوم", 1: "أمس", 7: "آخر 7 أيام", 30: "آخر 30 يوم"}
+        st = gold_period_stats(days)
+
+        if not st:
+            await q.edit_message_text(
+                f"📅 {period_names.get(days, '')}\n\n"
+                "لا يوجد سعر مسجل في الفترة دي.",
+                reply_markup=hist_period_menu(),
+            )
+            return
+
+        lines = [
+            f"📅 {period_names.get(days, '')} (عيار 21)",
+            "",
+            f"🟢 أول سعر: {st['first']}",
+            f"🔵 آخر سعر: {st['last']}",
+            f"⬆️ أعلى سعر: {st['high']}",
+            f"⬇️ أقل سعر: {st['low']}",
+            f"📈 مقدار التغير: {st['change']:+d} جنيه",
+            f"📊 نسبة التغير: {st['pct']:+.2f}%",
+            f"🔄 عدد مرات التحديث: {st['count']}",
+        ]
+
+        if days in (0, 1):
+            lines.append("")
+            lines.append("🕐 آخر 10 تحديثات:")
+            for r in st["rows"][-10:]:
+                ts = r["created_at"]
+                ts_str = (
+                    ts.strftime("%H:%M") if hasattr(ts, "strftime") else str(ts)
+                )
+                lines.append(f"   {ts_str} — {round(float(r['price_21']))}")
+
+        await q.edit_message_text(
+            "\n".join(lines), reply_markup=hist_period_menu()
+        )
+        return
+
+    if c == "alertmenu":
+        if not is_admin(update):
+            return
+
+        await q.edit_message_text(
+            "🔔 تنبيهات تغيّر سعر الذهب\n\n"
+            "اختار الحد اللي عايز تتنبه لما السعر يتغير بيه أو أكتر:",
+            reply_markup=alert_menu(),
+        )
+        return
+
+    if c.startswith("alertset:"):
+        if not is_admin(update):
+            return
+
+        val = c.split(":")[1]
+        set_setting("gold_alert_threshold", val)
+
+        log_action(
+            update.effective_user.id, "ADMIN_SET_GOLD_ALERT",
+            new_value=val,
+        )
+
+        msg = (
+            "⏸ تم إيقاف تنبيهات السعر." if val == "0"
+            else f"✅ تم ضبط التنبيه على {val} جنيه."
+        )
+
+        await q.edit_message_text(msg, reply_markup=alert_menu())
         return
 
     if c == "history":
@@ -1769,9 +3074,31 @@ async def buttons(update, context):
             )
             return
 
+        context.user_data["pending_price"] = round(p)
+
+        await q.edit_message_text(
+            "🎨 اختار قالب المنشور:",
+            reply_markup=template_pick_menu(),
+        )
+        return
+
+    if c.startswith("tpl:"):
+        if not is_admin(update):
+            return
+
+        key = c.split(":")[1]
+        p = context.user_data.get("pending_price")
+
+        if p is None:
+            await q.edit_message_text(
+                "❌ السعر انتهى، جرب تاني.",
+                reply_markup=gold_menu(),
+            )
+            return
+
         context.user_data.update(
-            price_text=price_text(p),
-            price=round(p),
+            price_text=render_template(key, p),
+            price=p,
             first=False,
         )
 
@@ -1779,6 +3106,202 @@ async def buttons(update, context):
             "📢 اختار مكان النشر:",
             reply_markup=publish_menu(),
         )
+        return
+
+    if c == "schedmenu":
+        if not is_admin(update):
+            return
+
+        rows = scheduled_posts()
+        txt = (
+            "⏰ النشر التلقائي\n\n"
+            + (f"عدد المواعيد: {len(rows)}" if rows else "لا توجد مواعيد بعد.")
+        )
+
+        await q.edit_message_text(txt, reply_markup=scheduler_menu())
+        return
+
+    if c == "schedadd":
+        if not is_admin(update):
+            return
+
+        context.user_data.clear()
+        context.user_data["state"] = "sched_time"
+
+        await q.edit_message_text(
+            "⏰ اكتب الموعد بصيغة HH:MM (بتوقيت القاهرة).\n"
+            "مثال: 09:30"
+        )
+        return
+
+    if c.startswith("schedopen:"):
+        if not is_admin(update):
+            return
+
+        sid = int(c.split(":")[1])
+        sp = scheduled_post(sid)
+
+        if not sp:
+            await q.edit_message_text(
+                "⚠️ الموعد غير موجود.",
+                reply_markup=scheduler_menu(),
+            )
+            return
+
+        tpl_name = TEMPLATES.get(
+            sp.get("template_key") or "normal", TEMPLATES["normal"]
+        )["name"]
+
+        txt = (
+            f"⏰ الموعد: {sp['time_str']}\n"
+            f"📢 المنصات: {sp['platforms']}\n"
+            f"🎨 القالب: {tpl_name}\n"
+            f"الحالة: {'🟢 شغال' if sp['enabled'] else '⏸ متوقف'}"
+        )
+
+        await q.edit_message_text(
+            txt, reply_markup=scheduler_item_menu(sid)
+        )
+        return
+
+    if c.startswith("schedtoggle:"):
+        if not is_admin(update):
+            return
+
+        sid = int(c.split(":")[1])
+        toggle_scheduled_post(sid)
+        log_action(
+            update.effective_user.id, "ADMIN_TOGGLED_SCHEDULE",
+            object_type="schedule", object_id=sid,
+        )
+
+        sp = scheduled_post(sid)
+        await q.edit_message_text(
+            "✅ تم تحديث حالة الموعد.",
+            reply_markup=scheduler_item_menu(sid) if sp else scheduler_menu(),
+        )
+        return
+
+    if c.startswith("scheddel:"):
+        if not is_admin(update):
+            return
+
+        sid = int(c.split(":")[1])
+        ok = delete_scheduled_post(sid)
+
+        if ok:
+            log_action(
+                update.effective_user.id, "ADMIN_DELETED_SCHEDULE",
+                object_type="schedule", object_id=sid,
+            )
+
+        await q.edit_message_text(
+            "✅ تم حذف الموعد." if ok else "⚠️ الموعد غير موجود.",
+            reply_markup=scheduler_menu(),
+        )
+        return
+
+    if c == "stats":
+        if not is_admin(update):
+            return
+
+        pt = product_totals()
+        ut = user_totals()
+        pubt = publish_totals()
+
+        txt = (
+            "📊 الإحصائيات العامة\n\n"
+            f"👥 إجمالي المستخدمين: {ut.get('total') or 0}\n"
+            f"🟢 نشطون آخر 7 أيام: {ut.get('active_7d') or 0}\n"
+            f"📩 إجمالي الاستعلامات: {ut.get('inquiries') or 0}\n\n"
+            f"💍 إجمالي المنتجات: {pt.get('total') or 0}\n"
+            f"🟢 متاحة: {pt.get('available') or 0}\n"
+            f"🟡 محجوزة: {pt.get('reserved') or 0}\n"
+            f"🔴 مباعة: {pt.get('sold') or 0}\n"
+            f"⚪ مخفية: {pt.get('hidden') or 0}\n"
+            f"👁 إجمالي مشاهدات المنتجات: {pt.get('views') or 0}\n\n"
+            f"📢 عمليات النشر: {pubt.get('total') or 0} "
+            f"(✅ {pubt.get('success') or 0} / ❌ {pubt.get('failed') or 0})"
+        )
+
+        await q.edit_message_text(txt, reply_markup=stats_menu())
+        return
+
+    if c == "statsview":
+        if not is_admin(update):
+            return
+
+        rows = top_viewed_products()
+        lines = ["🔥 أكثر المنتجات مشاهدة", ""]
+
+        if rows:
+            for i, r in enumerate(rows, 1):
+                lines.append(
+                    f"{i}. #{r['id']} {r['name'] or 'بدون اسم'} "
+                    f"({r['code'] or '-'}) — 👁 {r['views_count']}"
+                )
+        else:
+            lines.append("لا توجد بيانات حتى الآن.")
+
+        await q.edit_message_text("\n".join(lines), reply_markup=stats_menu())
+        return
+
+    if c == "statsinq":
+        if not is_admin(update):
+            return
+
+        rows = top_inquired_products()
+        lines = ["🔥 أكثر المنتجات عليها استعلامات", ""]
+
+        if rows:
+            for i, r in enumerate(rows, 1):
+                lines.append(
+                    f"{i}. #{r['id']} {r['name'] or 'بدون اسم'} "
+                    f"({r['code'] or '-'}) — 📩 {r['inquiries_count']}"
+                )
+        else:
+            lines.append("لا توجد بيانات حتى الآن.")
+
+        await q.edit_message_text("\n".join(lines), reply_markup=stats_menu())
+        return
+
+    if c == "statscat":
+        if not is_admin(update):
+            return
+
+        rows = top_viewed_categories()
+        lines = ["📂 أكثر الأقسام مشاهدة", ""]
+
+        if rows:
+            for i, r in enumerate(rows, 1):
+                lines.append(
+                    f"{i}. {r['main_name'] or '-'} → {r['sub_name'] or '-'} "
+                    f"— 👁 {int(r['total_views'])}"
+                )
+        else:
+            lines.append("لا توجد بيانات حتى الآن.")
+
+        await q.edit_message_text("\n".join(lines), reply_markup=stats_menu())
+        return
+
+    if c == "statsusers":
+        if not is_admin(update):
+            return
+
+        rows = top_inquiring_users()
+        lines = ["👥 أكثر العملاء استعلامات", ""]
+
+        if rows:
+            for i, r in enumerate(rows, 1):
+                uname = f"@{r['username']}" if r["username"] else "بدون يوزر"
+                lines.append(
+                    f"{i}. {r['first_name'] or '-'} ({uname}) "
+                    f"— 📩 {r['inquiries_count']}"
+                )
+        else:
+            lines.append("لا توجد بيانات حتى الآن.")
+
+        await q.edit_message_text("\n".join(lines), reply_markup=stats_menu())
         return
 
     if c == "acat":
@@ -2014,11 +3537,13 @@ async def buttons(update, context):
         lines = ["📋 المنتجات", ""]
 
         for p in ps[:50]:
+            status = p.get("status") or "available"
             lines.append(
-                f"🆔 #{p['id']} | "
+                f"{STATUS_LABELS.get(status, '')} 🆔 #{p['id']} | "
                 f"{p['main_name'] or '-'} → {p['sub_name'] or '-'}\n"
                 f"💎 {p['name'] or 'بدون اسم'} | "
-                f"🔖 {p['code'] or '-'}"
+                f"🔖 {p['code'] or '-'} | "
+                f"👁 {p.get('views_count', 0)} 📩 {p.get('inquiries_count', 0)}"
             )
 
         await q.edit_message_text(
@@ -2068,11 +3593,215 @@ async def buttons(update, context):
 
     if c.startswith("cdp:"):
         pid = int(c.split(":")[1])
+        ok = del_product(pid)
+
+        if ok and is_admin(update):
+            log_action(
+                update.effective_user.id, "ADMIN_DELETED_PRODUCT",
+                object_type="product", object_id=pid,
+            )
 
         await q.edit_message_text(
-            "✅ تم حذف المنتج." if del_product(pid)
+            "✅ تم حذف المنتج." if ok
             else "⚠️ المنتج غير موجود.",
             reply_markup=prod_menu(),
+        )
+        return
+
+    # =====================================================
+    # PRODUCT EDIT (single-field, no full re-entry)
+    # =====================================================
+    if c.startswith("editprod:") or c.startswith("editprodp:"):
+        if not is_admin(update):
+            return
+
+        page = int(c.split(":")[1])
+        ps = all_products()
+
+        if not ps:
+            await q.edit_message_text(
+                "💍 لا توجد منتجات لتعديلها.",
+                reply_markup=prod_menu(),
+            )
+            return
+
+        await q.edit_message_text(
+            f"✏️ اختار المنتج للتعديل (صفحة {page+1}):",
+            reply_markup=product_pick_kb(
+                ps, page, "editprodo", "aprod"
+            ),
+        )
+        return
+
+    if c.startswith("editprodop:"):
+        page = int(c.split(":")[1])
+        ps = all_products()
+
+        await q.edit_message_text(
+            f"✏️ اختار المنتج للتعديل (صفحة {page+1}):",
+            reply_markup=product_pick_kb(
+                ps, page, "editprodo", "aprod"
+            ),
+        )
+        return
+
+    if c.startswith("editprodo:") or c.startswith("editprod_open:"):
+        pid = int(c.split(":")[1])
+        p = product(pid)
+
+        if not p:
+            await q.edit_message_text(
+                "⚠️ المنتج غير موجود.",
+                reply_markup=prod_menu(),
+            )
+            return
+
+        status = p.get("status") or "available"
+        lines = [
+            f"✏️ تعديل المنتج #{pid}",
+            "",
+            f"💎 الاسم: {p['name'] or '-'}",
+            f"🔖 الكود: {p['code'] or '-'}",
+            f"💰 السعر: {p['price'] if p['price'] is not None else '-'}",
+            f"📝 الوصف: {p['description'] or '-'}",
+            f"📊 الحالة: {STATUS_LABELS.get(status, status)}",
+            f"👁 المشاهدات: {p.get('views_count', 0)}",
+            f"📩 الاستعلامات: {p.get('inquiries_count', 0)}",
+            "",
+            "اختار الحقل اللي عايز تعدله:",
+        ]
+
+        await q.edit_message_text(
+            "\n".join(lines),
+            reply_markup=product_edit_menu(pid),
+        )
+        return
+
+    if c.startswith("ef:"):
+        if not is_admin(update):
+            return
+
+        _, field, pid = c.split(":")
+        pid = int(pid)
+
+        if field == "photo":
+            context.user_data.clear()
+            context.user_data.update(state="edit_photo", edit_pid=pid)
+            await q.edit_message_text(
+                "📸 ابعت الصورة الجديدة للمنتج."
+            )
+            return
+
+        prompts = {
+            "name": "💎 اكتب الاسم الجديد للمنتج:",
+            "price": "💰 اكتب السعر الجديد (أو اكتب: بدون):",
+            "code": "🔖 اكتب الكود الجديد (أو اكتب: بدون):",
+            "desc": "📝 اكتب الوصف الجديد (أو اكتب: بدون):",
+        }
+
+        context.user_data.clear()
+        context.user_data.update(
+            state="edit_field", edit_field=field, edit_pid=pid
+        )
+
+        await q.edit_message_text(prompts.get(field, "اكتب القيمة الجديدة:"))
+        return
+
+    if c.startswith("stat:"):
+        if not is_admin(update):
+            return
+
+        pid = int(c.split(":")[1])
+        await q.edit_message_text(
+            "🔄 اختار الحالة الجديدة للمنتج:",
+            reply_markup=status_pick_kb(pid),
+        )
+        return
+
+    if c.startswith("sset:"):
+        if not is_admin(update):
+            return
+
+        _, pid, status = c.split(":")
+        pid = int(pid)
+        p = product(pid)
+        old_status = (p or {}).get("status") or "available"
+
+        ok = set_product_status(pid, status)
+
+        if ok:
+            log_action(
+                update.effective_user.id, "ADMIN_UPDATED_PRODUCT",
+                old_value=old_status, new_value=status,
+                object_type="product", object_id=pid,
+            )
+
+        await q.edit_message_text(
+            "✅ تم تغيير الحالة." if ok else "⚠️ المنتج غير موجود.",
+            reply_markup=product_edit_menu(pid),
+        )
+        return
+
+    if c == "searchprod":
+        if not is_admin(update):
+            return
+
+        context.user_data.clear()
+        context.user_data["state"] = "search_query"
+
+        await q.edit_message_text(
+            "🔎 اكتب كلمة البحث (اسم المنتج، الكود، أو اسم القسم):"
+        )
+        return
+
+    if c.startswith("searchprodop:") or c.startswith("searchp:"):
+        page = int(c.split(":")[-1])
+        ps = context.user_data.get("search_results") or []
+
+        if not ps:
+            await q.edit_message_text(
+                "🔎 لا توجد نتائج بحث محفوظة، ابحث تاني.",
+                reply_markup=prod_menu(),
+            )
+            return
+
+        await q.edit_message_text(
+            f"🔎 نتائج البحث ({len(ps)} منتج) - صفحة {page+1}:",
+            reply_markup=product_pick_kb(
+                ps, page, "searchprodo", "aprod"
+            ),
+        )
+        return
+
+    if c.startswith("searchprodo:"):
+        pid = int(c.split(":")[1])
+        p = product(pid)
+
+        if not p:
+            await q.edit_message_text(
+                "⚠️ المنتج غير موجود.",
+                reply_markup=prod_menu(),
+            )
+            return
+
+        status = p.get("status") or "available"
+        lines = [
+            f"✏️ تعديل المنتج #{pid}",
+            "",
+            f"💎 الاسم: {p['name'] or '-'}",
+            f"🔖 الكود: {p['code'] or '-'}",
+            f"💰 السعر: {p['price'] if p['price'] is not None else '-'}",
+            f"📝 الوصف: {p['description'] or '-'}",
+            f"📊 الحالة: {STATUS_LABELS.get(status, status)}",
+            f"👁 المشاهدات: {p.get('views_count', 0)}",
+            f"📩 الاستعلامات: {p.get('inquiries_count', 0)}",
+            "",
+            "اختار الحقل اللي عايز تعدله:",
+        ]
+
+        await q.edit_message_text(
+            "\n".join(lines),
+            reply_markup=product_edit_menu(pid),
         )
         return
 
@@ -2111,6 +3840,14 @@ async def buttons(update, context):
                 )
         except Exception as e:
             print("Inquiry Notify Error:", repr(e), flush=True)
+
+        inc_product_counter(pid, "inquiries_count")
+        inc_user_inquiries(u.id)
+        log_action(
+            u.id, "USER_INQUIRY",
+            object_type="product", object_id=pid,
+            new_value=p.get("name"),
+        )
 
         await context.bot.send_message(
             chat_id=q.message.chat_id,
@@ -2172,10 +3909,26 @@ async def buttons(update, context):
         fb_ok = bool(fb_result and fb_result.get("ok"))
 
         if tg_ok or fb_ok:
-            save_latest(p)
+            prev_p = latest()
+            save_latest(p, admin_id=update.effective_user.id)
 
             if context.user_data.get("first"):
                 save_first(p)
+
+            await maybe_send_gold_alert(context, prev_p, p)
+
+        log_publish(
+            "telegram", status="success" if tg_ok else "failed",
+            content=txt,
+        ) if c in ("pub_both", "pub_tg") else None
+        log_publish(
+            "facebook",
+            post_id=(fb_result or {}).get("post_id"),
+            permalink=(fb_result or {}).get("permalink"),
+            status="success" if fb_ok else "failed",
+            error=None if fb_ok else (fb_result or {}).get("message"),
+            content=txt,
+        ) if c in ("pub_both", "pub_fb") else None
 
         context.user_data.clear()
 
@@ -2243,7 +3996,7 @@ async def buttons(update, context):
     # =====================================================
     # NEW POST PUBLISH (general text/photo post)
     # =====================================================
-    if c in ("npub_both", "npub_tg", "npub_fb"):
+    if c in ("npub_all", "npub_both", "npub_tg", "npub_fb", "npub_ig"):
         if not is_admin(update):
             return
 
@@ -2257,41 +4010,64 @@ async def buttons(update, context):
             )
             return
 
+        want_tg = c in ("npub_all", "npub_both", "npub_tg")
+        want_fb = c in ("npub_all", "npub_both", "npub_fb")
+        want_ig = c in ("npub_all", "npub_ig")
+
         tg_ok = False
         fb_result = None
+        ig_result = None
 
-        if c in ("npub_both", "npub_tg"):
+        photo_url = None
+        if photo_id and (want_fb or want_ig):
+            try:
+                f = await context.bot.get_file(photo_id)
+                photo_url = (
+                    f"https://api.telegram.org/file/bot"
+                    f"{BOT_TOKEN}/{f.file_path}"
+                )
+            except Exception as e:
+                print("Get File Error:", repr(e), flush=True)
+
+        if want_tg:
             tg_ok = await tg_post(context, txt, photo_id)
 
-        if c in ("npub_both", "npub_fb"):
+        if want_fb:
             if photo_id:
-                try:
-                    f = await context.bot.get_file(photo_id)
-                    photo_url = (
-                        f"https://api.telegram.org/file/bot"
-                        f"{BOT_TOKEN}/{f.file_path}"
-                    )
-                    fb_result = await facebook_photo(txt, photo_url)
-                except Exception as e:
-                    print("Get File Error:", repr(e), flush=True)
-                    fb_result = {
+                fb_result = (
+                    await facebook_photo(txt, photo_url)
+                    if photo_url
+                    else {
                         "ok": False,
                         "message": "❌ فشل تجهيز الصورة للنشر على Facebook.",
                     }
+                )
             else:
                 fb_result = await facebook(txt)
 
+        if want_ig:
+            if not photo_id:
+                ig_result = {
+                    "ok": False,
+                    "message": "❌ Instagram محتاج صورة، مينفعش نص بس.",
+                }
+            elif not photo_url:
+                ig_result = {
+                    "ok": False,
+                    "message": "❌ فشل تجهيز الصورة للنشر على Instagram.",
+                }
+            else:
+                ig_result = await instagram_photo(txt, photo_url)
+
         fb_ok = bool(fb_result and fb_result.get("ok"))
+        ig_ok = bool(ig_result and ig_result.get("ok"))
 
         context.user_data.clear()
 
+        # Single-platform selections: show that platform's own message
         if c == "npub_fb":
             await q.edit_message_text(
-                fb_result.get(
-                    "message",
-                    "❌ فشل النشر على Facebook."
-                ) if fb_result
-                else "❌ لم يتم تنفيذ النشر على Facebook.",
+                fb_result.get("message", "❌ فشل النشر على Facebook."),
                 reply_markup=admin_menu(),
             )
             return
@@ -2305,15 +4081,39 @@ async def buttons(update, context):
             )
             return
 
-        result_lines = [
-            "✅ Telegram: تم النشر." if tg_ok
-            else "❌ Telegram: فشل النشر.",
-            "✅ Facebook: تم النشر." if fb_ok
-            else "❌ Facebook: " + (
-                fb_result.get("message", "فشل النشر.")
-                if fb_result else "لم يتم التنفيذ."
-            ),
-        ]
+        if c == "npub_ig":
+            await q.edit_message_text(
+                ig_result.get("message", "❌ فشل النشر على Instagram."),
+                reply_markup=admin_menu(),
+            )
+            return
+
+        # Multi-platform selections: summary report
+        result_lines = []
+
+        if want_tg:
+            result_lines.append(
+                "✅ Telegram: تم النشر." if tg_ok
+                else "❌ Telegram: فشل النشر."
+            )
+
+        if want_fb:
+            result_lines.append(
+                "✅ Facebook: تم النشر." if fb_ok
+                else "❌ Facebook: " + (
+                    fb_result.get("message", "فشل النشر.")
+                    if fb_result else "لم يتم التنفيذ."
+                )
+            )
+
+        if want_ig:
+            result_lines.append(
+                "✅ Instagram: تم النشر." if ig_ok
+                else "❌ Instagram: " + (
+                    ig_result.get("message", "فشل النشر.")
+                    if ig_result else "لم يتم التنفيذ."
+                )
+            )
 
         await q.edit_message_text(
             "\n".join(result_lines),
@@ -2379,6 +4179,19 @@ def main():
     )
 
     app.add_error_handler(error)
+
+    if app.job_queue is not None:
+        app.job_queue.run_repeating(
+            auto_post_tick, interval=60, first=10, name="auto_post_tick"
+        )
+        print("Auto-posting scheduler started (checks every 60s).", flush=True)
+    else:
+        print(
+            "WARNING: JobQueue unavailable (install "
+            "python-telegram-bot[job-queue]) — auto-posting disabled, "
+            "everything else works normally.",
+            flush=True,
+        )
 
     print("Alhussieny Gold Bot Started...", flush=True)
     print(f"READY VERSION: {VERSION}", flush=True)
