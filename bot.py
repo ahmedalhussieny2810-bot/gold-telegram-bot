@@ -21,7 +21,7 @@ from telegram.ext import (
 # =========================================================
 # VERSION
 # =========================================================
-VERSION = "ALHUSSIENY_PRODUCT_INQUIRY_2026_08_12_V14"
+VERSION = "ALHUSSIENY_GENERAL_POST_2026_08_12_V15"
 
 # =========================================================
 # ENV
@@ -474,6 +474,7 @@ def home(admin=False):
 
 def admin_menu():
     return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📝 منشور جديد", callback_data="newpost")],
         [InlineKeyboardButton("💰 إدارة أسعار الذهب", callback_data="agold")],
         [InlineKeyboardButton("💍 إدارة المنتجات", callback_data="aprod")],
         [InlineKeyboardButton("📂 إدارة الأقسام", callback_data="acat")],
@@ -518,6 +519,15 @@ def publish_menu():
         [InlineKeyboardButton("📱 تليجرام فقط", callback_data="pub_tg")],
         [InlineKeyboardButton("📘 فيسبوك فقط", callback_data="pub_fb")],
         [InlineKeyboardButton("❌ إلغاء", callback_data="home")],
+    ])
+
+
+def newpost_menu():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📱 تليجرام + فيسبوك", callback_data="npub_both")],
+        [InlineKeyboardButton("📱 تليجرام فقط", callback_data="npub_tg")],
+        [InlineKeyboardButton("📘 فيسبوك فقط", callback_data="npub_fb")],
+        [InlineKeyboardButton("❌ إلغاء", callback_data="admin")],
     ])
 
 
@@ -580,6 +590,71 @@ def fb_request(method, url, *, params=None, data=None, timeout=30):
         payload = {}
 
     return r, payload
+
+
+async def facebook_photo(text, photo_url):
+    """
+    Publishes a photo post to the Facebook Page feed using a
+    direct image URL (e.g. a Telegram file URL). Facebook fetches
+    the image server-side, so no local download is needed.
+    """
+
+    if not FACEBOOK_PAGE_ID:
+        return {
+            "ok": False,
+            "message": "❌ FACEBOOK_PAGE_ID غير موجود في Railway Variables.",
+        }
+
+    if not FACEBOOK_PAGE_ACCESS_TOKEN:
+        return {
+            "ok": False,
+            "message": "❌ FACEBOOK_PAGE_TOKEN غير موجود في Railway Variables.",
+        }
+
+    graph_version = os.getenv("FACEBOOK_GRAPH_VERSION", "v26.0").strip()
+    if not graph_version.startswith("v"):
+        graph_version = "v" + graph_version
+
+    base = f"https://graph.facebook.com/{graph_version}"
+    photos_url = f"{base}/{FACEBOOK_PAGE_ID}/photos"
+
+    try:
+        r, created = fb_request(
+            "POST",
+            photos_url,
+            data={
+                "url": photo_url,
+                "caption": text or "",
+                "published": "true",
+                "access_token": FACEBOOK_PAGE_ACCESS_TOKEN,
+            },
+        )
+
+        print(f"FB PHOTO STATUS: {r.status_code}", flush=True)
+        print(f"FB PHOTO RESPONSE: {r.text}", flush=True)
+
+        if r.status_code >= 300:
+            return {
+                "ok": False,
+                "message": (
+                    "❌ فشل نشر الصورة على Facebook.\n\n"
+                    + fb_error_text(created)
+                ),
+            }
+
+        post_id = created.get("post_id") or created.get("id")
+
+        return {
+            "ok": True,
+            "message": "✅ تم نشر الصورة على Facebook.",
+            "post_id": post_id,
+        }
+
+    except requests.RequestException as e:
+        return {
+            "ok": False,
+            "message": f"❌ خطأ شبكة أثناء نشر الصورة على Facebook:\n{repr(e)}",
+        }
 
 
 async def facebook(text):
@@ -1207,6 +1282,28 @@ async def tg(context, text):
         return False
 
 
+async def tg_post(context, text, photo_id=None):
+    if not CHANNEL_ID:
+        return False
+
+    try:
+        if photo_id:
+            await context.bot.send_photo(
+                chat_id=CHANNEL_ID,
+                photo=photo_id,
+                caption=text or None,
+            )
+        else:
+            await context.bot.send_message(
+                chat_id=CHANNEL_ID,
+                text=text,
+            )
+        return True
+    except Exception as e:
+        print("Telegram Post Error:", repr(e), flush=True)
+        return False
+
+
 # =========================================================
 # PHOTO
 # =========================================================
@@ -1216,7 +1313,20 @@ async def photo(update, context):
         await update.message.reply_text("❌ غير مسموح.")
         return
 
-    if context.user_data.get("state") != "product_photo":
+    state = context.user_data.get("state")
+
+    if state == "new_post":
+        context.user_data["post_text"] = update.message.caption or ""
+        context.user_data["post_photo"] = update.message.photo[-1].file_id
+        context.user_data["state"] = None
+
+        await update.message.reply_text(
+            "📝 المنشور جاهز.\nاختار مكان النشر:",
+            reply_markup=newpost_menu(),
+        )
+        return
+
+    if state != "product_photo":
         await update.message.reply_text(
             "❌ ابدأ إضافة المنتج من لوحة التحكم."
         )
@@ -1259,6 +1369,28 @@ async def text(update, context):
 
     t = (update.message.text or "").strip()
     s = context.user_data.get("state")
+
+    if s == "new_post":
+        if not is_admin(update):
+            context.user_data.clear()
+            await update.message.reply_text("❌ غير مسموح.")
+            return
+
+        if not t:
+            await update.message.reply_text(
+                "❌ اكتب نص المنشور، أو ابعت صورة."
+            )
+            return
+
+        context.user_data["post_text"] = t
+        context.user_data["post_photo"] = None
+        context.user_data["state"] = None
+
+        await update.message.reply_text(
+            "📝 المنشور جاهز.\nاختار مكان النشر:",
+            reply_markup=newpost_menu(),
+        )
+        return
 
     if s == "gold":
         if not is_admin(update):
@@ -1454,6 +1586,24 @@ async def buttons(update, context):
         )
         return
 
+    if c == "newpost":
+        if not is_admin(update):
+            await q.answer("❌ غير مسموح.", show_alert=True)
+            return
+
+        context.user_data.clear()
+        context.user_data["state"] = "new_post"
+
+        await q.edit_message_text(
+            "📝 ابعت المنشور:\n\n"
+            "- اكتب نص، أو\n"
+            "- ابعت صورة (تقدر تحط تعليق عليها كنص المنشور)",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ إلغاء", callback_data="admin")]
+            ]),
+        )
+        return
+
     if c == "products":
         ms = cats()
 
@@ -1545,10 +1695,6 @@ async def buttons(update, context):
 
             if p["name"]:
                 parts.append(f"💍 {p['name']}")
-            if p["code"]:
-                parts.append(f"🔖 الكود: {p['code']}")
-            if p["price"] is not None:
-                parts.append(f"💰 السعر: {p['price']} جنيه")
             if p["description"]:
                 parts.append(f"\n{p['description']}")
 
@@ -1955,10 +2101,6 @@ async def buttons(update, context):
 
         if p["name"]:
             parts.append(f"💍 {p['name']}")
-        if p["code"]:
-            parts.append(f"🔖 الكود: {p['code']}")
-        if p["price"] is not None:
-            parts.append(f"💰 السعر: {p['price']} جنيه")
 
         try:
             if ADMIN_ID:
@@ -2095,6 +2237,87 @@ async def buttons(update, context):
         await q.edit_message_text(
             "\n".join(result_lines),
             reply_markup=home(True),
+        )
+        return
+
+    # =====================================================
+    # NEW POST PUBLISH (general text/photo post)
+    # =====================================================
+    if c in ("npub_both", "npub_tg", "npub_fb"):
+        if not is_admin(update):
+            return
+
+        txt = context.user_data.get("post_text") or ""
+        photo_id = context.user_data.get("post_photo")
+
+        if not txt and not photo_id:
+            await q.edit_message_text(
+                "❌ المنشور غير موجود، ابدأ من جديد.",
+                reply_markup=admin_menu(),
+            )
+            return
+
+        tg_ok = False
+        fb_result = None
+
+        if c in ("npub_both", "npub_tg"):
+            tg_ok = await tg_post(context, txt, photo_id)
+
+        if c in ("npub_both", "npub_fb"):
+            if photo_id:
+                try:
+                    f = await context.bot.get_file(photo_id)
+                    photo_url = (
+                        f"https://api.telegram.org/file/bot"
+                        f"{BOT_TOKEN}/{f.file_path}"
+                    )
+                    fb_result = await facebook_photo(txt, photo_url)
+                except Exception as e:
+                    print("Get File Error:", repr(e), flush=True)
+                    fb_result = {
+                        "ok": False,
+                        "message": "❌ فشل تجهيز الصورة للنشر على Facebook.",
+                    }
+            else:
+                fb_result = await facebook(txt)
+
+        fb_ok = bool(fb_result and fb_result.get("ok"))
+
+        context.user_data.clear()
+
+        if c == "npub_fb":
+            await q.edit_message_text(
+                fb_result.get(
+                    "message",
+                    "❌ فشل النشر على Facebook."
+                ) if fb_result
+                else "❌ لم يتم تنفيذ النشر على Facebook.",
+                reply_markup=admin_menu(),
+            )
+            return
+
+        if c == "npub_tg":
+            await q.edit_message_text(
+                "✅ تم النشر في تليجرام."
+                if tg_ok
+                else "❌ فشل النشر في تليجرام.",
+                reply_markup=admin_menu(),
+            )
+            return
+
+        result_lines = [
+            "✅ Telegram: تم النشر." if tg_ok
+            else "❌ Telegram: فشل النشر.",
+            "✅ Facebook: تم النشر." if fb_ok
+            else "❌ Facebook: " + (
+                fb_result.get("message", "فشل النشر.")
+                if fb_result else "لم يتم التنفيذ."
+            ),
+        ]
+
+        await q.edit_message_text(
+            "\n".join(result_lines),
+            reply_markup=admin_menu(),
         )
         return
 
