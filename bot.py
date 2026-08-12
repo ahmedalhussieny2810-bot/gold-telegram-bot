@@ -21,7 +21,7 @@ from telegram.ext import (
 # =========================================================
 # VERSION
 # =========================================================
-VERSION = "ALHUSSIENY_FACEBOOK_PUBLIC_FIX_2026_08_12_V13"
+VERSION = "ALHUSSIENY_PRODUCT_INQUIRY_2026_08_12_V14"
 
 # =========================================================
 # ENV
@@ -340,6 +340,14 @@ def del_product(pid):
             return bool(x.rowcount)
     finally:
         c.close()
+
+
+def product(pid):
+    return one("""
+        SELECT id,Photo_id,name,code,price,description
+        FROM Products
+        WHERE id=%s
+    """, (pid,))
 
 
 # =========================================================
@@ -1548,6 +1556,12 @@ async def buttons(update, context):
                 await q.message.reply_photo(
                     photo=p["Photo_id"],
                     caption="\n".join(parts) or None,
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton(
+                            "📩 استعلام",
+                            callback_data=f"inq:{p['id']}"
+                        )]
+                    ]),
                 )
             except Exception as e:
                 print("Product Photo Error:", repr(e), flush=True)
@@ -1913,6 +1927,55 @@ async def buttons(update, context):
             "✅ تم حذف المنتج." if del_product(pid)
             else "⚠️ المنتج غير موجود.",
             reply_markup=prod_menu(),
+        )
+        return
+
+    if c.startswith("inq:"):
+        pid = int(c.split(":")[1])
+        p = product(pid)
+
+        if not p:
+            await context.bot.send_message(
+                chat_id=q.message.chat_id,
+                text="⚠️ المنتج غير متاح حاليًا.",
+            )
+            return
+
+        u = update.effective_user
+        uname = f"@{u.username}" if u.username else "بدون يوزر"
+
+        parts = [
+            "📩 استعلام جديد عن منتج",
+            "",
+            f"👤 العميل: {u.full_name}",
+            f"🔗 اليوزر: {uname}",
+            f"🆔 آيدي تليجرام: {u.id}",
+            "",
+        ]
+
+        if p["name"]:
+            parts.append(f"💍 {p['name']}")
+        if p["code"]:
+            parts.append(f"🔖 الكود: {p['code']}")
+        if p["price"] is not None:
+            parts.append(f"💰 السعر: {p['price']} جنيه")
+
+        try:
+            if ADMIN_ID:
+                await context.bot.send_photo(
+                    chat_id=ADMIN_ID,
+                    photo=p["Photo_id"],
+                    caption="\n".join(parts),
+                )
+        except Exception as e:
+            print("Inquiry Notify Error:", repr(e), flush=True)
+
+        await context.bot.send_message(
+            chat_id=q.message.chat_id,
+            text=(
+                "✅ تم إرسال طلب الاستعلام.\n"
+                "هيتم التواصل معاك في أقرب وقت."
+            ),
         )
         return
 
