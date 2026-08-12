@@ -22,7 +22,7 @@ from telegram.ext import (
 # =========================================================
 # VERSION
 # =========================================================
-VERSION = "ALHUSSIENY_SHOP_SYSTEM_2026_08_13_V21"
+VERSION = "ALHUSSIENY_SHOP_SYSTEM_2026_08_13_V22"
 
 # =========================================================
 # ENV
@@ -913,6 +913,32 @@ def toggle_scheduled_post(sid):
         c.close()
 
 
+def set_scheduled_post_platforms(sid, platforms):
+    c = db()
+    try:
+        with c.cursor() as x:
+            x.execute(
+                "UPDATE ScheduledPosts SET platforms=%s WHERE id=%s",
+                (platforms, sid),
+            )
+            return bool(x.rowcount)
+    finally:
+        c.close()
+
+
+def set_scheduled_post_template(sid, template_key):
+    c = db()
+    try:
+        with c.cursor() as x:
+            x.execute(
+                "UPDATE ScheduledPosts SET template_key=%s WHERE id=%s",
+                (template_key, sid),
+            )
+            return bool(x.rowcount)
+    finally:
+        c.close()
+
+
 def mark_scheduled_post_ran(sid, date_str):
     c = db()
     try:
@@ -1206,9 +1232,36 @@ def scheduler_menu():
 def scheduler_item_menu(sid):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("⏯ تشغيل/إيقاف", callback_data=f"schedtoggle:{sid}")],
+        [InlineKeyboardButton("📢 المنصات", callback_data=f"schedplat:{sid}")],
+        [InlineKeyboardButton("🎨 القالب", callback_data=f"schedtpl:{sid}")],
         [InlineKeyboardButton("🗑 حذف الموعد", callback_data=f"scheddel:{sid}")],
         [InlineKeyboardButton("⬅️ رجوع", callback_data="schedmenu")],
     ])
+
+
+def scheduler_platform_menu(sid, current_platforms):
+    plats = current_platforms.split(",")
+    tg_mark = "✅" if "tg" in plats else "◻️"
+    fb_mark = "✅" if "fb" in plats else "◻️"
+
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            f"{tg_mark} تليجرام", callback_data=f"schedplatt:{sid}:tg"
+        )],
+        [InlineKeyboardButton(
+            f"{fb_mark} فيسبوك", callback_data=f"schedplatt:{sid}:fb"
+        )],
+        [InlineKeyboardButton("⬅️ رجوع", callback_data=f"schedopen:{sid}")],
+    ])
+
+
+def scheduler_template_menu(sid):
+    k = [
+        [InlineKeyboardButton(t["name"], callback_data=f"schedtplset:{sid}:{key}")]
+        for key, t in TEMPLATES.items()
+    ]
+    k.append([InlineKeyboardButton("⬅️ رجوع", callback_data=f"schedopen:{sid}")])
+    return InlineKeyboardMarkup(k)
 
 
 def stats_menu():
@@ -1292,6 +1345,7 @@ def product_edit_menu(pid):
         [InlineKeyboardButton("📝 الوصف", callback_data=f"ef:desc:{pid}")],
         [InlineKeyboardButton("📸 الصورة", callback_data=f"ef:photo:{pid}")],
         [InlineKeyboardButton("🔄 الحالة", callback_data=f"stat:{pid}")],
+        [InlineKeyboardButton("📂 القسم", callback_data=f"movecat:{pid}")],
         [InlineKeyboardButton(
             "⬅️ رجوع لقائمة المنتجات", callback_data="editprod:0"
         )],
@@ -3217,6 +3271,102 @@ async def buttons(update, context):
         )
         return
 
+    if c.startswith("schedplatt:"):
+        if not is_admin(update):
+            return
+
+        _, sid, plat = c.split(":")
+        sid = int(sid)
+        sp = scheduled_post(sid)
+
+        if not sp:
+            await q.edit_message_text(
+                "⚠️ الموعد غير موجود.", reply_markup=scheduler_menu()
+            )
+            return
+
+        plats = set((sp["platforms"] or "").split(","))
+        plats.discard("")
+
+        if plat in plats:
+            if len(plats) > 1:
+                plats.discard(plat)
+        else:
+            plats.add(plat)
+
+        new_platforms = ",".join(sorted(plats)) or "tg"
+        set_scheduled_post_platforms(sid, new_platforms)
+
+        log_action(
+            update.effective_user.id, "ADMIN_UPDATED_SCHEDULE",
+            new_value=new_platforms, object_type="schedule", object_id=sid,
+        )
+
+        await q.edit_message_text(
+            "📢 اختار المنصات (تقدر تختار أكتر من واحدة):",
+            reply_markup=scheduler_platform_menu(sid, new_platforms),
+        )
+        return
+
+    if c.startswith("schedplat:"):
+        if not is_admin(update):
+            return
+
+        sid = int(c.split(":")[1])
+        sp = scheduled_post(sid)
+
+        if not sp:
+            await q.edit_message_text(
+                "⚠️ الموعد غير موجود.", reply_markup=scheduler_menu()
+            )
+            return
+
+        await q.edit_message_text(
+            "📢 اختار المنصات (تقدر تختار أكتر من واحدة):",
+            reply_markup=scheduler_platform_menu(sid, sp["platforms"]),
+        )
+        return
+
+    if c.startswith("schedtplset:"):
+        if not is_admin(update):
+            return
+
+        _, sid, key = c.split(":")
+        sid = int(sid)
+        set_scheduled_post_template(sid, key)
+
+        log_action(
+            update.effective_user.id, "ADMIN_UPDATED_SCHEDULE",
+            new_value=f"template={key}",
+            object_type="schedule", object_id=sid,
+        )
+
+        sp = scheduled_post(sid)
+        await q.edit_message_text(
+            "✅ تم تغيير القالب.",
+            reply_markup=scheduler_item_menu(sid) if sp else scheduler_menu(),
+        )
+        return
+
+    if c.startswith("schedtpl:"):
+        if not is_admin(update):
+            return
+
+        sid = int(c.split(":")[1])
+        sp = scheduled_post(sid)
+
+        if not sp:
+            await q.edit_message_text(
+                "⚠️ الموعد غير موجود.", reply_markup=scheduler_menu()
+            )
+            return
+
+        await q.edit_message_text(
+            "🎨 اختار القالب:",
+            reply_markup=scheduler_template_menu(sid),
+        )
+        return
+
     if c == "stats":
         if not is_admin(update):
             return
@@ -3802,6 +3952,87 @@ async def buttons(update, context):
 
         await q.edit_message_text(
             "✅ تم تغيير الحالة." if ok else "⚠️ المنتج غير موجود.",
+            reply_markup=product_edit_menu(pid),
+        )
+        return
+
+    if c.startswith("movecat:"):
+        if not is_admin(update):
+            return
+
+        pid = int(c.split(":")[1])
+        ms = cats()
+
+        k = [
+            [InlineKeyboardButton(
+                "💍 " + m["name"], callback_data=f"movecatm:{pid}:{m['id']}"
+            )]
+            for m in ms
+        ]
+        k.append([InlineKeyboardButton(
+            "⬅️ رجوع", callback_data=f"editprodo:{pid}"
+        )])
+
+        await q.edit_message_text(
+            "📂 اختار القسم الرئيسي الجديد:",
+            reply_markup=InlineKeyboardMarkup(k),
+        )
+        return
+
+    if c.startswith("movecatm:"):
+        if not is_admin(update):
+            return
+
+        _, pid, mid = c.split(":")
+        pid, mid = int(pid), int(mid)
+        ss = cats(mid)
+
+        if not ss:
+            await q.edit_message_text(
+                "⚠️ القسم ده مفيهوش أقسام فرعية، اختار قسم تاني.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(
+                        "⬅️ رجوع", callback_data=f"movecat:{pid}"
+                    )]
+                ]),
+            )
+            return
+
+        k = [
+            [InlineKeyboardButton(
+                "🟡 " + s["name"], callback_data=f"movecats:{pid}:{s['id']}"
+            )]
+            for s in ss
+        ]
+        k.append([InlineKeyboardButton(
+            "⬅️ رجوع", callback_data=f"movecat:{pid}"
+        )])
+
+        await q.edit_message_text(
+            "📂 اختار القسم الفرعي الجديد:",
+            reply_markup=InlineKeyboardMarkup(k),
+        )
+        return
+
+    if c.startswith("movecats:"):
+        if not is_admin(update):
+            return
+
+        _, pid, sid = c.split(":")
+        pid, sid = int(pid), int(sid)
+
+        ok = move_product_category(pid, sid)
+
+        if ok:
+            log_action(
+                update.effective_user.id, "ADMIN_UPDATED_PRODUCT",
+                new_value=f"category_id={sid}",
+                object_type="product", object_id=pid,
+            )
+
+        await q.edit_message_text(
+            "✅ تم نقل المنتج للقسم الجديد." if ok
+            else "⚠️ المنتج غير موجود.",
             reply_markup=product_edit_menu(pid),
         )
         return
