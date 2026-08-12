@@ -22,7 +22,7 @@ from telegram.ext import (
 # =========================================================
 # VERSION
 # =========================================================
-VERSION = "ALHUSSIENY_SHOP_SYSTEM_2026_08_13_V20"
+VERSION = "ALHUSSIENY_SHOP_SYSTEM_2026_08_13_V21"
 
 # =========================================================
 # ENV
@@ -1036,6 +1036,21 @@ def publish_totals():
     return row or {}
 
 
+def recent_admin_logs(limit=20, offset=0):
+    return many("""
+        SELECT action,old_value,new_value,object_type,object_id,
+               status,error,created_at
+        FROM AdminLogs
+        ORDER BY created_at DESC
+        LIMIT %s OFFSET %s
+    """, (limit, offset))
+
+
+def admin_logs_count():
+    row = one("SELECT COUNT(*) c FROM AdminLogs")
+    return (row or {}).get("c", 0)
+
+
 # =========================================================
 # GOLD
 # =========================================================
@@ -1210,6 +1225,7 @@ def stats_menu():
         [InlineKeyboardButton(
             "👥 أكثر العملاء استعلامات", callback_data="statsusers"
         )],
+        [InlineKeyboardButton("📋 سجل العمليات", callback_data="logsp:0")],
         [InlineKeyboardButton("👑 لوحة التحكم", callback_data="admin")],
     ])
 
@@ -3304,6 +3320,54 @@ async def buttons(update, context):
         await q.edit_message_text("\n".join(lines), reply_markup=stats_menu())
         return
 
+    if c.startswith("logsp:"):
+        if not is_admin(update):
+            return
+
+        page = int(c.split(":")[1])
+        page_size = 15
+        total = admin_logs_count()
+        rows = recent_admin_logs(limit=page_size, offset=page * page_size)
+
+        lines = [f"📋 سجل العمليات ({total} إجمالي)", ""]
+
+        if not rows:
+            lines.append("لا توجد سجلات.")
+        else:
+            for r in rows:
+                ts = r["created_at"]
+                ts_str = (
+                    ts.strftime("%m-%d %H:%M")
+                    if hasattr(ts, "strftime") else str(ts)
+                )
+                mark = "✅" if r["status"] == "success" else "❌"
+                obj = (
+                    f" [{r['object_type']}#{r['object_id']}]"
+                    if r["object_type"] else ""
+                )
+                lines.append(f"{mark} {ts_str} — {r['action']}{obj}")
+                if r["status"] != "success" and r["error"]:
+                    lines.append(f"   ⚠️ {r['error'][:120]}")
+
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton(
+                "⬅️ أحدث", callback_data=f"logsp:{page-1}"
+            ))
+        if (page + 1) * page_size < total:
+            nav.append(InlineKeyboardButton(
+                "➡️ أقدم", callback_data=f"logsp:{page+1}"
+            ))
+
+        kb_rows = ([nav] if nav else []) + [
+            [InlineKeyboardButton("⬅️ رجوع للإحصائيات", callback_data="stats")]
+        ]
+
+        await q.edit_message_text(
+            "\n".join(lines), reply_markup=InlineKeyboardMarkup(kb_rows)
+        )
+        return
+
     if c == "acat":
         if not is_admin(update):
             return
@@ -4130,6 +4194,48 @@ async def error(update, context):
     print("=" * 60, flush=True)
     print("BOT ERROR:", repr(context.error), flush=True)
     print("=" * 60, flush=True)
+
+    admin_id_hint = None
+    try:
+        if isinstance(update, Update) and update.effective_user:
+            admin_id_hint = update.effective_user.id
+    except Exception:
+        pass
+
+    log_action(
+        admin_id_hint or ADMIN_ID or None,
+        "BOT_ERROR",
+        status="failed",
+        error=repr(context.error),
+    )
+
+    # Never leave the user stuck mid-conversation because of a crash.
+    try:
+        if context.user_data is not None:
+            context.user_data.clear()
+    except Exception:
+        pass
+
+    # Best-effort friendly message to whoever triggered the error.
+    try:
+        if isinstance(update, Update) and update.effective_chat:
+            is_the_admin = (
+                update.effective_user
+                and update.effective_user.id == ADMIN_ID
+            )
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=(
+                    "❌ حصل خطأ غير متوقع، جرب تاني.\n"
+                    "استخدم /start للرجوع للقائمة الرئيسية."
+                    if not is_the_admin else
+                    "❌ حصل خطأ غير متوقع.\n\n"
+                    f"التفاصيل: {repr(context.error)[:300]}\n\n"
+                    "استخدم /start للرجوع للقائمة الرئيسية."
+                ),
+            )
+    except Exception as e:
+        print("Error Notify Failed:", repr(e), flush=True)
 
 
 # =========================================================
