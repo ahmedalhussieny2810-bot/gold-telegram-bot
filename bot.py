@@ -21,7 +21,7 @@ from telegram.ext import (
 # =========================================================
 # VERSION
 # =========================================================
-VERSION = "ALHUSSIENY_FACEBOOK_PUBLIC_FIX_2026_08_12_V12"
+VERSION = "ALHUSSIENY_FACEBOOK_PUBLIC_FIX_2026_08_12_V13"
 
 # =========================================================
 # ENV
@@ -969,21 +969,80 @@ async def facebook(text):
     is_hidden = post.get("is_hidden")
 
     # -----------------------------------------------------
-    # 7. PUBLIC VISIBILITY DIAGNOSTICS
+    # 7. PUBLIC VISIBILITY DIAGNOSTICS - V13
     # -----------------------------------------------------
-    # IMPORTANT: use Meta's actual permalink_url. Do NOT construct a legacy
-    # /PAGE_ID/posts/POST_ID URL because modern Page posts may use a pfbid
-    # permalink or another canonical format.
-    permalink = post.get("permalink_url")
-    if not permalink:
-        post_part = str(post_id).split("_", 1)[-1]
-        permalink = f"https://www.facebook.com/{FACEBOOK_PAGE_ID}/posts/{post_part}"
+    # Meta can return a canonical permalink whose first numeric ID is not the
+    # configured Page ID. That permalink is useful as a diagnostic, but it is
+    # NOT the URL we use to report the post back to the operator.
+    #
+    # Build a deterministic Page URL from the verified Page ID + the numeric
+    # object ID. Keep Meta's permalink separately for diagnostics.
+    meta_permalink = post.get("permalink_url") or ""
+    post_part = str(post_id).split("_", 1)[-1]
+    constructed_permalink = (
+        f"https://www.facebook.com/{FACEBOOK_PAGE_ID}/posts/{post_part}"
+    )
+
+    # The object ID must belong to the configured Page.
+    post_id_page = str(post_id).split("_", 1)[0] if "_" in str(post_id) else ""
+    page_id_match = post_id_page == str(FACEBOOK_PAGE_ID)
 
     timeline_visibility, timeline_error = await read_timeline_visibility()
-    web_probe = await asyncio.to_thread(public_web_probe, permalink)
 
+    # Probe BOTH URLs. A single Facebook server-side probe is not sufficient
+    # proof because Facebook may return login/interstitial/challenge pages.
+    constructed_probe = await asyncio.to_thread(
+        public_web_probe, constructed_permalink
+    )
+    meta_probe = (
+        await asyncio.to_thread(public_web_probe, meta_permalink)
+        if meta_permalink and meta_permalink != constructed_permalink
+        else {"status": "not_tested"}
+    )
+
+    print(f"POST_ID_PAGE: {post_id_page}", flush=True)
+    print(f"PAGE_ID_MATCH: {page_id_match}", flush=True)
+    print(f"CONSTRUCTED PERMALINK: {constructed_permalink}", flush=True)
+    print(f"META PERMALINK: {meta_permalink}", flush=True)
+    print(f"CONSTRUCTED PUBLIC WEB PROBE: {constructed_probe}", flush=True)
+    print(f"META PUBLIC WEB PROBE: {meta_probe}", flush=True)
     print(f"TIMELINE_VISIBILITY: {timeline_visibility}", flush=True)
-    print(f"PUBLIC WEB PROBE: {web_probe}", flush=True)
+
+    # Do not label a post "not public" just because the Facebook plugins
+    # endpoint rejects one URL. It is a weak/secondary server-side signal.
+    # We only call it definitively unavailable when BOTH tested URLs return
+    # the explicit unavailable marker.
+    both_probes_not_public = (
+        constructed_probe.get("status") == "not_public"
+        and (
+            meta_probe.get("status") in ("not_public", "not_tested")
+        )
+    )
+
+    if both_probes_not_public:
+        web_probe = {
+            "status": "not_public",
+            "constructed": constructed_probe,
+            "meta": meta_probe,
+        }
+    elif (
+        constructed_probe.get("status") == "public_probe_ok"
+        or meta_probe.get("status") == "public_probe_ok"
+    ):
+        web_probe = {
+            "status": "public_probe_ok",
+            "constructed": constructed_probe,
+            "meta": meta_probe,
+        }
+    else:
+        web_probe = {
+            "status": "unknown",
+            "constructed": constructed_probe,
+            "meta": meta_probe,
+        }
+
+    # Use the deterministic URL for Telegram. Keep Meta's URL in diagnostics.
+    permalink = constructed_permalink
 
     # Page-token verification proves Meta created a published Page object.
     # The tokenized Graph API cannot by itself prove anonymous public access.
@@ -992,6 +1051,7 @@ async def facebook(text):
         verified
         and is_published is True
         and is_hidden is not True
+        and page_id_match
         and (not source_id or str(source_id) == str(FACEBOOK_PAGE_ID))
     )
 
@@ -1000,9 +1060,13 @@ async def facebook(text):
             "❌ Facebook: المنشور اتعمل لكن حالة النشر غير سليمة.",
             "",
             f"🆔 Post ID: {post_id}",
+        f"🔗 Public link: {constructed_permalink}",
+        + (f"🔗 Meta permalink: {meta_permalink}\n" if meta_permalink else ""),
             f"🟢 is_published = {is_published}",
             f"🟢 is_hidden = {is_hidden}",
             f"🆔 Page ID = {FACEBOOK_PAGE_ID}",
+            f"🆔 Post belongs to Page ID = {post_id_page}",
+            f"🟢 Page ID match = {page_id_match}",
             f"🔗 Meta permalink = {permalink}",
         ]
         if timeline_visibility is not None:
@@ -1029,7 +1093,7 @@ async def facebook(text):
             "ok": False,
             "message": (
                 "⚠️ Facebook أنشأ المنشور وGraph API شايفه منشور، "
-                "لكن فحص الظهور العام رجع أن المحتوى غير متاح للعامة.\n\n"
+                "لكن فحصيْن للظهور العام رجعا أن المحتوى غير متاح.\n\n"
                 f"🆔 Post ID: {post_id}\n"
                 f"🔗 الرابط الحقيقي من Meta:\n{permalink}\n\n"
                 f"🟢 is_published = {is_published}\n"
@@ -1053,7 +1117,7 @@ async def facebook(text):
             "ok": False,
             "message": (
                 "🟡 Facebook نشر الـPost وGraph API شايفه منشور، "
-                "لكن لم نستطع إثبات الظهور العام من السيرفر بدون Page Token.\n\n"
+                "لكن فحص الويب من السيرفر غير حاسم. هذا ليس دليلًا أن البوست مخفي.\n\n"
                 f"🆔 Post ID: {post_id}\n"
                 f"🔗 الرابط الحقيقي من Meta:\n{permalink}\n\n"
                 f"🟢 is_published = {is_published}\n"
