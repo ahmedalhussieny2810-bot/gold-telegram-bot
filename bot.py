@@ -21,7 +21,7 @@ from telegram.ext import (
 # =========================================================
 # VERSION
 # =========================================================
-VERSION = "ALHUSSIENY_FACEBOOK_FINAL_FIX_2026_08_12_V9"
+VERSION = "ALHUSSIENY_FACEBOOK_FINAL_LINK_FIX_2026_08_12_V10"
 
 # =========================================================
 # ENV
@@ -1262,6 +1262,7 @@ async def facebook(text):
                     "is_published": is_published,
                     "is_hidden": is_hidden,
                     "direct_verify": True,
+                "public_link_ok": public_link_ok,
                 }
 
             # ---------------------------------------------
