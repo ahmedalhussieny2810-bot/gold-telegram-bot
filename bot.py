@@ -1411,17 +1411,33 @@ async def facebook(text):
             verify_error = verification["error"]
 
         # =================================================
-        # 4) FALLBACK PERMALINK
+        # 4) CANONICAL PERMALINK
         # =================================================
+        #
+        # Meta may return a permalink containing an old/wrong
+        # Page ID.  This happened with the Page where the post
+        # was successfully created: Meta returned the correct
+        # Post ID and source Page, but the returned permalink
+        # pointed to a different Page ID.
+        #
+        # Always build the public post URL from the verified
+        # Page ID + the numeric post part. This prevents the bot
+        # from sending a broken "This isn't available" link.
 
-        if not permalink:
-            post_part = str(post_id).split("_", 1)[-1]
+        post_part = str(post_id).split("_", 1)[-1]
 
-            permalink = (
-                "https://www.facebook.com/"
-                f"{FACEBOOK_PAGE_ID}/posts/"
-                f"{post_part}"
-            )
+        canonical_page_id = str(FACEBOOK_PAGE_ID)
+
+        if isinstance(verified_from, dict):
+            verified_page_id = verified_from.get("id")
+            if verified_page_id:
+                canonical_page_id = str(verified_page_id)
+
+        permalink = (
+            "https://www.facebook.com/"
+            f"{canonical_page_id}/posts/"
+            f"{post_part}"
+        )
 
         # =================================================
         # 5) FINAL SUCCESS CONDITIONS
