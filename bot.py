@@ -20,7 +20,7 @@ from telegram.ext import (
 # =========================================================
 # VERSION
 # =========================================================
-VERSION = "ALHUSSIENY_FACEBOOK_DIAGNOSTIC_2026_08_12_V8"
+VERSION = "ALHUSSIENY_FACEBOOK_FINAL_FIX_2026_08_12_V8"
 
 # =========================================================
 # ENV
@@ -29,13 +29,8 @@ load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 CHANNEL_ID = os.getenv("CHANNEL_ID", "").strip()
-
 FACEBOOK_PAGE_ID = os.getenv("FACEBOOK_PAGE_ID", "").strip()
-FACEBOOK_PAGE_ACCESS_TOKEN = os.getenv(
-    "FACEBOOK_PAGE_TOKEN",
-    ""
-).strip()
-
+FACEBOOK_PAGE_ACCESS_TOKEN = os.getenv("FACEBOOK_PAGE_TOKEN", "").strip()
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 
 try:
@@ -215,7 +210,8 @@ def many(sql, args=()):
 def add_main(name):
 
     if one("""
-        SELECT id FROM Categories
+        SELECT id
+        FROM Categories
         WHERE parent_id IS NULL
           AND LOWER(TRIM(name))=LOWER(TRIM(%s))
     """, (name,)):
@@ -225,10 +221,12 @@ def add_main(name):
 
     try:
         with c.cursor() as x:
+
             x.execute(
                 "INSERT INTO Categories(parent_id,name) VALUES(NULL,%s)",
                 (name.strip(),),
             )
+
             return x.lastrowid
 
     finally:
@@ -238,7 +236,8 @@ def add_main(name):
 def add_sub(parent, name):
 
     if one("""
-        SELECT id FROM Categories
+        SELECT id
+        FROM Categories
         WHERE parent_id=%s
           AND LOWER(TRIM(name))=LOWER(TRIM(%s))
     """, (parent, name)):
@@ -248,10 +247,12 @@ def add_sub(parent, name):
 
     try:
         with c.cursor() as x:
+
             x.execute(
                 "INSERT INTO Categories(parent_id,name) VALUES(%s,%s)",
                 (parent, name.strip()),
             )
+
             return x.lastrowid
 
     finally:
@@ -261,6 +262,7 @@ def add_sub(parent, name):
 def cats(parent=None):
 
     if parent is None:
+
         return many("""
             SELECT id,name
             FROM Categories
@@ -292,6 +294,7 @@ def rename_cat(cid, name):
 
     try:
         with c.cursor() as x:
+
             x.execute(
                 "UPDATE Categories SET name=%s WHERE id=%s",
                 (name.strip(), cid),
@@ -319,6 +322,7 @@ def del_cat(cid):
 
     try:
         with c.cursor() as x:
+
             x.execute(
                 "DELETE FROM Categories WHERE id=%s",
                 (cid,),
@@ -390,6 +394,7 @@ def del_product(pid):
 
     try:
         with c.cursor() as x:
+
             x.execute(
                 "DELETE FROM Products WHERE id=%s",
                 (pid,),
@@ -429,16 +434,19 @@ def yesterday():
 def load_json(path):
 
     try:
+
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
 
     except Exception:
+
         return {}
 
 
 def save_json(path, data):
 
     with open(path, "w", encoding="utf-8") as f:
+
         json.dump(
             data,
             f,
@@ -460,10 +468,7 @@ def save_first(p):
 
         h[today()] = round(p)
 
-        save_json(
-            HISTORY,
-            h,
-        )
+        save_json(HISTORY, h)
 
         return True
 
@@ -538,13 +543,13 @@ def home(admin=False):
         [
             InlineKeyboardButton(
                 "💎 أسعار الذهب",
-                callback_data="gold"
+                callback_data="gold",
             )
         ],
         [
             InlineKeyboardButton(
                 "💍 المنتجات",
-                callback_data="products"
+                callback_data="products",
             )
         ],
     ]
@@ -554,7 +559,7 @@ def home(admin=False):
         k.append([
             InlineKeyboardButton(
                 "👑 لوحة التحكم",
-                callback_data="admin"
+                callback_data="admin",
             )
         ])
 
@@ -562,37 +567,37 @@ def home(admin=False):
         [
             InlineKeyboardButton(
                 "📢 قناة التليجرام",
-                url=TG_CHANNEL
+                url=TG_CHANNEL,
             )
         ],
         [
             InlineKeyboardButton(
                 "📍 موقع المحل",
-                url=MAPS
+                url=MAPS,
             ),
             InlineKeyboardButton(
                 "🌐 الموقع",
-                url=WEBSITE
+                url=WEBSITE,
             ),
         ],
         [
             InlineKeyboardButton(
                 "💬 واتساب",
-                url=WHATSAPP
+                url=WHATSAPP,
             ),
             InlineKeyboardButton(
                 "📞 رقم المحل",
-                callback_data="phone"
+                callback_data="phone",
             ),
         ],
         [
             InlineKeyboardButton(
                 "📘 فيسبوك",
-                url=FACEBOOK
+                url=FACEBOOK,
             ),
             InlineKeyboardButton(
                 "📸 إنستجرام",
-                url=INSTAGRAM
+                url=INSTAGRAM,
             ),
         ],
     ]
@@ -606,25 +611,25 @@ def admin_menu():
         [
             InlineKeyboardButton(
                 "💰 إدارة أسعار الذهب",
-                callback_data="agold"
+                callback_data="agold",
             )
         ],
         [
             InlineKeyboardButton(
                 "💍 إدارة المنتجات",
-                callback_data="aprod"
+                callback_data="aprod",
             )
         ],
         [
             InlineKeyboardButton(
                 "📂 إدارة الأقسام",
-                callback_data="acat"
+                callback_data="acat",
             )
         ],
         [
             InlineKeyboardButton(
                 "⬅️ الرئيسية",
-                callback_data="home"
+                callback_data="home",
             )
         ],
     ])
@@ -636,35 +641,35 @@ def cat_menu():
         [
             InlineKeyboardButton(
                 "➕ قسم رئيسي",
-                callback_data="addmain"
+                callback_data="addmain",
             ),
             InlineKeyboardButton(
                 "➕ قسم فرعي",
-                callback_data="addsub"
+                callback_data="addsub",
             ),
         ],
         [
             InlineKeyboardButton(
                 "📋 عرض الأقسام",
-                callback_data="viewcats"
+                callback_data="viewcats",
             )
         ],
         [
             InlineKeyboardButton(
                 "✏️ تغيير اسم",
-                callback_data="rename"
+                callback_data="rename",
             )
         ],
         [
             InlineKeyboardButton(
                 "🗑 حذف قسم",
-                callback_data="deletecat"
+                callback_data="deletecat",
             )
         ],
         [
             InlineKeyboardButton(
                 "⬅️ لوحة التحكم",
-                callback_data="admin"
+                callback_data="admin",
             )
         ],
     ])
@@ -676,25 +681,25 @@ def prod_menu():
         [
             InlineKeyboardButton(
                 "➕ إضافة منتج",
-                callback_data="addprod"
+                callback_data="addprod",
             )
         ],
         [
             InlineKeyboardButton(
                 "📋 عرض المنتجات",
-                callback_data="viewprod"
+                callback_data="viewprod",
             )
         ],
         [
             InlineKeyboardButton(
                 "🗑 حذف منتج",
-                callback_data="deleteprod"
+                callback_data="deleteprod",
             )
         ],
         [
             InlineKeyboardButton(
                 "⬅️ لوحة التحكم",
-                callback_data="admin"
+                callback_data="admin",
             )
         ],
     ])
@@ -706,25 +711,25 @@ def gold_menu():
         [
             InlineKeyboardButton(
                 "✏️ تحديث السعر",
-                callback_data="updategold"
+                callback_data="updategold",
             )
         ],
         [
             InlineKeyboardButton(
                 "📜 سجل الأسعار",
-                callback_data="history"
+                callback_data="history",
             )
         ],
         [
             InlineKeyboardButton(
                 "📢 نشر السعر",
-                callback_data="publish"
+                callback_data="publish",
             )
         ],
         [
             InlineKeyboardButton(
                 "⬅️ لوحة التحكم",
-                callback_data="admin"
+                callback_data="admin",
             )
         ],
     ])
@@ -736,25 +741,25 @@ def publish_menu():
         [
             InlineKeyboardButton(
                 "📱 تليجرام + فيسبوك",
-                callback_data="pub_both"
+                callback_data="pub_both",
             )
         ],
         [
             InlineKeyboardButton(
                 "📱 تليجرام فقط",
-                callback_data="pub_tg"
+                callback_data="pub_tg",
             )
         ],
         [
             InlineKeyboardButton(
                 "📘 فيسبوك فقط",
-                callback_data="pub_fb"
+                callback_data="pub_fb",
             )
         ],
         [
             InlineKeyboardButton(
                 "❌ إلغاء",
-                callback_data="home"
+                callback_data="home",
             )
         ],
     ])
@@ -800,62 +805,53 @@ async def show_id(update, context):
 
 
 # =========================================================
-# FACEBOOK - PUBLISH + STRICT VERIFY
+# FACEBOOK - FINAL PUBLISH + DIRECT VERIFY
 # =========================================================
 
 async def facebook(text):
 
     """
-    Facebook flow:
+    FINAL FACEBOOK FLOW
 
-    1. Create Page Feed post.
-    2. Read the exact Post ID.
-    3. Verify the post belongs to the configured Page.
-    4. Check if the exact Post ID appears in Page Feed.
-    5. Return complete diagnostics.
+    1) Create a Page feed post using /PAGE_ID/feed.
+    2) Get the returned Post ID.
+    3) Read THAT SAME Post ID directly.
+    4) Verify:
+       - id
+       - message
+       - from
+       - created_time
+       - permalink_url
+       - is_published
 
     IMPORTANT:
-    We intentionally DO NOT modify the post after creation.
+    We DO NOT call /PAGE_ID/posts anymore.
+
+    Reason:
+    Meta may reject the Page /posts feed-read endpoint with
+    pages_read_engagement / Page Public Content Access even when
+    the exact Post ID can be read successfully.
+
+    Therefore /PAGE_ID/posts is NOT used as a publishing success test.
     """
 
-    print(
-        "\n========================================",
-        flush=True
-    )
-
-    print(
-        "FACEBOOK PUBLISH START",
-        flush=True
-    )
-
-    print(
-        f"BOT VERSION: {VERSION}",
-        flush=True
-    )
-
-    print(
-        "RUNNING FILE: bot.py",
-        flush=True
-    )
-
+    print("\n========================================", flush=True)
+    print("FACEBOOK FINAL PUBLISH START", flush=True)
+    print(f"BOT VERSION: {VERSION}", flush=True)
+    print("RUNNING FILE: bot.py", flush=True)
     print(
         f"FACEBOOK_PAGE_ID: {FACEBOOK_PAGE_ID}",
-        flush=True
+        flush=True,
     )
-
     print(
-        "FACEBOOK_PAGE_TOKEN PRESENT: "
+        "FACEBOOK_PAGE_TOKEN present: "
         f"{bool(FACEBOOK_PAGE_ACCESS_TOKEN)}",
-        flush=True
+        flush=True,
     )
-
-    print(
-        "========================================",
-        flush=True
-    )
+    print("========================================", flush=True)
 
     # -----------------------------------------------------
-    # BASIC CONFIG CHECK
+    # CONFIG CHECK
     # -----------------------------------------------------
 
     if not FACEBOOK_PAGE_ID:
@@ -884,7 +880,7 @@ async def facebook(text):
 
     graph_version = os.getenv(
         "FACEBOOK_GRAPH_VERSION",
-        "v23.0"
+        "v26.0",
     ).strip()
 
     if not graph_version.startswith("v"):
@@ -892,30 +888,34 @@ async def facebook(text):
         graph_version = "v" + graph_version
 
     base_url = (
-        f"https://graph.facebook.com/"
-        f"{graph_version}"
+        f"https://graph.facebook.com/{graph_version}"
     )
 
     feed_url = (
-        f"{base_url}/"
-        f"{FACEBOOK_PAGE_ID}/feed"
+        f"{base_url}/{FACEBOOK_PAGE_ID}/feed"
+    )
+
+    print(
+        f"Facebook Graph API Version: {graph_version}",
+        flush=True,
+    )
+
+    print(
+        f"Facebook Feed URL: {feed_url}",
+        flush=True,
     )
 
     try:
 
         # =================================================
-        # STEP 1 - CREATE POST
+        # 1) CREATE POST
         # =================================================
-
-        print(
-            "STEP 1: Creating Facebook Page Feed post...",
-            flush=True
-        )
 
         response = requests.post(
             feed_url,
             data={
                 "message": text,
+                "published": "true",
                 "access_token": FACEBOOK_PAGE_ACCESS_TOKEN,
             },
             timeout=30,
@@ -924,13 +924,13 @@ async def facebook(text):
         print(
             f"Facebook Create Status: "
             f"{response.status_code}",
-            flush=True
+            flush=True,
         )
 
         print(
             f"Facebook Create Response: "
             f"{response.text}",
-            flush=True
+            flush=True,
         )
 
         try:
@@ -942,7 +942,7 @@ async def facebook(text):
         # CREATE ERROR
         # -------------------------------------------------
 
-        if response.status_code >= 300:
+        if not (200 <= response.status_code < 300):
 
             err = (
                 data.get("error", {})
@@ -954,7 +954,7 @@ async def facebook(text):
                 "ok": False,
                 "message": (
                     "❌ Facebook رفض إنشاء المنشور.\n\n"
-                    f"Message: "
+                    f"الرسالة: "
                     f"{err.get('message', response.text)}\n"
                     f"Type: {err.get('type', '')}\n"
                     f"Code: {err.get('code', '')}\n"
@@ -963,11 +963,14 @@ async def facebook(text):
                 ),
             }
 
-        # -------------------------------------------------
-        # GET POST ID
-        # -------------------------------------------------
+        # =================================================
+        # 2) GET POST ID
+        # =================================================
 
-        post_id = data.get("id")
+        post_id = (
+            data.get("id")
+            or data.get("post_id")
+        )
 
         if not post_id:
 
@@ -981,241 +984,132 @@ async def facebook(text):
             }
 
         print(
-            f"STEP 1 SUCCESS - POST ID: {post_id}",
-            flush=True
+            f"Facebook Post ID: {post_id}",
+            flush=True,
         )
 
         # =================================================
-        # STEP 2 - VERIFY EXACT POST
+        # 3) DIRECT POST VERIFICATION
         # =================================================
-
-        print(
-            "STEP 2: Verifying exact Post ID...",
-            flush=True
-        )
 
         verify_url = (
             f"{base_url}/{post_id}"
         )
 
-        verify_response = requests.get(
-            verify_url,
-            params={
-                "fields": (
-                    "id,"
-                    "message,"
-                    "from,"
-                    "created_time,"
-                    "permalink_url,"
-                    "is_published"
-                ),
-                "access_token": FACEBOOK_PAGE_ACCESS_TOKEN,
-            },
-            timeout=30,
-        )
-
-        print(
-            f"Facebook Object Verify Status: "
-            f"{verify_response.status_code}",
-            flush=True
-        )
-
-        print(
-            f"Facebook Object Verify Response: "
-            f"{verify_response.text}",
-            flush=True
-        )
-
-        # -------------------------------------------------
-        # OBJECT VERIFY FAILED
-        # -------------------------------------------------
-
-        if verify_response.status_code >= 300:
-
-            return {
-                "ok": False,
-                "message": (
-                    "⚠️ Facebook أنشأ الـPost ID، "
-                    "لكن فشلنا في قراءة نفس المنشور.\n\n"
-                    f"🆔 Post ID:\n{post_id}\n\n"
-                    f"Facebook Response:\n"
-                    f"{verify_response.text}"
-                ),
-                "post_id": post_id,
-            }
-
-        verify_data = verify_response.json()
-
-        verified_id = verify_data.get("id")
-
-        permalink = verify_data.get(
-            "permalink_url"
-        )
-
-        is_published = verify_data.get(
+        verify_fields = (
+            "id,"
+            "message,"
+            "from,"
+            "created_time,"
+            "permalink_url,"
             "is_published"
         )
 
-        post_from = (
-            verify_data.get("from")
-            or {}
-        )
+        permalink = None
+        is_published = None
+        verified_message = None
+        verified_from = None
+        verified_created_time = None
 
-        from_id = str(
-            post_from.get("id", "")
-        )
+        verify_error = None
 
-        page_id = str(
-            FACEBOOK_PAGE_ID
-        )
+        try:
 
-        # -------------------------------------------------
-        # VERIFY SAME ID
-        # -------------------------------------------------
+            verify_response = requests.get(
+                verify_url,
+                params={
+                    "fields": verify_fields,
+                    "access_token": (
+                        FACEBOOK_PAGE_ACCESS_TOKEN
+                    ),
+                },
+                timeout=30,
+            )
 
-        exact_post_verified = (
-            str(verified_id)
-            == str(post_id)
-        )
+            print(
+                "Facebook Direct Verify Status: "
+                f"{verify_response.status_code}",
+                flush=True,
+            )
 
-        # -------------------------------------------------
-        # VERIFY PAGE OWNER
-        # -------------------------------------------------
-
-        belongs_to_page = (
-            from_id == page_id
-            if from_id
-            else None
-        )
-
-        print(
-            f"Verified ID: {verified_id}",
-            flush=True
-        )
-
-        print(
-            f"Post From ID: {from_id}",
-            flush=True
-        )
-
-        print(
-            f"Expected Page ID: {page_id}",
-            flush=True
-        )
-
-        print(
-            f"Exact Post Verified: "
-            f"{exact_post_verified}",
-            flush=True
-        )
-
-        print(
-            f"Belongs To Page: "
-            f"{belongs_to_page}",
-            flush=True
-        )
-
-        # =================================================
-        # STEP 3 - CHECK PAGE FEED
-        # =================================================
-
-        print(
-            "STEP 3: Checking Page Feed...",
-            flush=True
-        )
-
-        page_feed_url = (
-            f"{base_url}/"
-            f"{FACEBOOK_PAGE_ID}/feed"
-        )
-
-        feed_response = requests.get(
-            page_feed_url,
-            params={
-                "fields": (
-                    "id,"
-                    "message,"
-                    "created_time,"
-                    "permalink_url,"
-                    "is_published"
-                ),
-                "limit": "100",
-                "access_token": FACEBOOK_PAGE_ACCESS_TOKEN,
-            },
-            timeout=30,
-        )
-
-        print(
-            f"Facebook Page Feed Status: "
-            f"{feed_response.status_code}",
-            flush=True
-        )
-
-        print(
-            f"Facebook Page Feed Response: "
-            f"{feed_response.text}",
-            flush=True
-        )
-
-        feed_contains_post = False
-
-        feed_error = None
-
-        if feed_response.status_code >= 300:
+            print(
+                "Facebook Direct Verify Response: "
+                f"{verify_response.text}",
+                flush=True,
+            )
 
             try:
-                feed_error_data = (
-                    feed_response.json()
+                verify_data = (
+                    verify_response.json()
+                )
+            except Exception:
+                verify_data = {}
+
+            if verify_response.status_code < 300:
+
+                permalink = verify_data.get(
+                    "permalink_url"
                 )
 
-                feed_error = (
-                    feed_error_data
-                    .get("error", {})
-                    .get(
-                        "message",
-                        feed_response.text
+                is_published = verify_data.get(
+                    "is_published"
+                )
+
+                verified_message = verify_data.get(
+                    "message"
+                )
+
+                verified_from = verify_data.get(
+                    "from"
+                )
+
+                verified_created_time = (
+                    verify_data.get(
+                        "created_time"
                     )
                 )
 
-            except Exception:
+            else:
 
-                feed_error = (
-                    feed_response.text
+                err = (
+                    verify_data.get("error", {})
+                    if isinstance(
+                        verify_data,
+                        dict
+                    )
+                    else {}
                 )
 
-        else:
-
-            try:
-
-                feed_data = (
-                    feed_response.json()
+                verify_error = (
+                    err.get(
+                        "message",
+                        verify_response.text,
+                    )
                 )
 
-                for item in feed_data.get(
-                    "data",
-                    []
-                ):
+        except requests.RequestException as e:
 
-                    if str(
-                        item.get("id")
-                    ) == str(post_id):
+            verify_error = (
+                f"Network error: {repr(e)}"
+            )
 
-                        feed_contains_post = True
-                        break
+        except Exception as e:
 
-            except Exception as e:
-
-                feed_error = repr(e)
+            verify_error = (
+                f"Verification exception: "
+                f"{repr(e)}"
+            )
 
         # =================================================
-        # FALLBACK PERMALINK
+        # 4) FALLBACK PERMALINK
         # =================================================
 
         if not permalink:
 
-            post_part = str(
-                post_id
-            ).split("_", 1)[-1]
+            post_part = str(post_id).split(
+                "_",
+                1,
+            )[-1]
 
             permalink = (
                 "https://www.facebook.com/"
@@ -1224,161 +1118,178 @@ async def facebook(text):
             )
 
         # =================================================
-        # FINAL DIAGNOSTIC
+        # 5) DETERMINE FINAL STATUS
         # =================================================
 
-        result_lines = [
-            "📘 FACEBOOK DIAGNOSTIC",
-            "",
-            "🆔 Post ID:",
-            str(post_id),
-            "",
-            "🔗 رابط المنشور:",
-            permalink,
-            "",
-        ]
-
-        # Exact Post
-        if exact_post_verified:
-
-            result_lines.append(
-                "🟢 Meta قدرت تقرأ نفس الـPost ID."
-            )
-
-        else:
-
-            result_lines.append(
-                "🔴 الـPost ID المقروء مختلف."
-            )
-
-        # Page ownership
-        if belongs_to_page is True:
-
-            result_lines.append(
-                "🟢 الـPost تابع للصفحة الصحيحة."
-            )
-
-        elif belongs_to_page is False:
-
-            result_lines.append(
-                "🔴 الـPost لا يبدو تابعًا "
-                "للصفحة الموجودة في PAGE_ID."
-            )
-
-        else:
-
-            result_lines.append(
-                "🟡 Meta لم تُرجع Page ID "
-                "في بيانات from."
-            )
-
-        # Published
-        if is_published is True:
-
-            result_lines.append(
-                "🟢 is_published = true"
-            )
-
-        elif is_published is False:
-
-            result_lines.append(
-                "🔴 is_published = false"
-            )
-
-        else:
-
-            result_lines.append(
-                "🟡 is_published غير متاح."
-            )
-
-        # Page Feed
-        if feed_contains_post:
-
-            result_lines.append(
-                "🟢 الـPost ظهر داخل Page Feed "
-                "عبر Graph API."
-            )
-
-        else:
-
-            result_lines.append(
-                "🔴 الـPost لم يظهر داخل "
-                "Page Feed عبر Graph API."
-            )
-
-        # Feed API error
-        if feed_error:
-
-            result_lines.extend([
-                "",
-                "⚠️ خطأ فحص Page Feed:",
-                str(feed_error),
-            ])
-
-        # -------------------------------------------------
-        # FINAL CONCLUSION
-        # -------------------------------------------------
-
-        result_lines.extend([
-            "",
-            "━━━━━━━━━━━━━━━━━━━━",
-            "",
-        ])
-
-        if (
-            exact_post_verified
-            and feed_contains_post
-        ):
-
-            result_lines.append(
-                "✅ Meta أكدت أن المنشور "
-                "موجود داخل Page Feed."
-            )
-
-        elif exact_post_verified:
-
-            result_lines.append(
-                "⚠️ Meta أكدت إنشاء المنشور "
-                "وقراءته، لكن فحص Page Feed "
-                "لم يجد نفس الـPost ID."
-            )
-
-        else:
-
-            result_lines.append(
-                "🔴 لم نصل لتأكيد كامل "
-                "لظهور المنشور."
-            )
-
-        result = "\n".join(
-            result_lines
+        direct_verify_ok = (
+            verify_error is None
+            and is_published is True
         )
 
+        # =================================================
+        # 6) BUILD DIAGNOSTIC MESSAGE
+        # =================================================
+
+        if direct_verify_ok:
+
+            result_lines = [
+                "✅ Facebook: تم نشر المنشور بنجاح.",
+                "",
+                "🆔 Post ID:",
+                str(post_id),
+                "",
+                "🔗 رابط المنشور:",
+                permalink,
+                "",
+                "🟢 Meta قرأت نفس الـPost ID بنجاح.",
+                "🟢 is_published = true",
+                "",
+                "🟢 تم التأكد من المنشور مباشرة.",
+                "",
+                "⚠️ ملاحظة:",
+                "البوت لم يعد يعتمد على Page /posts "
+                "كاختبار للنشر.",
+            ]
+
+            if verified_from:
+
+                if isinstance(
+                    verified_from,
+                    dict
+                ):
+
+                    from_name = (
+                        verified_from.get("name")
+                    )
+
+                    from_id = (
+                        verified_from.get("id")
+                    )
+
+                    if from_name:
+
+                        result_lines.extend([
+                            "",
+                            f"📘 الصفحة: {from_name}",
+                        ])
+
+                    if from_id:
+
+                        result_lines.append(
+                            f"🆔 Page ID: {from_id}"
+                        )
+
+            if verified_created_time:
+
+                result_lines.extend([
+                    "",
+                    "🕒 وقت الإنشاء:",
+                    str(verified_created_time),
+                ])
+
+            result = "\n".join(
+                result_lines
+            )
+
+            print(
+                "FACEBOOK FINAL RESULT:",
+                flush=True,
+            )
+
+            print(
+                result,
+                flush=True,
+            )
+
+            print(
+                "========================================\n",
+                flush=True,
+            )
+
+            return {
+                "ok": True,
+                "message": result,
+                "post_id": post_id,
+                "permalink": permalink,
+                "is_published": is_published,
+                "direct_verify": True,
+                "verified_message": (
+                    verified_message
+                ),
+                "verified_from": (
+                    verified_from
+                ),
+                "verified_created_time": (
+                    verified_created_time
+                ),
+            }
+
+        # =================================================
+        # 7) POST CREATED BUT VERIFICATION FAILED
+        # =================================================
+
+        if verify_error:
+
+            result = "\n".join([
+                "🟡 Facebook أنشأ المنشور.",
+                "",
+                "🆔 Post ID:",
+                str(post_id),
+                "",
+                "🔗 رابط المنشور:",
+                permalink,
+                "",
+                "⚠️ لكن تعذر قراءة نفس الـPost "
+                "مباشرة بعد الإنشاء.",
+                "",
+                "خطأ التحقق:",
+                str(verify_error),
+                "",
+                "❗ ده ليس فشلًا في إنشاء الـPost.",
+            ])
+
+        else:
+
+            result = "\n".join([
+                "🟡 Facebook أنشأ المنشور.",
+                "",
+                "🆔 Post ID:",
+                str(post_id),
+                "",
+                "🔗 رابط المنشور:",
+                permalink,
+                "",
+                "⚠️ Meta لم ترجع "
+                "is_published = true "
+                "في التحقق المباشر.",
+                "",
+                f"Published value: "
+                f"{is_published}",
+            ])
+
         print(
-            "\nFACEBOOK FINAL RESULT:",
-            flush=True
+            "FACEBOOK FINAL RESULT:",
+            flush=True,
         )
 
         print(
             result,
-            flush=True
+            flush=True,
         )
 
         print(
-            "\n========================================\n",
-            flush=True
+            "========================================\n",
+            flush=True,
         )
 
         return {
-            "ok": True,
+            "ok": False,
             "message": result,
             "post_id": post_id,
             "permalink": permalink,
             "is_published": is_published,
-            "belongs_to_page": belongs_to_page,
-            "feed_contains_post": feed_contains_post,
-            "exact_post_verified": exact_post_verified,
-            "feed_error": feed_error,
+            "direct_verify": False,
+            "verification_error": verify_error,
         }
 
     # =====================================================
@@ -1388,15 +1299,11 @@ async def facebook(text):
     except requests.RequestException as e:
 
         msg = (
-            "❌ خطأ شبكة أثناء الاتصال "
-            "بـ Facebook:\n\n"
+            "❌ خطأ شبكة أثناء الاتصال بـ Facebook:\n"
             f"{repr(e)}"
         )
 
-        print(
-            msg,
-            flush=True
-        )
+        print(msg, flush=True)
 
         return {
             "ok": False,
@@ -1410,15 +1317,11 @@ async def facebook(text):
     except Exception as e:
 
         msg = (
-            "❌ Exception أثناء النشر "
-            "على Facebook:\n\n"
+            "❌ Exception أثناء النشر على Facebook:\n"
             f"{repr(e)}"
         )
 
-        print(
-            msg,
-            flush=True
-        )
+        print(msg, flush=True)
 
         return {
             "ok": False,
@@ -1449,7 +1352,7 @@ async def tg(context, text):
         print(
             "Telegram Error:",
             repr(e),
-            flush=True
+            flush=True,
         )
 
         return False
@@ -1474,15 +1377,12 @@ async def photo(update, context):
     ) != "product_photo":
 
         await update.message.reply_text(
-            "❌ ابدأ إضافة المنتج "
-            "من لوحة التحكم."
+            "❌ ابدأ إضافة المنتج من لوحة التحكم."
         )
 
         return
 
-    cid = context.user_data.get(
-        "cid"
-    )
+    cid = context.user_data.get("cid")
 
     try:
 
@@ -1498,8 +1398,7 @@ async def photo(update, context):
         context.user_data.clear()
 
         await update.message.reply_text(
-            f"✅ تم إضافة المنتج بنجاح.\n"
-            f"🆔 #{pid}",
+            f"✅ تم إضافة المنتج بنجاح.\n🆔 #{pid}",
             reply_markup=prod_menu(),
         )
 
@@ -1508,7 +1407,7 @@ async def photo(update, context):
         print(
             "Product error:",
             repr(e),
-            flush=True
+            flush=True,
         )
 
         context.user_data.clear()
@@ -1533,13 +1432,11 @@ async def text(update, context):
         or ""
     ).strip()
 
-    s = context.user_data.get(
-        "state"
-    )
+    s = context.user_data.get("state")
 
-    # -----------------------------------------------------
+    # =====================================================
     # GOLD STATE
-    # -----------------------------------------------------
+    # =====================================================
 
     if s == "gold":
 
@@ -1584,9 +1481,9 @@ async def text(update, context):
 
         return
 
-    # -----------------------------------------------------
+    # =====================================================
     # MAIN CATEGORY
-    # -----------------------------------------------------
+    # =====================================================
 
     if s == "main":
 
@@ -1617,9 +1514,9 @@ async def text(update, context):
 
         return
 
-    # -----------------------------------------------------
+    # =====================================================
     # SUB CATEGORY
-    # -----------------------------------------------------
+    # =====================================================
 
     if s == "sub":
 
@@ -1654,9 +1551,9 @@ async def text(update, context):
 
         return
 
-    # -----------------------------------------------------
+    # =====================================================
     # RENAME
-    # -----------------------------------------------------
+    # =====================================================
 
     if s == "rename":
 
@@ -1665,6 +1562,7 @@ async def text(update, context):
         )
 
         if cid and t:
+
             rename_cat(cid, t)
 
         context.user_data.clear()
@@ -1676,9 +1574,9 @@ async def text(update, context):
 
         return
 
-    # -----------------------------------------------------
+    # =====================================================
     # PRODUCT NAME
-    # -----------------------------------------------------
+    # =====================================================
 
     if s == "prod_name":
 
@@ -1699,9 +1597,9 @@ async def text(update, context):
 
         return
 
-    # -----------------------------------------------------
+    # =====================================================
     # PRODUCT CODE
-    # -----------------------------------------------------
+    # =====================================================
 
     if s == "prod_code":
 
@@ -1722,9 +1620,9 @@ async def text(update, context):
 
         return
 
-    # -----------------------------------------------------
+    # =====================================================
     # PRODUCT PRICE
-    # -----------------------------------------------------
+    # =====================================================
 
     if s == "prod_price":
 
@@ -1762,9 +1660,9 @@ async def text(update, context):
 
         return
 
-    # -----------------------------------------------------
+    # =====================================================
     # PRODUCT DESCRIPTION
-    # -----------------------------------------------------
+    # =====================================================
 
     if s == "prod_desc":
 
@@ -1784,9 +1682,9 @@ async def text(update, context):
 
         return
 
-    # -----------------------------------------------------
+    # =====================================================
     # NUMERIC GOLD PRICE
-    # -----------------------------------------------------
+    # =====================================================
 
     try:
 
@@ -1803,8 +1701,7 @@ async def text(update, context):
         if not is_admin(update):
 
             await update.message.reply_text(
-                "❌ أسعار الذهب متاحة "
-                "للأدمن فقط."
+                "❌ أسعار الذهب متاحة للأدمن فقط."
             )
 
             return
@@ -1826,9 +1723,7 @@ async def text(update, context):
     await update.message.reply_text(
         "❌ مش فاهم طلبك.\n"
         "استخدم /start لفتح القائمة.",
-        reply_markup=home(
-            is_admin(update)
-        ),
+        reply_markup=home(is_admin(update)),
     )
 
 
@@ -1844,9 +1739,9 @@ async def buttons(update, context):
 
     c = q.data
 
-    # -----------------------------------------------------
+    # =====================================================
     # HOME
-    # -----------------------------------------------------
+    # =====================================================
 
     if c == "home":
 
@@ -1862,9 +1757,9 @@ async def buttons(update, context):
 
         return
 
-    # -----------------------------------------------------
+    # =====================================================
     # ADMIN
-    # -----------------------------------------------------
+    # =====================================================
 
     if c == "admin":
 
@@ -1872,7 +1767,7 @@ async def buttons(update, context):
 
             await q.answer(
                 "❌ غير مسموح.",
-                show_alert=True
+                show_alert=True,
             )
 
             return
@@ -1904,7 +1799,7 @@ async def buttons(update, context):
                     [
                         InlineKeyboardButton(
                             "⬅️ الرئيسية",
-                            callback_data="home"
+                            callback_data="home",
                         )
                     ]
                 ]),
@@ -1916,7 +1811,9 @@ async def buttons(update, context):
             [
                 InlineKeyboardButton(
                     "💍 " + m["name"],
-                    callback_data=f"cm:{m['id']}"
+                    callback_data=(
+                        f"cm:{m['id']}"
+                    ),
                 )
             ]
             for m in ms
@@ -1925,7 +1822,7 @@ async def buttons(update, context):
         k.append([
             InlineKeyboardButton(
                 "⬅️ الرئيسية",
-                callback_data="home"
+                callback_data="home",
             )
         ])
 
@@ -1937,9 +1834,9 @@ async def buttons(update, context):
 
         return
 
-    # -----------------------------------------------------
+    # =====================================================
     # MAIN CATEGORY CLIENT
-    # -----------------------------------------------------
+    # =====================================================
 
     if c.startswith("cm:"):
 
@@ -1960,7 +1857,7 @@ async def buttons(update, context):
                     [
                         InlineKeyboardButton(
                             "⬅️ المنتجات",
-                            callback_data="products"
+                            callback_data="products",
                         )
                     ]
                 ]),
@@ -1973,7 +1870,9 @@ async def buttons(update, context):
                 InlineKeyboardButton(
                     f"🟡 {s['name']} "
                     f"({s['product_count']})",
-                    callback_data=f"cs:{s['id']}"
+                    callback_data=(
+                        f"cs:{s['id']}"
+                    ),
                 )
             ]
             for s in ss
@@ -1982,7 +1881,7 @@ async def buttons(update, context):
         k.append([
             InlineKeyboardButton(
                 "⬅️ الأقسام",
-                callback_data="products"
+                callback_data="products",
             )
         ])
 
@@ -1994,9 +1893,9 @@ async def buttons(update, context):
 
         return
 
-    # -----------------------------------------------------
+    # =====================================================
     # SUB CATEGORY CLIENT
-    # -----------------------------------------------------
+    # =====================================================
 
     if c.startswith("cs:"):
 
@@ -2019,7 +1918,7 @@ async def buttons(update, context):
                             "⬅️ رجوع",
                             callback_data=(
                                 f"cm:{s['parent_id']}"
-                            )
+                            ),
                         )
                     ]
                 ]),
@@ -2037,22 +1936,26 @@ async def buttons(update, context):
             parts = []
 
             if p["name"]:
+
                 parts.append(
                     f"💍 {p['name']}"
                 )
 
             if p["code"]:
+
                 parts.append(
                     f"🔖 الكود: {p['code']}"
                 )
 
             if p["price"] is not None:
+
                 parts.append(
                     f"💰 السعر: "
                     f"{p['price']} جنيه"
                 )
 
             if p["description"]:
+
                 parts.append(
                     f"\n{p['description']}"
                 )
@@ -2072,13 +1975,13 @@ async def buttons(update, context):
                 print(
                     "Product Photo Error:",
                     repr(e),
-                    flush=True
+                    flush=True,
                 )
 
         return
 
     # =====================================================
-    # GOLD
+    # GOLD ADMIN
     # =====================================================
 
     if c == "agold":
@@ -2101,9 +2004,9 @@ async def buttons(update, context):
 
         return
 
-    # -----------------------------------------------------
+    # =====================================================
     # UPDATE GOLD
-    # -----------------------------------------------------
+    # =====================================================
 
     if c == "updategold":
 
@@ -2123,17 +2026,15 @@ async def buttons(update, context):
 
         return
 
-    # -----------------------------------------------------
+    # =====================================================
     # HISTORY
-    # -----------------------------------------------------
+    # =====================================================
 
     if c == "history":
 
         h = load_json(HISTORY)
 
-        txt = (
-            "📜 سجل الأسعار\n\n"
-        )
+        txt = "📜 سجل الأسعار\n\n"
 
         if h:
 
@@ -2141,7 +2042,7 @@ async def buttons(update, context):
                 f"📅 {d} — {p} جنيه"
                 for d, p in sorted(
                     h.items(),
-                    reverse=True
+                    reverse=True,
                 )[:30]
             )
 
@@ -2156,9 +2057,9 @@ async def buttons(update, context):
 
         return
 
-    # -----------------------------------------------------
+    # =====================================================
     # PUBLISH MENU
-    # -----------------------------------------------------
+    # =====================================================
 
     if c == "publish":
 
@@ -2190,7 +2091,7 @@ async def buttons(update, context):
         return
 
     # =====================================================
-    # CATEGORIES
+    # CATEGORIES ADMIN
     # =====================================================
 
     if c == "acat":
@@ -2200,15 +2101,16 @@ async def buttons(update, context):
 
         await q.edit_message_text(
             "📂 إدارة الأقسام\n\n"
-            "القسم الرئيسي → القسم الفرعي → المنتجات",
+            "القسم الرئيسي → "
+            "القسم الفرعي → المنتجات",
             reply_markup=cat_menu(),
         )
 
         return
 
-    # -----------------------------------------------------
-    # ADD MAIN
-    # -----------------------------------------------------
+    # =====================================================
+    # ADD MAIN CATEGORY
+    # =====================================================
 
     if c == "addmain":
 
@@ -2225,9 +2127,9 @@ async def buttons(update, context):
 
         return
 
-    # -----------------------------------------------------
-    # ADD SUB
-    # -----------------------------------------------------
+    # =====================================================
+    # ADD SUB CATEGORY
+    # =====================================================
 
     if c == "addsub":
 
@@ -2237,7 +2139,9 @@ async def buttons(update, context):
             [
                 InlineKeyboardButton(
                     "💍 " + m["name"],
-                    callback_data=f"sp:{m['id']}"
+                    callback_data=(
+                        f"sp:{m['id']}"
+                    ),
                 )
             ]
             for m in ms
@@ -2246,7 +2150,7 @@ async def buttons(update, context):
         k.append([
             InlineKeyboardButton(
                 "⬅️ رجوع",
-                callback_data="acat"
+                callback_data="acat",
             )
         ])
 
@@ -2257,9 +2161,9 @@ async def buttons(update, context):
 
         return
 
-    # -----------------------------------------------------
-    # SUB PARENT
-    # -----------------------------------------------------
+    # =====================================================
+    # SELECT MAIN FOR SUB CATEGORY
+    # =====================================================
 
     if c.startswith("sp:"):
 
@@ -2271,7 +2175,7 @@ async def buttons(update, context):
 
         context.user_data.update(
             state="sub",
-            parent=mid
+            parent=mid,
         )
 
         await q.edit_message_text(
@@ -2282,15 +2186,15 @@ async def buttons(update, context):
 
         return
 
-    # -----------------------------------------------------
+    # =====================================================
     # VIEW CATEGORIES
-    # -----------------------------------------------------
+    # =====================================================
 
     if c == "viewcats":
 
         lines = [
             "📂 الأقسام",
-            ""
+            "",
         ]
 
         for m in cats():
@@ -2309,18 +2213,20 @@ async def buttons(update, context):
             lines.append("")
 
         await q.edit_message_text(
-            "\n".join(lines)
-            if len(lines) > 2
-            else
-            "📂 لا توجد أقسام.",
+            (
+                "\n".join(lines)
+                if len(lines) > 2
+                else
+                "📂 لا توجد أقسام."
+            ),
             reply_markup=cat_menu(),
         )
 
         return
 
-    # -----------------------------------------------------
+    # =====================================================
     # RENAME CATEGORY
-    # -----------------------------------------------------
+    # =====================================================
 
     if c == "rename":
 
@@ -2331,7 +2237,9 @@ async def buttons(update, context):
             k.append([
                 InlineKeyboardButton(
                     "✏️ " + m["name"],
-                    callback_data=f"rp:{m['id']}"
+                    callback_data=(
+                        f"rp:{m['id']}"
+                    ),
                 )
             ])
 
@@ -2340,15 +2248,18 @@ async def buttons(update, context):
                 k.append([
                     InlineKeyboardButton(
                         f"   ✏️ "
-                        f"{m['name']} → {s['name']}",
-                        callback_data=f"rp:{s['id']}"
+                        f"{m['name']} → "
+                        f"{s['name']}",
+                        callback_data=(
+                            f"rp:{s['id']}"
+                        ),
                     )
                 ])
 
         k.append([
             InlineKeyboardButton(
                 "⬅️ رجوع",
-                callback_data="acat"
+                callback_data="acat",
             )
         ])
 
@@ -2359,9 +2270,9 @@ async def buttons(update, context):
 
         return
 
-    # -----------------------------------------------------
-    # RENAME CATEGORY ID
-    # -----------------------------------------------------
+    # =====================================================
+    # RENAME SELECTED CATEGORY
+    # =====================================================
 
     if c.startswith("rp:"):
 
@@ -2373,7 +2284,7 @@ async def buttons(update, context):
 
         context.user_data.update(
             state="rename",
-            cid=cid
+            cid=cid,
         )
 
         await q.edit_message_text(
@@ -2384,9 +2295,9 @@ async def buttons(update, context):
 
         return
 
-    # -----------------------------------------------------
+    # =====================================================
     # DELETE CATEGORY
-    # -----------------------------------------------------
+    # =====================================================
 
     if c == "deletecat":
 
@@ -2397,7 +2308,9 @@ async def buttons(update, context):
             k.append([
                 InlineKeyboardButton(
                     "🗑 " + m["name"],
-                    callback_data=f"dc:{m['id']}"
+                    callback_data=(
+                        f"dc:{m['id']}"
+                    ),
                 )
             ])
 
@@ -2406,15 +2319,18 @@ async def buttons(update, context):
                 k.append([
                     InlineKeyboardButton(
                         f"   🗑 "
-                        f"{m['name']} → {s['name']}",
-                        callback_data=f"dc:{s['id']}"
+                        f"{m['name']} → "
+                        f"{s['name']}",
+                        callback_data=(
+                            f"dc:{s['id']}"
+                        ),
                     )
                 ])
 
         k.append([
             InlineKeyboardButton(
                 "⬅️ رجوع",
-                callback_data="acat"
+                callback_data="acat",
             )
         ])
 
@@ -2427,9 +2343,9 @@ async def buttons(update, context):
 
         return
 
-    # -----------------------------------------------------
-    # DELETE CATEGORY ID
-    # -----------------------------------------------------
+    # =====================================================
+    # DELETE CATEGORY CONFIRM
+    # =====================================================
 
     if c.startswith("dc:"):
 
@@ -2440,16 +2356,16 @@ async def buttons(update, context):
         r = del_cat(cid)
 
         msg = {
-            "deleted": "✅ تم الحذف.",
-            "products": (
+            "deleted":
+                "✅ تم الحذف.",
+            "products":
                 "⚠️ القسم يحتوي منتجات، "
-                "احذفها أولاً."
-            ),
-            "children": (
+                "احذفها أولاً.",
+            "children":
                 "⚠️ القسم يحتوي أقسام فرعية، "
-                "احذفها أولاً."
-            ),
-            "missing": "⚠️ القسم غير موجود.",
+                "احذفها أولاً.",
+            "missing":
+                "⚠️ القسم غير موجود.",
         }[r]
 
         await q.edit_message_text(
@@ -2475,9 +2391,9 @@ async def buttons(update, context):
 
         return
 
-    # -----------------------------------------------------
+    # =====================================================
     # ADD PRODUCT
-    # -----------------------------------------------------
+    # =====================================================
 
     if c == "addprod":
 
@@ -2487,7 +2403,9 @@ async def buttons(update, context):
             [
                 InlineKeyboardButton(
                     "💍 " + m["name"],
-                    callback_data=f"pm:{m['id']}"
+                    callback_data=(
+                        f"pm:{m['id']}"
+                    ),
                 )
             ]
             for m in ms
@@ -2496,7 +2414,7 @@ async def buttons(update, context):
         k.append([
             InlineKeyboardButton(
                 "⬅️ رجوع",
-                callback_data="aprod"
+                callback_data="aprod",
             )
         ])
 
@@ -2507,9 +2425,9 @@ async def buttons(update, context):
 
         return
 
-    # -----------------------------------------------------
-    # PRODUCT MAIN
-    # -----------------------------------------------------
+    # =====================================================
+    # SELECT MAIN PRODUCT CATEGORY
+    # =====================================================
 
     if c.startswith("pm:"):
 
@@ -2523,7 +2441,9 @@ async def buttons(update, context):
             [
                 InlineKeyboardButton(
                     "🟡 " + s["name"],
-                    callback_data=f"ps:{s['id']}"
+                    callback_data=(
+                        f"ps:{s['id']}"
+                    ),
                 )
             ]
             for s in ss
@@ -2532,7 +2452,7 @@ async def buttons(update, context):
         k.append([
             InlineKeyboardButton(
                 "⬅️ رجوع",
-                callback_data="addprod"
+                callback_data="addprod",
             )
         ])
 
@@ -2543,9 +2463,9 @@ async def buttons(update, context):
 
         return
 
-    # -----------------------------------------------------
-    # PRODUCT SUB
-    # -----------------------------------------------------
+    # =====================================================
+    # PRODUCT DATA START
+    # =====================================================
 
     if c.startswith("ps:"):
 
@@ -2557,7 +2477,7 @@ async def buttons(update, context):
 
         context.user_data.update(
             state="prod_name",
-            cid=sid
+            cid=sid,
         )
 
         await q.edit_message_text(
@@ -2567,9 +2487,9 @@ async def buttons(update, context):
 
         return
 
-    # -----------------------------------------------------
+    # =====================================================
     # VIEW PRODUCTS
-    # -----------------------------------------------------
+    # =====================================================
 
     if c == "viewprod":
 
@@ -2577,7 +2497,7 @@ async def buttons(update, context):
 
         lines = [
             "📋 المنتجات",
-            ""
+            "",
         ]
 
         for p in ps[:50]:
@@ -2591,18 +2511,20 @@ async def buttons(update, context):
             )
 
         await q.edit_message_text(
-            "\n".join(lines)
-            if ps
-            else
-            "📋 لا توجد منتجات.",
+            (
+                "\n".join(lines)
+                if ps
+                else
+                "📋 لا توجد منتجات."
+            ),
             reply_markup=prod_menu(),
         )
 
         return
 
-    # -----------------------------------------------------
+    # =====================================================
     # DELETE PRODUCT MENU
-    # -----------------------------------------------------
+    # =====================================================
 
     if c == "deleteprod":
 
@@ -2613,7 +2535,9 @@ async def buttons(update, context):
                 InlineKeyboardButton(
                     f"🗑 #{p['id']} "
                     f"{p['name'] or 'بدون اسم'}",
-                    callback_data=f"dp:{p['id']}"
+                    callback_data=(
+                        f"dp:{p['id']}"
+                    ),
                 )
             ]
             for p in ps[:50]
@@ -2622,7 +2546,7 @@ async def buttons(update, context):
         k.append([
             InlineKeyboardButton(
                 "⬅️ رجوع",
-                callback_data="aprod"
+                callback_data="aprod",
             )
         ])
 
@@ -2633,9 +2557,9 @@ async def buttons(update, context):
 
         return
 
-    # -----------------------------------------------------
+    # =====================================================
     # DELETE PRODUCT CONFIRM
-    # -----------------------------------------------------
+    # =====================================================
 
     if c.startswith("dp:"):
 
@@ -2649,13 +2573,15 @@ async def buttons(update, context):
                 [
                     InlineKeyboardButton(
                         "✅ احذف",
-                        callback_data=f"cdp:{pid}"
+                        callback_data=(
+                            f"cdp:{pid}"
+                        ),
                     )
                 ],
                 [
                     InlineKeyboardButton(
                         "❌ إلغاء",
-                        callback_data="deleteprod"
+                        callback_data="deleteprod",
                     )
                 ],
             ]),
@@ -2663,9 +2589,9 @@ async def buttons(update, context):
 
         return
 
-    # -----------------------------------------------------
+    # =====================================================
     # DELETE PRODUCT
-    # -----------------------------------------------------
+    # =====================================================
 
     if c.startswith("cdp:"):
 
@@ -2674,10 +2600,12 @@ async def buttons(update, context):
         )
 
         await q.edit_message_text(
-            "✅ تم حذف المنتج."
-            if del_product(pid)
-            else
-            "⚠️ المنتج غير موجود.",
+            (
+                "✅ تم حذف المنتج."
+                if del_product(pid)
+                else
+                "⚠️ المنتج غير موجود."
+            ),
             reply_markup=prod_menu(),
         )
 
@@ -2697,13 +2625,13 @@ async def buttons(update, context):
                 [
                     InlineKeyboardButton(
                         "💬 واتساب",
-                        url=WHATSAPP
+                        url=WHATSAPP,
                     )
                 ],
                 [
                     InlineKeyboardButton(
                         "⬅️ الرئيسية",
-                        callback_data="home"
+                        callback_data="home",
                     )
                 ],
             ]),
@@ -2720,15 +2648,18 @@ async def buttons(update, context):
         p = latest()
 
         await q.edit_message_text(
-            price_text(p)
-            if p
-            else
-            "💎 لم يتم تحديث أسعار الذهب حتى الآن.",
+            (
+                price_text(p)
+                if p
+                else
+                "💎 لم يتم تحديث أسعار "
+                "الذهب حتى الآن."
+            ),
             reply_markup=InlineKeyboardMarkup([
                 [
                     InlineKeyboardButton(
                         "⬅️ الرئيسية",
-                        callback_data="home"
+                        callback_data="home",
                     )
                 ]
             ]),
@@ -2743,7 +2674,7 @@ async def buttons(update, context):
     if c in (
         "pub_both",
         "pub_tg",
-        "pub_fb"
+        "pub_fb",
     ):
 
         if not is_admin(update):
@@ -2770,27 +2701,27 @@ async def buttons(update, context):
 
         fb_result = None
 
-        # -------------------------------------------------
+        # =================================================
         # TELEGRAM
-        # -------------------------------------------------
+        # =================================================
 
         if c in (
             "pub_both",
-            "pub_tg"
+            "pub_tg",
         ):
 
             tg_ok = await tg(
                 context,
-                txt
+                txt,
             )
 
-        # -------------------------------------------------
+        # =================================================
         # FACEBOOK
-        # -------------------------------------------------
+        # =================================================
 
         if c in (
             "pub_both",
-            "pub_fb"
+            "pub_fb",
         ):
 
             fb_result = await facebook(
@@ -2802,9 +2733,10 @@ async def buttons(update, context):
             and fb_result.get("ok")
         )
 
-        # -------------------------------------------------
-        # SAVE PRICE
-        # -------------------------------------------------
+        # =================================================
+        # SAVE PRICE ONLY IF AT LEAST ONE
+        # PLATFORM SUCCEEDED
+        # =================================================
 
         if tg_ok or fb_ok:
 
@@ -2828,12 +2760,12 @@ async def buttons(update, context):
                 (
                     fb_result.get(
                         "message",
-                        "❌ فشل النشر على Facebook."
+                        "❌ فشل النشر على Facebook.",
                     )
                     if fb_result
                     else
-                    "❌ لم يتم تنفيذ النشر "
-                    "على Facebook."
+                    "❌ لم يتم تنفيذ "
+                    "النشر على Facebook."
                 ),
                 reply_markup=home(True),
             )
@@ -2847,10 +2779,12 @@ async def buttons(update, context):
         if c == "pub_tg":
 
             await q.edit_message_text(
-                "✅ تم النشر في تليجرام."
-                if tg_ok
-                else
-                "❌ فشل النشر في تليجرام.",
+                (
+                    "✅ تم النشر في تليجرام."
+                    if tg_ok
+                    else
+                    "❌ فشل النشر في تليجرام."
+                ),
                 reply_markup=home(True),
             )
 
@@ -2869,29 +2803,64 @@ async def buttons(update, context):
             "❌ Telegram: فشل النشر."
         )
 
+        # =================================================
+        # FACEBOOK SUCCESS
+        # =================================================
+
         if fb_ok:
 
             result_lines.append(
-                "\n" + fb_result.get(
-                    "message",
-                    "❌ Facebook: "
-                    "فشل النشر."
-                )
+                "✅ Facebook: تم النشر."
             )
+
+            if fb_result.get(
+                "post_id"
+            ):
+
+                result_lines.append(
+                    "\n🆔 Post ID:\n"
+                    f"{fb_result['post_id']}"
+                )
+
+            if fb_result.get(
+                "permalink"
+            ):
+
+                result_lines.append(
+                    "\n🔗 رابط المنشور:\n"
+                    f"{fb_result['permalink']}"
+                )
+
+            if fb_result.get(
+                "is_published"
+            ) is not None:
+
+                result_lines.append(
+                    "\n🟢 Published: "
+                    f"{'نعم' if fb_result.get('is_published') else 'لا'}"
+                )
+
+            result_lines.append(
+                "\n🟢 تم التحقق من نفس "
+                "الـPost ID مباشرة."
+            )
+
+        # =================================================
+        # FACEBOOK FAILURE
+        # =================================================
 
         else:
 
             result_lines.append(
-                "\n" + (
+                "\n"
+                + (
                     fb_result.get(
                         "message",
-                        "❌ Facebook: "
-                        "فشل النشر."
+                        "❌ Facebook: فشل النشر.",
                     )
                     if fb_result
                     else
-                    "❌ Facebook: "
-                    "فشل النشر."
+                    "❌ Facebook: فشل النشر."
                 )
             )
 
@@ -2911,18 +2880,18 @@ async def error(update, context):
 
     print(
         "========================================",
-        flush=True
+        flush=True,
     )
 
     print(
         "BOT ERROR:",
         repr(context.error),
-        flush=True
+        flush=True,
     )
 
     print(
         "========================================",
-        flush=True
+        flush=True,
     )
 
 
@@ -2933,43 +2902,46 @@ async def error(update, context):
 def main():
 
     if not BOT_TOKEN:
+
         raise Exception(
             "BOT_TOKEN is missing"
         )
 
     if not ADMIN_ID:
+
         raise Exception(
             "ADMIN_ID is missing"
         )
 
     if not DATABASE_URL:
+
         raise Exception(
             "DATABASE_URL is missing"
         )
 
     print(
         "========================================",
-        flush=True
+        flush=True,
     )
 
     print(
         "Alhussieny Gold Bot Starting...",
-        flush=True
+        flush=True,
     )
 
     print(
         "RUNNING FILE: bot.py",
-        flush=True
+        flush=True,
     )
 
     print(
         f"BOT VERSION: {VERSION}",
-        flush=True
+        flush=True,
     )
 
     print(
         "========================================",
-        flush=True
+        flush=True,
     )
 
     init_db()
@@ -2984,21 +2956,21 @@ def main():
     app.add_handler(
         CommandHandler(
             "start",
-            start
+            start,
         )
     )
 
     app.add_handler(
         CommandHandler(
             "id",
-            show_id
+            show_id,
         )
     )
 
     app.add_handler(
         MessageHandler(
             filters.PHOTO,
-            photo
+            photo,
         )
     )
 
@@ -3010,23 +2982,22 @@ def main():
 
     app.add_handler(
         MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            text
+            filters.TEXT
+            & ~filters.COMMAND,
+            text,
         )
     )
 
-    app.add_error_handler(
-        error
-    )
+    app.add_error_handler(error)
 
     print(
         "Alhussieny Gold Bot Started...",
-        flush=True
+        flush=True,
     )
 
     print(
         f"READY VERSION: {VERSION}",
-        flush=True
+        flush=True,
     )
 
     app.run_polling(
