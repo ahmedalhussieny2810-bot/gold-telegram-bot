@@ -22,7 +22,7 @@ from telegram.ext import (
 # =========================================================
 # VERSION
 # =========================================================
-VERSION = "ALHUSSIENY_SHOP_SYSTEM_2026_08_13_V22"
+VERSION = "ALHUSSIENY_SHOP_SYSTEM_2026_08_13_V23"
 
 # =========================================================
 # ENV
@@ -1593,9 +1593,14 @@ def fb_request(method, url, *, params=None, data=None, timeout=30):
 
 async def facebook_photo(text, photo_url):
     """
-    Publishes a photo post to the Facebook Page feed using a
-    direct image URL (e.g. a Telegram file URL). Facebook fetches
-    the image server-side, so no local download is needed.
+    Publishes a photo post to the Facebook Page feed.
+
+    IMPORTANT: We download the image bytes ourselves and upload them
+    directly (multipart/form-data) instead of passing a Telegram URL
+    for Facebook to fetch server-side. Meta's server-side fetcher
+    frequently fails to reach api.telegram.org's CDN ("Missing or
+    invalid image file" / code 324), so downloading locally and
+    uploading the bytes is far more reliable.
     """
 
     if not FACEBOOK_PAGE_ID:
@@ -1618,16 +1623,30 @@ async def facebook_photo(text, photo_url):
     photos_url = f"{base}/{FACEBOOK_PAGE_ID}/photos"
 
     try:
-        r, created = fb_request(
-            "POST",
+        img = requests.get(photo_url, timeout=30)
+        img.raise_for_status()
+    except requests.RequestException as e:
+        return {
+            "ok": False,
+            "message": f"❌ فشل تحميل الصورة من تليجرام:\n{repr(e)}",
+        }
+
+    try:
+        r = requests.post(
             photos_url,
             data={
-                "url": photo_url,
                 "caption": text or "",
                 "published": "true",
                 "access_token": FACEBOOK_PAGE_ACCESS_TOKEN,
             },
+            files={"source": ("photo.jpg", img.content, "image/jpeg")},
+            timeout=30,
         )
+
+        try:
+            created = r.json()
+        except Exception:
+            created = {}
 
         print(f"FB PHOTO STATUS: {r.status_code}", flush=True)
         print(f"FB PHOTO RESPONSE: {r.text}", flush=True)
