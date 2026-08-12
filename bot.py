@@ -1,5 +1,6 @@
 import os
 import json
+import asyncio
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from urllib.parse import urlparse
@@ -20,7 +21,7 @@ from telegram.ext import (
 # =========================================================
 # VERSION
 # =========================================================
-VERSION = "ALHUSSIENY_FACEBOOK_FINAL_FIX_2026_08_12_V8"
+VERSION = "ALHUSSIENY_FACEBOOK_FINAL_FIX_2026_08_12_V9"
 
 # =========================================================
 # ENV
@@ -811,38 +812,30 @@ async def show_id(update, context):
 async def facebook(text):
 
     """
-    FINAL FACEBOOK FLOW
+    FINAL FACEBOOK PUBLISH FLOW - V9
 
-    1) Create a Page feed post using /PAGE_ID/feed.
-    2) Get the returned Post ID.
-    3) Read THAT SAME Post ID directly.
-    4) Verify:
-       - id
-       - message
-       - from
-       - created_time
-       - permalink_url
-       - is_published
+    الهدف:
+    - إنشاء المنشور على Page Feed باستخدام /PAGE_ID/feed.
+    - أخذ Post ID الحقيقي من Meta.
+    - قراءة نفس الـ Post ID مباشرة.
+    - التأكد أن المنشور تابع لنفس FACEBOOK_PAGE_ID.
+    - التأكد من is_published.
+    - التأكد من is_hidden وأنه ليس مخفيًا.
+    - لو Meta رجعت Hidden/Unpublished، نحاول إصلاح الحالة ثم نعيد التحقق.
+    - نعيد المحاولة عدة مرات لأن Meta قد تحتاج ثوانٍ لإظهار
+      الـ Post في القراءة المباشرة بعد الإنشاء.
 
-    IMPORTANT:
-    We DO NOT call /PAGE_ID/posts anymore.
-
-    Reason:
-    Meta may reject the Page /posts feed-read endpoint with
-    pages_read_engagement / Page Public Content Access even when
-    the exact Post ID can be read successfully.
-
-    Therefore /PAGE_ID/posts is NOT used as a publishing success test.
+    مهم:
+    - لا نعتمد على /PAGE_ID/posts كشرط نجاح.
+    - فشل Page Feed بسبب pages_read_engagement / Page Public
+      Content Access لا يعني أن إنشاء المنشور فشل.
     """
 
     print("\n========================================", flush=True)
     print("FACEBOOK FINAL PUBLISH START", flush=True)
     print(f"BOT VERSION: {VERSION}", flush=True)
     print("RUNNING FILE: bot.py", flush=True)
-    print(
-        f"FACEBOOK_PAGE_ID: {FACEBOOK_PAGE_ID}",
-        flush=True,
-    )
+    print(f"FACEBOOK_PAGE_ID: {FACEBOOK_PAGE_ID}", flush=True)
     print(
         "FACEBOOK_PAGE_TOKEN present: "
         f"{bool(FACEBOOK_PAGE_ACCESS_TOKEN)}",
@@ -855,7 +848,6 @@ async def facebook(text):
     # -----------------------------------------------------
 
     if not FACEBOOK_PAGE_ID:
-
         return {
             "ok": False,
             "message": (
@@ -865,7 +857,6 @@ async def facebook(text):
         }
 
     if not FACEBOOK_PAGE_ACCESS_TOKEN:
-
         return {
             "ok": False,
             "message": (
@@ -875,7 +866,7 @@ async def facebook(text):
         }
 
     # -----------------------------------------------------
-    # GRAPH API VERSION
+    # GRAPH API
     # -----------------------------------------------------
 
     graph_version = os.getenv(
@@ -884,28 +875,95 @@ async def facebook(text):
     ).strip()
 
     if not graph_version.startswith("v"):
-
         graph_version = "v" + graph_version
 
-    base_url = (
-        f"https://graph.facebook.com/{graph_version}"
-    )
-
-    feed_url = (
-        f"{base_url}/{FACEBOOK_PAGE_ID}/feed"
-    )
+    base_url = f"https://graph.facebook.com/{graph_version}"
+    feed_url = f"{base_url}/{FACEBOOK_PAGE_ID}/feed"
 
     print(
         f"Facebook Graph API Version: {graph_version}",
         flush=True,
     )
-
-    print(
-        f"Facebook Feed URL: {feed_url}",
-        flush=True,
-    )
+    print(f"Facebook Feed URL: {feed_url}", flush=True)
 
     try:
+
+        # =================================================
+        # 0) VERIFY TOKEN BELONGS TO THE PAGE
+        # =================================================
+        #
+        # We intentionally do not print the token.
+        # The endpoint is used only to verify that the
+        # configured token can identify the configured Page.
+
+        page_check = None
+        page_check_error = None
+
+        try:
+            page_check_response = requests.get(
+                f"{base_url}/{FACEBOOK_PAGE_ID}",
+                params={
+                    "fields": "id,name",
+                    "access_token": FACEBOOK_PAGE_ACCESS_TOKEN,
+                },
+                timeout=30,
+            )
+
+            print(
+                "Facebook Page Token Check Status: "
+                f"{page_check_response.status_code}",
+                flush=True,
+            )
+
+            try:
+                page_check_data = page_check_response.json()
+            except Exception:
+                page_check_data = {}
+
+            if page_check_response.status_code < 300:
+                page_check = page_check_data
+
+                returned_page_id = str(
+                    page_check_data.get("id", "")
+                )
+
+                if returned_page_id != str(FACEBOOK_PAGE_ID):
+                    return {
+                        "ok": False,
+                        "message": (
+                            "❌ التوكن الحالي لا يتطابق مع "
+                            "FACEBOOK_PAGE_ID.\n\n"
+                            f"المطلوب: {FACEBOOK_PAGE_ID}\n"
+                            f"الذي رجعته Meta: "
+                            f"{returned_page_id or 'غير موجود'}\n\n"
+                            "⚠️ استخدم Page Access Token "
+                            "الخاص بنفس الصفحة في Railway."
+                        ),
+                    }
+
+            else:
+                err = (
+                    page_check_data.get("error", {})
+                    if isinstance(page_check_data, dict)
+                    else {}
+                )
+
+                page_check_error = err.get(
+                    "message",
+                    page_check_response.text,
+                )
+
+        except requests.RequestException as e:
+            page_check_error = f"Network error: {repr(e)}"
+
+        # عدم إيقاف النشر بسبب فشل قراءة معلومات الصفحة؛
+        # إنشاء المنشور نفسه هو الاختبار الأساسي.
+        if page_check_error:
+            print(
+                "Facebook Page Token Check Warning: "
+                f"{page_check_error}",
+                flush=True,
+            )
 
         # =================================================
         # 1) CREATE POST
@@ -922,14 +980,11 @@ async def facebook(text):
         )
 
         print(
-            f"Facebook Create Status: "
-            f"{response.status_code}",
+            f"Facebook Create Status: {response.status_code}",
             flush=True,
         )
-
         print(
-            f"Facebook Create Response: "
-            f"{response.text}",
+            f"Facebook Create Response: {response.text}",
             flush=True,
         )
 
@@ -938,12 +993,7 @@ async def facebook(text):
         except Exception:
             data = {}
 
-        # -------------------------------------------------
-        # CREATE ERROR
-        # -------------------------------------------------
-
         if not (200 <= response.status_code < 300):
-
             err = (
                 data.get("error", {})
                 if isinstance(data, dict)
@@ -964,16 +1014,12 @@ async def facebook(text):
             }
 
         # =================================================
-        # 2) GET POST ID
+        # 2) GET REAL POST ID
         # =================================================
 
-        post_id = (
-            data.get("id")
-            or data.get("post_id")
-        )
+        post_id = data.get("id") or data.get("post_id")
 
         if not post_id:
-
             return {
                 "ok": False,
                 "message": (
@@ -989,12 +1035,10 @@ async def facebook(text):
         )
 
         # =================================================
-        # 3) DIRECT POST VERIFICATION
+        # 3) DIRECT VERIFY + OPTIONAL REPAIR
         # =================================================
 
-        verify_url = (
-            f"{base_url}/{post_id}"
-        )
+        verify_url = f"{base_url}/{post_id}"
 
         verify_fields = (
             "id,"
@@ -1002,114 +1046,376 @@ async def facebook(text):
             "from,"
             "created_time,"
             "permalink_url,"
-            "is_published"
+            "is_published,"
+            "is_hidden"
         )
 
         permalink = None
         is_published = None
+        is_hidden = None
         verified_message = None
         verified_from = None
         verified_created_time = None
-
         verify_error = None
+        repair_messages = []
 
-        try:
+        async def read_post():
+            try:
+                vr = requests.get(
+                    verify_url,
+                    params={
+                        "fields": verify_fields,
+                        "access_token": (
+                            FACEBOOK_PAGE_ACCESS_TOKEN
+                        ),
+                    },
+                    timeout=30,
+                )
 
-            verify_response = requests.get(
-                verify_url,
-                params={
-                    "fields": verify_fields,
+                print(
+                    "Facebook Direct Verify Status: "
+                    f"{vr.status_code}",
+                    flush=True,
+                )
+                print(
+                    "Facebook Direct Verify Response: "
+                    f"{vr.text}",
+                    flush=True,
+                )
+
+                try:
+                    vd = vr.json()
+                except Exception:
+                    vd = {}
+
+                if vr.status_code >= 300:
+                    err = (
+                        vd.get("error", {})
+                        if isinstance(vd, dict)
+                        else {}
+                    )
+
+                    return {
+                        "ok": False,
+                        "data": vd,
+                        "error": err.get(
+                            "message",
+                            vr.text,
+                        ),
+                    }
+
+                return {
+                    "ok": True,
+                    "data": vd,
+                    "error": None,
+                }
+
+            except requests.RequestException as e:
+                return {
+                    "ok": False,
+                    "data": {},
+                    "error": f"Network error: {repr(e)}",
+                }
+
+            except Exception as e:
+                return {
+                    "ok": False,
+                    "data": {},
+                    "error": (
+                        "Verification exception: "
+                        f"{repr(e)}"
+                    ),
+                }
+
+        async def update_post(**fields):
+            """
+            Update the exact Post ID.
+
+            Used only when Meta explicitly reports that the
+            post is hidden or unpublished.
+            """
+            try:
+                payload = {
+                    **fields,
                     "access_token": (
                         FACEBOOK_PAGE_ACCESS_TOKEN
                     ),
-                },
-                timeout=30,
-            )
+                }
 
-            print(
-                "Facebook Direct Verify Status: "
-                f"{verify_response.status_code}",
-                flush=True,
-            )
-
-            print(
-                "Facebook Direct Verify Response: "
-                f"{verify_response.text}",
-                flush=True,
-            )
-
-            try:
-                verify_data = (
-                    verify_response.json()
-                )
-            except Exception:
-                verify_data = {}
-
-            if verify_response.status_code < 300:
-
-                permalink = verify_data.get(
-                    "permalink_url"
+                ur = requests.post(
+                    verify_url,
+                    data=payload,
+                    timeout=30,
                 )
 
-                is_published = verify_data.get(
-                    "is_published"
+                print(
+                    "Facebook Post Repair Status: "
+                    f"{ur.status_code}",
+                    flush=True,
+                )
+                print(
+                    "Facebook Post Repair Response: "
+                    f"{ur.text}",
+                    flush=True,
                 )
 
-                verified_message = verify_data.get(
-                    "message"
-                )
+                try:
+                    ud = ur.json()
+                except Exception:
+                    ud = {}
 
-                verified_from = verify_data.get(
-                    "from"
-                )
-
-                verified_created_time = (
-                    verify_data.get(
-                        "created_time"
-                    )
-                )
-
-            else:
+                if ur.status_code < 300:
+                    return True, ud
 
                 err = (
-                    verify_data.get("error", {})
-                    if isinstance(
-                        verify_data,
-                        dict
-                    )
+                    ud.get("error", {})
+                    if isinstance(ud, dict)
                     else {}
                 )
 
-                verify_error = (
-                    err.get(
+                return False, {
+                    "message": err.get(
                         "message",
-                        verify_response.text,
-                    )
+                        ur.text,
+                    ),
+                    "type": err.get("type", ""),
+                    "code": err.get("code", ""),
+                    "subcode": err.get(
+                        "error_subcode",
+                        "",
+                    ),
+                }
+
+            except requests.RequestException as e:
+                return False, {
+                    "message": f"Network error: {repr(e)}"
+                }
+
+            except Exception as e:
+                return False, {
+                    "message": repr(e)
+                }
+
+        # -------------------------------------------------
+        # FIRST DIRECT READ
+        # -------------------------------------------------
+
+        verification = await read_post()
+
+        # -------------------------------------------------
+        # RETRY READ
+        # -------------------------------------------------
+
+        if not verification["ok"]:
+            for attempt in range(1, 6):
+                print(
+                    "Waiting for Meta post propagation... "
+                    f"attempt {attempt}/5",
+                    flush=True,
                 )
 
-        except requests.RequestException as e:
+                await asyncio.sleep(2)
 
-            verify_error = (
-                f"Network error: {repr(e)}"
+                verification = await read_post()
+
+                if verification["ok"]:
+                    break
+
+        # -------------------------------------------------
+        # IF READ SUCCEEDED, VALIDATE PAGE / STATUS
+        # -------------------------------------------------
+
+        if verification["ok"]:
+
+            verify_data = verification["data"]
+
+            permalink = verify_data.get("permalink_url")
+            is_published = verify_data.get("is_published")
+            is_hidden = verify_data.get("is_hidden")
+            verified_message = verify_data.get("message")
+            verified_from = verify_data.get("from")
+            verified_created_time = verify_data.get(
+                "created_time"
             )
 
-        except Exception as e:
+            # ---------------------------------------------
+            # CHECK SOURCE PAGE
+            # ---------------------------------------------
 
-            verify_error = (
-                f"Verification exception: "
-                f"{repr(e)}"
-            )
+            from_id = None
+
+            if isinstance(verified_from, dict):
+                from_id = verified_from.get("id")
+
+            if from_id and str(from_id) != str(FACEBOOK_PAGE_ID):
+                return {
+                    "ok": False,
+                    "message": (
+                        "❌ المنشور تم إنشاؤه لكن Meta "
+                        "أكدت أنه تابع لـPage ID مختلف.\n\n"
+                        f"المطلوب: {FACEBOOK_PAGE_ID}\n"
+                        f"المنشور تابع لـ: {from_id}\n\n"
+                        f"🆔 Post ID:\n{post_id}"
+                    ),
+                    "post_id": post_id,
+                    "permalink": permalink,
+                    "is_published": is_published,
+                    "is_hidden": is_hidden,
+                    "direct_verify": True,
+                }
+
+            # ---------------------------------------------
+            # REPAIR HIDDEN POST
+            # ---------------------------------------------
+
+            if is_hidden is True:
+                print(
+                    "Facebook says post is HIDDEN. "
+                    "Attempting to unhide it...",
+                    flush=True,
+                )
+
+                repaired, repair_data = await update_post(
+                    is_hidden="false"
+                )
+
+                if repaired:
+                    repair_messages.append(
+                        "🟢 Meta كانت معلّمة المنشور Hidden "
+                        "وتم إرسال طلب إظهاره."
+                    )
+
+                    await asyncio.sleep(2)
+
+                    verification = await read_post()
+
+                    if verification["ok"]:
+                        verify_data = verification["data"]
+                        permalink = verify_data.get(
+                            "permalink_url"
+                        )
+                        is_published = verify_data.get(
+                            "is_published"
+                        )
+                        is_hidden = verify_data.get(
+                            "is_hidden"
+                        )
+                        verified_message = verify_data.get(
+                            "message"
+                        )
+                        verified_from = verify_data.get(
+                            "from"
+                        )
+                        verified_created_time = (
+                            verify_data.get(
+                                "created_time"
+                            )
+                        )
+
+                else:
+                    repair_messages.append(
+                        "⚠️ Meta قالت إن المنشور Hidden، "
+                        "لكن محاولة إظهاره فشلت: "
+                        f"{repair_data.get('message', repair_data)}"
+                    )
+
+            # ---------------------------------------------
+            # REPAIR UNPUBLISHED POST
+            # ---------------------------------------------
+
+            if is_published is False:
+                print(
+                    "Facebook says post is UNPUBLISHED. "
+                    "Attempting to publish it...",
+                    flush=True,
+                )
+
+                repaired, repair_data = await update_post(
+                    published="true"
+                )
+
+                if repaired:
+                    repair_messages.append(
+                        "🟢 Meta كانت معلّمة المنشور غير منشور "
+                        "وتم إرسال طلب نشره."
+                    )
+
+                    await asyncio.sleep(2)
+
+                    verification = await read_post()
+
+                    if verification["ok"]:
+                        verify_data = verification["data"]
+                        permalink = verify_data.get(
+                            "permalink_url"
+                        )
+                        is_published = verify_data.get(
+                            "is_published"
+                        )
+                        is_hidden = verify_data.get(
+                            "is_hidden"
+                        )
+                        verified_message = verify_data.get(
+                            "message"
+                        )
+                        verified_from = verify_data.get(
+                            "from"
+                        )
+                        verified_created_time = (
+                            verify_data.get(
+                                "created_time"
+                            )
+                        )
+
+                else:
+                    repair_messages.append(
+                        "⚠️ Meta قالت إن المنشور غير منشور، "
+                        "لكن محاولة نشره فشلت: "
+                        f"{repair_data.get('message', repair_data)}"
+                    )
+
+            # ---------------------------------------------
+            # FINAL READ AFTER REPAIR
+            # ---------------------------------------------
+
+            if is_hidden is True or is_published is False:
+                await asyncio.sleep(1)
+
+                final_verification = await read_post()
+
+                if final_verification["ok"]:
+                    verify_data = final_verification["data"]
+
+                    permalink = verify_data.get(
+                        "permalink_url"
+                    )
+                    is_published = verify_data.get(
+                        "is_published"
+                    )
+                    is_hidden = verify_data.get(
+                        "is_hidden"
+                    )
+                    verified_message = verify_data.get(
+                        "message"
+                    )
+                    verified_from = verify_data.get(
+                        "from"
+                    )
+                    verified_created_time = (
+                        verify_data.get(
+                            "created_time"
+                        )
+                    )
+
+        else:
+            verify_error = verification["error"]
 
         # =================================================
         # 4) FALLBACK PERMALINK
         # =================================================
 
         if not permalink:
-
-            post_part = str(post_id).split(
-                "_",
-                1,
-            )[-1]
+            post_part = str(post_id).split("_", 1)[-1]
 
             permalink = (
                 "https://www.facebook.com/"
@@ -1118,16 +1424,38 @@ async def facebook(text):
             )
 
         # =================================================
-        # 5) DETERMINE FINAL STATUS
+        # 5) FINAL SUCCESS CONDITIONS
         # =================================================
+        #
+        # A successful Facebook publish means:
+        # - exact Post ID is readable
+        # - if Meta gives us a source Page, it is our Page
+        # - is_published is True
+        # - is_hidden is NOT True
+        #
+        # We do NOT require /PAGE_ID/posts.
+
+        source_page_ok = True
+
+        if isinstance(verified_from, dict):
+            source_page_id = verified_from.get("id")
+
+            if source_page_id:
+                source_page_ok = (
+                    str(source_page_id)
+                    == str(FACEBOOK_PAGE_ID)
+                )
 
         direct_verify_ok = (
             verify_error is None
+            and verification["ok"]
+            and source_page_ok
             and is_published is True
+            and is_hidden is not True
         )
 
         # =================================================
-        # 6) BUILD DIAGNOSTIC MESSAGE
+        # 6) SUCCESS
         # =================================================
 
         if direct_verify_ok:
@@ -1141,66 +1469,46 @@ async def facebook(text):
                 "🔗 رابط المنشور:",
                 permalink,
                 "",
-                "🟢 Meta قرأت نفس الـPost ID بنجاح.",
+                "🟢 نفس الـPost ID تم قراءته مباشرة من Meta.",
                 "🟢 is_published = true",
-                "",
-                "🟢 تم التأكد من المنشور مباشرة.",
-                "",
-                "⚠️ ملاحظة:",
-                "البوت لم يعد يعتمد على Page /posts "
-                "كاختبار للنشر.",
+                "🟢 is_hidden = false / غير مخفي",
+                "🟢 المنشور تابع لنفس Page ID.",
             ]
 
-            if verified_from:
+            if repair_messages:
+                result_lines.extend([
+                    "",
+                    "🔧 إصلاحات تمت:",
+                    *repair_messages,
+                ])
 
-                if isinstance(
-                    verified_from,
-                    dict
-                ):
+            if isinstance(verified_from, dict):
 
-                    from_name = (
-                        verified_from.get("name")
+                from_name = verified_from.get("name")
+                from_id = verified_from.get("id")
+
+                if from_name:
+                    result_lines.extend([
+                        "",
+                        f"📘 الصفحة: {from_name}",
+                    ])
+
+                if from_id:
+                    result_lines.append(
+                        f"🆔 Page ID: {from_id}"
                     )
-
-                    from_id = (
-                        verified_from.get("id")
-                    )
-
-                    if from_name:
-
-                        result_lines.extend([
-                            "",
-                            f"📘 الصفحة: {from_name}",
-                        ])
-
-                    if from_id:
-
-                        result_lines.append(
-                            f"🆔 Page ID: {from_id}"
-                        )
 
             if verified_created_time:
-
                 result_lines.extend([
                     "",
                     "🕒 وقت الإنشاء:",
                     str(verified_created_time),
                 ])
 
-            result = "\n".join(
-                result_lines
-            )
+            result = "\n".join(result_lines)
 
-            print(
-                "FACEBOOK FINAL RESULT:",
-                flush=True,
-            )
-
-            print(
-                result,
-                flush=True,
-            )
-
+            print("FACEBOOK FINAL RESULT:", flush=True)
+            print(result, flush=True)
             print(
                 "========================================\n",
                 flush=True,
@@ -1212,71 +1520,64 @@ async def facebook(text):
                 "post_id": post_id,
                 "permalink": permalink,
                 "is_published": is_published,
+                "is_hidden": is_hidden,
                 "direct_verify": True,
-                "verified_message": (
-                    verified_message
-                ),
-                "verified_from": (
-                    verified_from
-                ),
-                "verified_created_time": (
-                    verified_created_time
-                ),
+                "verified_message": verified_message,
+                "verified_from": verified_from,
+                "verified_created_time": verified_created_time,
             }
 
         # =================================================
-        # 7) POST CREATED BUT VERIFICATION FAILED
+        # 7) CREATED BUT COULD NOT PROVE FINAL STATE
         # =================================================
 
-        if verify_error:
+        result_lines = [
+            "🟡 Facebook أنشأ المنشور.",
+            "",
+            "🆔 Post ID:",
+            str(post_id),
+            "",
+            "🔗 رابط المنشور:",
+            permalink,
+            "",
+        ]
 
-            result = "\n".join([
-                "🟡 Facebook أنشأ المنشور.",
-                "",
-                "🆔 Post ID:",
-                str(post_id),
-                "",
-                "🔗 رابط المنشور:",
-                permalink,
-                "",
-                "⚠️ لكن تعذر قراءة نفس الـPost "
-                "مباشرة بعد الإنشاء.",
+        if verify_error:
+            result_lines.extend([
+                "⚠️ تعذر قراءة نفس الـPost مباشرة بعد الإنشاء.",
                 "",
                 "خطأ التحقق:",
                 str(verify_error),
                 "",
-                "❗ ده ليس فشلًا في إنشاء الـPost.",
+                "❗ إنشاء الـPost نجح، لكن لا يمكن للبوت "
+                "تأكيد ظهوره/حالته النهائية آليًا.",
             ])
 
         else:
-
-            result = "\n".join([
-                "🟡 Facebook أنشأ المنشور.",
+            result_lines.extend([
+                "⚠️ حالة المنشور النهائية لم تحقق كل شروط التحقق.",
                 "",
-                "🆔 Post ID:",
-                str(post_id),
-                "",
-                "🔗 رابط المنشور:",
-                permalink,
-                "",
-                "⚠️ Meta لم ترجع "
-                "is_published = true "
-                "في التحقق المباشر.",
-                "",
-                f"Published value: "
-                f"{is_published}",
+                f"is_published = {is_published}",
+                f"is_hidden = {is_hidden}",
             ])
 
-        print(
-            "FACEBOOK FINAL RESULT:",
-            flush=True,
-        )
+            if not source_page_ok:
+                result_lines.extend([
+                    "",
+                    "❌ مصدر المنشور لا يطابق Page ID المطلوب.",
+                ])
 
-        print(
-            result,
-            flush=True,
-        )
+        if repair_messages:
+            result_lines.extend([
+                "",
+                "🔧 محاولات الإصلاح:",
+                *repair_messages,
+            ])
 
+        result = "\n".join(result_lines)
+
+        print("FACEBOOK FINAL RESULT:", flush=True)
+        print(result, flush=True)
         print(
             "========================================\n",
             flush=True,
@@ -1288,7 +1589,8 @@ async def facebook(text):
             "post_id": post_id,
             "permalink": permalink,
             "is_published": is_published,
-            "direct_verify": False,
+            "is_hidden": is_hidden,
+            "direct_verify": bool(verification["ok"]),
             "verification_error": verify_error,
         }
 
