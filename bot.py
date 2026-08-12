@@ -22,7 +22,7 @@ from telegram.ext import (
 # =========================================================
 # VERSION
 # =========================================================
-VERSION = "ALHUSSIENY_SHOP_SYSTEM_2026_08_13_V23"
+VERSION = "ALHUSSIENY_SHOP_SYSTEM_2026_08_13_V24"
 
 # =========================================================
 # ENV
@@ -4337,8 +4337,9 @@ async def buttons(update, context):
             try:
                 f = await context.bot.get_file(photo_id)
                 photo_url = (
-                    f"https://api.telegram.org/file/bot"
-                    f"{BOT_TOKEN}/{f.file_path}"
+                    f.file_path if f.file_path.startswith("http")
+                    else f"https://api.telegram.org/file/bot"
+                         f"{BOT_TOKEN}/{f.file_path}"
                 )
             except Exception as e:
                 print("Get File Error:", repr(e), flush=True)
