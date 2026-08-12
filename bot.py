@@ -22,7 +22,7 @@ from telegram.ext import (
 # =========================================================
 # VERSION
 # =========================================================
-VERSION = "ALHUSSIENY_SHOP_SYSTEM_2026_08_13_V24"
+VERSION = "ALHUSSIENY_SHOP_SYSTEM_2026_08_13_V25"
 
 # =========================================================
 # ENV
@@ -1681,6 +1681,12 @@ async def instagram_photo(text, photo_url):
     Graph API flow: create a media container, then publish it.
     Requires an Instagram professional account connected to the
     Facebook Page, and INSTAGRAM_BUSINESS_ID set in env vars.
+
+    Instagram needs a few seconds to download and process the image
+    into the container before it can be published — we poll the
+    container's status_code until it's FINISHED (or a short timeout
+    passes) instead of publishing immediately, which otherwise fails
+    with "Media ID is not available" (code 9007).
     """
 
     if not INSTAGRAM_BUSINESS_ID:
@@ -1727,6 +1733,45 @@ async def instagram_photo(text, photo_url):
             }
 
         creation_id = created["id"]
+        status_url = f"{base}/{creation_id}"
+
+        # Poll until Instagram finishes downloading/processing the
+        # image (status_code == FINISHED), up to ~20 seconds.
+        ready = False
+        last_status = None
+        for _ in range(10):
+            try:
+                sr, sdata = fb_request(
+                    "GET",
+                    status_url,
+                    params={
+                        "fields": "status_code",
+                        "access_token": FACEBOOK_PAGE_ACCESS_TOKEN,
+                    },
+                )
+                last_status = sdata.get("status_code")
+                print(f"IG CONTAINER STATUS: {last_status}", flush=True)
+
+                if last_status == "FINISHED":
+                    ready = True
+                    break
+                if last_status in ("ERROR", "EXPIRED"):
+                    break
+            except requests.RequestException:
+                pass
+
+            await asyncio.sleep(2)
+
+        if not ready and last_status not in (None, "IN_PROGRESS"):
+            return {
+                "ok": False,
+                "message": (
+                    "❌ فشل تجهيز الصورة على Instagram "
+                    f"(الحالة: {last_status or 'غير معروفة'})."
+                ),
+            }
+        # If still IN_PROGRESS after the timeout, try publishing anyway —
+        # Instagram sometimes finishes right around this point.
 
         r2, published = fb_request(
             "POST",
