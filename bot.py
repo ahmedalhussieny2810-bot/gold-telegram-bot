@@ -22,7 +22,7 @@ from telegram.ext import (
 # =========================================================
 # VERSION
 # =========================================================
-VERSION = "ALHUSSIENY_SHOP_SYSTEM_2026_08_13_V30"
+VERSION = "ALHUSSIENY_SHOP_SYSTEM_2026_08_13_V31"
 
 # =========================================================
 # ENV
@@ -3189,6 +3189,43 @@ async def text(update, context):
         )
         return
 
+    if s == "admin_reply":
+        if not is_admin(update):
+            context.user_data.clear()
+            await update.message.reply_text("❌ غير مسموح.")
+            return
+
+        target_id = context.user_data.get("reply_to")
+        context.user_data.clear()
+
+        if not target_id:
+            await update.message.reply_text(
+                "❌ حصل خطأ، جرب تدوس على زرار الرد تاني."
+            )
+            return
+
+        try:
+            await context.bot.send_message(
+                chat_id=target_id,
+                text=f"💬 رد من مجوهرات الحسيني:\n\n{t}",
+            )
+            log_action(
+                update.effective_user.id, "ADMIN_REPLIED_TO_CUSTOMER",
+                object_type="user", object_id=target_id, new_value=t,
+            )
+            await update.message.reply_text("✅ اتبعت الرد للعميل.")
+        except Exception as e:
+            print("Admin Reply Error:", repr(e), flush=True)
+            log_action(
+                update.effective_user.id, "ADMIN_REPLIED_TO_CUSTOMER",
+                object_type="user", object_id=target_id,
+                status="failed", error=repr(e),
+            )
+            await update.message.reply_text(
+                "❌ مقدرتش أبعت الرد (يمكن العميل عمل Block للبوت)."
+            )
+        return
+
     if s == "wa_phone_input":
         digits = re.sub(r"\D", "", t)
 
@@ -4608,6 +4645,11 @@ async def buttons(update, context):
                     chat_id=ADMIN_ID,
                     photo=p["Photo_id"],
                     caption="\n".join(parts),
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton(
+                            "💬 رد على العميل", callback_data=f"reply:{u.id}"
+                        )
+                    ]]),
                 )
         except Exception as e:
             print("Inquiry Notify Error:", repr(e), flush=True)
@@ -4664,6 +4706,20 @@ async def buttons(update, context):
                 "🔕 تم إلغاء الاشتراك من تحديثات تليجرام.\n\n"
             ) + (price_text(p) if p else ""),
             reply_markup=gold_screen_kb(update.effective_user.id),
+        )
+        return
+
+    if c.startswith("reply:"):
+        if not is_admin(update):
+            return
+
+        target_id = int(c.split(":")[1])
+        context.user_data.clear()
+        context.user_data.update(state="admin_reply", reply_to=target_id)
+
+        await context.bot.send_message(
+            chat_id=q.message.chat_id,
+            text="💬 اكتب ردك على العميل، وهيتبعت له فورًا.",
         )
         return
 
