@@ -9,7 +9,7 @@ from urllib.parse import urlparse, quote
 import requests
 import pymysql
 from dotenv import load_dotenv
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -22,7 +22,7 @@ from telegram.ext import (
 # =========================================================
 # VERSION
 # =========================================================
-VERSION = "ALHUSSIENY_SHOP_SYSTEM_2026_08_13_V31"
+VERSION = "ALHUSSIENY_SHOP_SYSTEM_2026_08_13_V34"
 
 # =========================================================
 # ENV
@@ -288,6 +288,49 @@ def init_db():
                     WHERE category=%s
                       AND (category_id IS NULL OR category_id=0)
                 """, (sid, name))
+
+            # Seed the two fixed top-level categories every time the
+            # bot starts, in case they were ever removed or this is
+            # a fresh database. add_main() already no-ops if a
+            # category with that name already exists.
+            x.execute("""
+                SELECT id FROM Categories
+                WHERE parent_id IS NULL AND LOWER(TRIM(name))='ذهب'
+                LIMIT 1
+            """)
+            gold_row = x.fetchone()
+            if not gold_row:
+                x.execute(
+                    "INSERT INTO Categories(parent_id,name) VALUES(NULL,'ذهب')"
+                )
+                gold_id = x.lastrowid
+            else:
+                gold_id = gold_row["id"]
+
+            x.execute("""
+                SELECT id FROM Categories
+                WHERE parent_id IS NULL AND LOWER(TRIM(name))='فضة'
+                LIMIT 1
+            """)
+            if not x.fetchone():
+                x.execute(
+                    "INSERT INTO Categories(parent_id,name) VALUES(NULL,'فضة')"
+                )
+
+            # Seed the fixed "سبائك" and "عملات" leaf categories under
+            # "ذهب" — their prices are computed live from the gold
+            # price (weight × price/gram), not stored per-product.
+            for fixed_name in ("سبائك", "عملات"):
+                x.execute("""
+                    SELECT id FROM Categories
+                    WHERE parent_id=%s AND LOWER(TRIM(name))=%s
+                    LIMIT 1
+                """, (gold_id, fixed_name))
+                if not x.fetchone():
+                    x.execute(
+                        "INSERT INTO Categories(parent_id,name) VALUES(%s,%s)",
+                        (gold_id, fixed_name),
+                    )
     finally:
         c.close()
 
@@ -374,11 +417,62 @@ def cats(parent=None):
     """, (parent,))
 
 
+def flatten_categories(parent=None, depth=0):
+    """Recursively lists the whole category tree as
+    [(category_dict, depth), ...] regardless of how many levels
+    deep it goes."""
+    out = []
+    for c in cats(parent):
+        out.append((c, depth))
+        out.extend(flatten_categories(c["id"], depth + 1))
+    return out
+
+
 def cat(cid):
     return one(
         "SELECT id,parent_id,name FROM Categories WHERE id=%s",
         (cid,),
     )
+
+
+PROTECTED_ROOT_CATEGORIES = {"ذهب", "فضة"}
+PROTECTED_FIXED_CATEGORIES = {"سبائك", "عملات"}
+
+
+def is_protected_root_category(cid):
+    c = cat(cid)
+    if not c:
+        return False
+    name = c["name"].strip()
+    if c["parent_id"] is None and name in PROTECTED_ROOT_CATEGORIES:
+        return True
+    if name in PROTECTED_FIXED_CATEGORIES:
+        return True
+    return False
+
+
+# Bars are 24-karat; (label, weight_in_grams)
+GOLD_BARS = [
+    ("سبيكة 0.25 جرام", 0.25),
+    ("سبيكة 0.5 جرام", 0.5),
+    ("سبيكة 1 جرام", 1),
+    ("سبيكة 2.5 جرام", 2.5),
+    ("سبيكة 5 جرام", 5),
+    ("سبيكة 10 جرام", 10),
+    ("سبيكة 20 جرام", 20),
+    ("سبيكة 31.1 جرام (أونصة)", 31.1),
+    ("سبيكة 50 جرام", 50),
+]
+
+# Coins are 21-karat; (label, weight_in_grams)
+GOLD_COINS = [
+    ("جنيه ذهب (8 جرام)", 8),
+    ("نص جنيه (4 جرام)", 4),
+    ("ربع جنيه (2 جرام)", 2),
+    ("تمن جنيه (1 جرام)", 1),
+]
+
+GOLD_PURITY_DISCLAIMER = "⚠️ السعر ذهب صافي، مش شامل المصنعية."
 
 
 def rename_cat(cid, name):
@@ -394,6 +488,9 @@ def rename_cat(cid, name):
 
 
 def del_cat(cid):
+    if is_protected_root_category(cid):
+        return "protected"
+
     if one("SELECT id FROM Products WHERE category_id=%s LIMIT 1", (cid,)):
         return "products"
 
@@ -1431,10 +1528,10 @@ def stats_menu():
 
 def cat_menu():
     return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("➕ قسم رئيسي", callback_data="addmain"),
-            InlineKeyboardButton("➕ قسم فرعي", callback_data="addsub"),
-        ],
+        [InlineKeyboardButton("➕ قسم رئيسي جديد", callback_data="addmain")],
+        [InlineKeyboardButton(
+            "➕ قسم فرعي (أي مستوى)", callback_data="addsub"
+        )],
         [InlineKeyboardButton("📋 عرض الأقسام", callback_data="viewcats")],
         [InlineKeyboardButton("✏️ تغيير اسم", callback_data="rename")],
         [InlineKeyboardButton("🗑 حذف قسم", callback_data="deletecat")],
@@ -3384,60 +3481,97 @@ async def buttons(update, context):
         )
         return
 
-    if c.startswith("cm:"):
-        mid = int(c.split(":")[1])
-        m = cat(mid)
-        ss = cats(mid)
+    if c.startswith("bar:") or c.startswith("coin:"):
+        is_bars = c.startswith("bar:")
+        idx = int(c.split(":")[1])
+        items = GOLD_BARS if is_bars else GOLD_COINS
 
-        if not ss:
-            await q.edit_message_text(
-                f"💍 {m['name']}\n\nلا توجد أقسام فرعية.",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton(
-                        "⬅️ المنتجات",
-                        callback_data="products"
-                    )]
-                ]),
+        if idx < 0 or idx >= len(items):
+            return
+
+        label, weight = items[idx]
+        p21 = latest()
+
+        if not p21:
+            await context.bot.send_message(
+                chat_id=q.message.chat_id,
+                text="💎 لم يتم تحديث أسعار الذهب حتى الآن.",
             )
             return
 
-        k = [
-            [InlineKeyboardButton(
-                f"🟡 {s['name']} ({s['product_count']})",
-                callback_data=f"cs:{s['id']}"
-            )]
-            for s in ss
-        ]
+        p24, p21_calc, p18 = calc(p21)
+        per_gram = p24 if is_bars else p21_calc
+        price = round(weight * per_gram)
 
-        k.append([
-            InlineKeyboardButton("⬅️ الأقسام", callback_data="products")
-        ])
-
-        await q.edit_message_text(
-            f"💍 {m['name']}\n\nاختار القسم الفرعي:",
-            reply_markup=InlineKeyboardMarkup(k),
+        await context.bot.send_message(
+            chat_id=q.message.chat_id,
+            text=(
+                f"💰 سعر {label}: {price} جنيه\n\n"
+                f"{GOLD_PURITY_DISCLAIMER}"
+            ),
         )
         return
 
-    if c.startswith("cs:"):
-        sid = int(c.split(":")[1])
-        s = cat(sid)
-        ps = customer_products(sid)
+    if c.startswith("cm:") or c.startswith("cs:"):
+        cid = int(c.split(":")[1])
+        cur = cat(cid)
+        children = cats(cid)
+
+        back_cb = (
+            f"cm:{cur['parent_id']}" if cur["parent_id"] else "products"
+        )
+
+        # "سبائك" and "عملات" are fixed, price-computed catalogs, not
+        # regular browsable/product categories — show their weight
+        # menu no matter what (even if someone accidentally added a
+        # child category under them).
+        if cur["name"].strip() in PROTECTED_FIXED_CATEGORIES:
+            is_bars = cur["name"].strip() == "سبائك"
+            items = GOLD_BARS if is_bars else GOLD_COINS
+            prefix = "bar" if is_bars else "coin"
+
+            k = [
+                [InlineKeyboardButton(label, callback_data=f"{prefix}:{i}")]
+                for i, (label, _) in enumerate(items)
+            ]
+            k.append([InlineKeyboardButton("⬅️ رجوع", callback_data=back_cb)])
+
+            await q.edit_message_text(
+                f"💰 {cur['name']}\n\nاختار الوزن:",
+                reply_markup=InlineKeyboardMarkup(k),
+            )
+            return
+
+        if children:
+            k = [
+                [InlineKeyboardButton(
+                    f"🟡 {ch['name']} ({ch['product_count']})",
+                    callback_data=f"cm:{ch['id']}"
+                )]
+                for ch in children
+            ]
+            k.append([InlineKeyboardButton("⬅️ رجوع", callback_data=back_cb)])
+
+            await q.edit_message_text(
+                f"💍 {cur['name']}\n\nاختار القسم الفرعي:",
+                reply_markup=InlineKeyboardMarkup(k),
+            )
+            return
+
+        # Leaf category — show its products directly.
+        ps = customer_products(cid)
 
         if not ps:
             await q.edit_message_text(
-                f"🟡 {s['name']}\n\nلا توجد منتجات.",
+                f"🟡 {cur['name']}\n\nلا توجد منتجات.",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton(
-                        "⬅️ رجوع",
-                        callback_data=f"cm:{s['parent_id']}"
-                    )]
+                    [InlineKeyboardButton("⬅️ رجوع", callback_data=back_cb)]
                 ]),
             )
             return
 
         await q.edit_message_text(
-            f"🟡 {s['name']}\n\nعدد المنتجات: {len(ps)}"
+            f"🟡 {cur['name']}\n\nعدد المنتجات: {len(ps)}"
         )
 
         for p in ps:
@@ -4054,6 +4188,13 @@ async def buttons(update, context):
     if c == "addsub":
         ms = cats()
 
+        if not ms:
+            await q.edit_message_text(
+                "➕ لازم تضيف قسم رئيسي الأول.",
+                reply_markup=cat_menu(),
+            )
+            return
+
         k = [
             [InlineKeyboardButton(
                 "💍 " + m["name"],
@@ -4067,61 +4208,89 @@ async def buttons(update, context):
         ])
 
         await q.edit_message_text(
-            "➕ اختار القسم الرئيسي:",
+            "➕ اختار القسم اللي عايز تضيف تحته قسم فرعي جديد:",
             reply_markup=InlineKeyboardMarkup(k),
         )
         return
 
     if c.startswith("sp:"):
-        mid = int(c.split(":")[1])
+        pid = int(c.split(":")[1])
+        parent = cat(pid)
+        children = cats(pid)
 
-        context.user_data.clear()
-        context.user_data.update(state="sub", parent=mid)
+        k = [
+            [InlineKeyboardButton(
+                "💍 " + ch["name"],
+                callback_data=f"sp:{ch['id']}"
+            )]
+            for ch in children
+        ]
+        k.append([InlineKeyboardButton(
+            f"➕ أضف هنا تحت: {parent['name']}",
+            callback_data=f"spnew:{pid}"
+        )])
+        k.append([
+            InlineKeyboardButton("⬅️ رجوع", callback_data="addsub")
+        ])
 
         await q.edit_message_text(
-            f"➕ اكتب القسم الفرعي تحت:\n{cat(mid)['name']}\n\n"
+            f"➕ {parent['name']}\n\n"
+            "اختار قسم فرعي موجود عشان تنزل تحته أكتر، "
+            "أو دوس \"أضف هنا\" عشان تضيف قسم جديد في المستوى ده:",
+            reply_markup=InlineKeyboardMarkup(k),
+        )
+        return
+
+    if c.startswith("spnew:"):
+        pid = int(c.split(":")[1])
+        parent = cat(pid)
+
+        if parent["name"].strip() in PROTECTED_FIXED_CATEGORIES:
+            await q.edit_message_text(
+                f"🔒 \"{parent['name']}\" قسم ثابت، مينفعش يتضاف تحته "
+                "أقسام فرعية.",
+                reply_markup=cat_menu(),
+            )
+            return
+
+        context.user_data.clear()
+        context.user_data.update(state="sub", parent=pid)
+
+        await q.edit_message_text(
+            f"➕ اكتب اسم القسم الفرعي الجديد تحت:\n{parent['name']}\n\n"
             "مثال: عيار 18"
         )
         return
 
     if c == "viewcats":
+        rows = flatten_categories()
         lines = ["📂 الأقسام", ""]
 
-        for m in cats():
-            lines.append("💍 " + m["name"])
-
-            for s in cats(m["id"]):
-                lines.append(
-                    f"   └ 🟡 {s['name']} "
-                    f"({s['product_count']} منتج)"
-                )
-
-            lines.append("")
+        for cat_row, depth in rows:
+            indent = "   " * depth
+            marker = "💍" if depth == 0 else "🟡"
+            extra = (
+                f" ({cat_row['product_count']} منتج)"
+                if depth > 0 else ""
+            )
+            lines.append(f"{indent}{'└ ' if depth else ''}{marker} {cat_row['name']}{extra}")
 
         await q.edit_message_text(
-            "\n".join(lines) if len(lines) > 2 else "📂 لا توجد أقسام.",
+            "\n".join(lines) if rows else "📂 لا توجد أقسام.",
             reply_markup=cat_menu(),
         )
         return
 
     if c == "rename":
-        k = []
+        rows = flatten_categories()
 
-        for m in cats():
-            k.append([
-                InlineKeyboardButton(
-                    "✏️ " + m["name"],
-                    callback_data=f"rp:{m['id']}"
-                )
-            ])
-
-            for s in cats(m["id"]):
-                k.append([
-                    InlineKeyboardButton(
-                        f"   ✏️ {m['name']} → {s['name']}",
-                        callback_data=f"rp:{s['id']}"
-                    )
-                ])
+        k = [
+            [InlineKeyboardButton(
+                ("   " * depth) + "✏️ " + cat_row["name"],
+                callback_data=f"rp:{cat_row['id']}"
+            )]
+            for cat_row, depth in rows
+        ]
 
         k.append([
             InlineKeyboardButton("⬅️ رجوع", callback_data="acat")
@@ -4136,6 +4305,13 @@ async def buttons(update, context):
     if c.startswith("rp:"):
         cid = int(c.split(":")[1])
 
+        if is_protected_root_category(cid):
+            await q.edit_message_text(
+                "🔒 القسم ده أساسي وثابت في البوت، مينفعش يتغير اسمه.",
+                reply_markup=cat_menu(),
+            )
+            return
+
         context.user_data.clear()
         context.user_data.update(state="rename", cid=cid)
 
@@ -4146,23 +4322,15 @@ async def buttons(update, context):
         return
 
     if c == "deletecat":
-        k = []
+        rows = flatten_categories()
 
-        for m in cats():
-            k.append([
-                InlineKeyboardButton(
-                    "🗑 " + m["name"],
-                    callback_data=f"dc:{m['id']}"
-                )
-            ])
-
-            for s in cats(m["id"]):
-                k.append([
-                    InlineKeyboardButton(
-                        f"   🗑 {m['name']} → {s['name']}",
-                        callback_data=f"dc:{s['id']}"
-                    )
-                ])
+        k = [
+            [InlineKeyboardButton(
+                ("   " * depth) + "🗑 " + cat_row["name"],
+                callback_data=f"dc:{cat_row['id']}"
+            )]
+            for cat_row, depth in rows
+        ]
 
         k.append([
             InlineKeyboardButton("⬅️ رجوع", callback_data="acat")
@@ -4181,6 +4349,7 @@ async def buttons(update, context):
 
         msg = {
             "deleted": "✅ تم الحذف.",
+            "protected": "🔒 القسم ده أساسي وثابت في البوت، مينفعش يتحذف.",
             "products": "⚠️ القسم يحتوي منتجات، احذفها أولاً.",
             "children": "⚠️ القسم يحتوي أقسام فرعية، احذفها أولاً.",
             "missing": "⚠️ القسم غير موجود.",
@@ -4205,6 +4374,13 @@ async def buttons(update, context):
     if c == "addprod":
         ms = cats()
 
+        if not ms:
+            await q.edit_message_text(
+                "➕ لازم تضيف قسم رئيسي الأول من (📂 إدارة الأقسام).",
+                reply_markup=prod_menu(),
+            )
+            return
+
         k = [
             [InlineKeyboardButton(
                 "💍 " + m["name"],
@@ -4218,40 +4394,47 @@ async def buttons(update, context):
         ])
 
         await q.edit_message_text(
-            "➕ اختار القسم الرئيسي:",
+            "➕ اختار القسم:",
             reply_markup=InlineKeyboardMarkup(k),
         )
         return
 
     if c.startswith("pm:"):
-        mid = int(c.split(":")[1])
-        ss = cats(mid)
+        cid = int(c.split(":")[1])
+        cur = cat(cid)
+        children = cats(cid)
 
-        k = [
-            [InlineKeyboardButton(
-                "🟡 " + s["name"],
-                callback_data=f"ps:{s['id']}"
-            )]
-            for s in ss
-        ]
+        if cur["name"].strip() in PROTECTED_FIXED_CATEGORIES:
+            await q.edit_message_text(
+                f"🔒 \"{cur['name']}\" قسم أسعار محسوبة تلقائيًا من سعر "
+                "الذهب، مينفعش يتضاف فيه منتجات يدوي.",
+                reply_markup=prod_menu(),
+            )
+            return
 
-        k.append([
-            InlineKeyboardButton("⬅️ رجوع", callback_data="addprod")
-        ])
+        if children:
+            k = [
+                [InlineKeyboardButton(
+                    "🟡 " + ch["name"],
+                    callback_data=f"pm:{ch['id']}"
+                )]
+                for ch in children
+            ]
+            k.append([
+                InlineKeyboardButton("⬅️ رجوع", callback_data="addprod")
+            ])
 
-        await q.edit_message_text(
-            "➕ اختار القسم الفرعي:",
-            reply_markup=InlineKeyboardMarkup(k),
-        )
-        return
+            await q.edit_message_text(
+                f"➕ {cat(cid)['name']}\n\nاختار القسم الفرعي:",
+                reply_markup=InlineKeyboardMarkup(k),
+            )
+            return
 
-    if c.startswith("ps:"):
-        sid = int(c.split(":")[1])
-
+        # Leaf category — products live here.
         context.user_data.clear()
         context.user_data.update(
             state="prod_name",
-            cid=sid,
+            cid=cid,
         )
 
         await q.edit_message_text(
@@ -4487,7 +4670,7 @@ async def buttons(update, context):
         )])
 
         await q.edit_message_text(
-            "📂 اختار القسم الرئيسي الجديد:",
+            "📂 اختار القسم الجديد:",
             reply_markup=InlineKeyboardMarkup(k),
         )
         return
@@ -4496,50 +4679,62 @@ async def buttons(update, context):
         if not is_admin(update):
             return
 
-        _, pid, mid = c.split(":")
-        pid, mid = int(pid), int(mid)
-        ss = cats(mid)
+        _, pid, cid = c.split(":")
+        pid, cid = int(pid), int(cid)
+        children = cats(cid)
 
-        if not ss:
+        if not children:
+            ok = move_product_category(pid, cid)
+
+            if ok:
+                log_action(
+                    update.effective_user.id, "ADMIN_UPDATED_PRODUCT",
+                    new_value=f"category_id={cid}",
+                    object_type="product", object_id=pid,
+                )
+
             await q.edit_message_text(
-                "⚠️ القسم ده مفيهوش أقسام فرعية، اختار قسم تاني.",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton(
-                        "⬅️ رجوع", callback_data=f"movecat:{pid}"
-                    )]
-                ]),
+                "✅ تم نقل المنتج للقسم الجديد." if ok
+                else "⚠️ المنتج غير موجود.",
+                reply_markup=product_edit_menu(pid),
             )
             return
 
         k = [
             [InlineKeyboardButton(
-                "🟡 " + s["name"], callback_data=f"movecats:{pid}:{s['id']}"
+                "🟡 " + ch["name"],
+                callback_data=f"movecatm:{pid}:{ch['id']}"
             )]
-            for s in ss
+            for ch in children
         ]
+        k.append([InlineKeyboardButton(
+            f"✅ اختار هنا: {cat(cid)['name']}",
+            callback_data=f"movecathere:{pid}:{cid}"
+        )])
         k.append([InlineKeyboardButton(
             "⬅️ رجوع", callback_data=f"movecat:{pid}"
         )])
 
         await q.edit_message_text(
-            "📂 اختار القسم الفرعي الجديد:",
+            f"📂 {cat(cid)['name']}\n\nاختار القسم الفرعي، أو اختار نفس "
+            "القسم ده لو مفيهوش تصنيف أدق:",
             reply_markup=InlineKeyboardMarkup(k),
         )
         return
 
-    if c.startswith("movecats:"):
+    if c.startswith("movecathere:"):
         if not is_admin(update):
             return
 
-        _, pid, sid = c.split(":")
-        pid, sid = int(pid), int(sid)
+        _, pid, cid = c.split(":")
+        pid, cid = int(pid), int(cid)
 
-        ok = move_product_category(pid, sid)
+        ok = move_product_category(pid, cid)
 
         if ok:
             log_action(
                 update.effective_user.id, "ADMIN_UPDATED_PRODUCT",
-                new_value=f"category_id={sid}",
+                new_value=f"category_id={cid}",
                 object_type="product", object_id=pid,
             )
 
@@ -4685,8 +4880,12 @@ async def buttons(update, context):
         p = latest()
         track_user(update)
 
-        await q.edit_message_text(
-            price_text(p) if p
+        # Sent as a brand-new message (not an edit of the menu the
+        # customer tapped) so the price stays visible as its own
+        # message in the chat history.
+        await context.bot.send_message(
+            chat_id=q.message.chat_id,
+            text=price_text(p) if p
             else "💎 لم يتم تحديث أسعار الذهب حتى الآن.",
             reply_markup=gold_screen_kb(update.effective_user.id),
         )
@@ -5058,6 +5257,18 @@ async def error(update, context):
 # MAIN
 # =========================================================
 
+async def setup_bot_commands(app):
+    """Registers the persistent command menu (the '/' button next to
+    the message box) so /start is always one tap away, even after the
+    person closes and reopens the chat."""
+    try:
+        await app.bot.set_my_commands([
+            BotCommand("start", "🏠 القائمة الرئيسية"),
+        ])
+    except Exception as e:
+        print("Set Commands Error:", repr(e), flush=True)
+
+
 def main():
     if not BOT_TOKEN:
         raise Exception("BOT_TOKEN is missing")
@@ -5079,6 +5290,7 @@ def main():
         Application
         .builder()
         .token(BOT_TOKEN)
+        .post_init(setup_bot_commands)
         .build()
     )
 
