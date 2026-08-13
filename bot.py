@@ -22,7 +22,7 @@ from telegram.ext import (
 # =========================================================
 # VERSION
 # =========================================================
-VERSION = "ALHUSSIENY_SHOP_SYSTEM_2026_08_13_V26"
+VERSION = "ALHUSSIENY_SHOP_SYSTEM_2026_08_13_V29"
 
 # =========================================================
 # ENV
@@ -34,6 +34,7 @@ CHANNEL_ID = os.getenv("CHANNEL_ID", "").strip()
 FACEBOOK_PAGE_ID = os.getenv("FACEBOOK_PAGE_ID", "").strip()
 FACEBOOK_PAGE_ACCESS_TOKEN = os.getenv("FACEBOOK_PAGE_TOKEN", "").strip()
 INSTAGRAM_BUSINESS_ID = os.getenv("INSTAGRAM_BUSINESS_ID", "").strip()
+WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "").strip()
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 
 try:
@@ -146,9 +147,25 @@ def init_db():
                     last_seen TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP
                         ON UPDATE CURRENT_TIMESTAMP,
                     total_interactions INT UNSIGNED NOT NULL DEFAULT 0,
-                    inquiries_count INT UNSIGNED NOT NULL DEFAULT 0
+                    inquiries_count INT UNSIGNED NOT NULL DEFAULT 0,
+                    subscribed_gold TINYINT(1) NOT NULL DEFAULT 0,
+                    whatsapp_number VARCHAR(20) NULL,
+                    subscribed_gold_whatsapp TINYINT(1) NOT NULL DEFAULT 0
                 )
             """)
+
+            for q in (
+                "ALTER TABLE Users ADD COLUMN subscribed_gold "
+                "TINYINT(1) NOT NULL DEFAULT 0",
+                "ALTER TABLE Users ADD COLUMN whatsapp_number "
+                "VARCHAR(20) NULL",
+                "ALTER TABLE Users ADD COLUMN subscribed_gold_whatsapp "
+                "TINYINT(1) NOT NULL DEFAULT 0",
+            ):
+                try:
+                    x.execute(q)
+                except Exception:
+                    pass
 
             x.execute("""
                 CREATE TABLE IF NOT EXISTS GoldPriceHistory(
@@ -616,6 +633,92 @@ def inc_user_inquiries(telegram_id):
             c.close()
     except Exception as e:
         print("User Inquiry Count Error:", repr(e), flush=True)
+
+
+def set_gold_subscription(telegram_id, subscribed):
+    c = db()
+    try:
+        with c.cursor() as x:
+            x.execute(
+                "UPDATE Users SET subscribed_gold=%s WHERE telegram_id=%s",
+                (1 if subscribed else 0, telegram_id),
+            )
+            return bool(x.rowcount)
+    finally:
+        c.close()
+
+
+def is_gold_subscribed(telegram_id):
+    row = one(
+        "SELECT subscribed_gold FROM Users WHERE telegram_id=%s",
+        (telegram_id,),
+    )
+    return bool(row and row.get("subscribed_gold"))
+
+
+def gold_subscriber_ids():
+    rows = many(
+        "SELECT telegram_id FROM Users WHERE subscribed_gold=1"
+    )
+    return [r["telegram_id"] for r in rows]
+
+
+def gold_subscriber_count():
+    row = one(
+        "SELECT COUNT(*) c FROM Users WHERE subscribed_gold=1"
+    )
+    return (row or {}).get("c", 0)
+
+
+def set_whatsapp_subscription(telegram_id, phone_number, subscribed):
+    c = db()
+    try:
+        with c.cursor() as x:
+            x.execute("""
+                UPDATE Users
+                SET whatsapp_number=%s, subscribed_gold_whatsapp=%s
+                WHERE telegram_id=%s
+            """, (phone_number, 1 if subscribed else 0, telegram_id))
+            return bool(x.rowcount)
+    finally:
+        c.close()
+
+
+def unsubscribe_whatsapp(telegram_id):
+    c = db()
+    try:
+        with c.cursor() as x:
+            x.execute(
+                "UPDATE Users SET subscribed_gold_whatsapp=0 "
+                "WHERE telegram_id=%s",
+                (telegram_id,),
+            )
+            return bool(x.rowcount)
+    finally:
+        c.close()
+
+
+def is_whatsapp_subscribed(telegram_id):
+    row = one(
+        "SELECT subscribed_gold_whatsapp FROM Users WHERE telegram_id=%s",
+        (telegram_id,),
+    )
+    return bool(row and row.get("subscribed_gold_whatsapp"))
+
+
+def whatsapp_subscriber_numbers():
+    rows = many(
+        "SELECT whatsapp_number FROM Users "
+        "WHERE subscribed_gold_whatsapp=1 AND whatsapp_number IS NOT NULL"
+    )
+    return [r["whatsapp_number"] for r in rows]
+
+
+def whatsapp_subscriber_count():
+    row = one(
+        "SELECT COUNT(*) c FROM Users WHERE subscribed_gold_whatsapp=1"
+    )
+    return (row or {}).get("c", 0)
 
 
 # =========================================================
@@ -1110,34 +1213,52 @@ def save_json(path, data):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
+def first_price_on_date(date_str):
+    row = one("""
+        SELECT price_21 FROM GoldPriceHistory
+        WHERE DATE(created_at) = %s
+        ORDER BY created_at ASC
+        LIMIT 1
+    """, (date_str,))
+    return float(row["price_21"]) if row else None
+
+
 def first_today():
-    return load_json(HISTORY).get(today())
+    """First recorded price of today. Derived from GoldPriceHistory
+    (persisted in MySQL) instead of a local JSON file, so it survives
+    every code deploy/redeploy — Railway's filesystem is ephemeral
+    and wipes local files on each redeploy, but the database is a
+    separate, persistent service."""
+    return first_price_on_date(today())
 
 
 def save_first(p):
-    h = load_json(HISTORY)
-    if today() not in h:
-        h[today()] = round(p)
-        save_json(HISTORY, h)
-        return True
+    """Kept as a no-op for backward compatibility with existing call
+    sites. The 'first price of the day' is now derived automatically
+    from GoldPriceHistory (every price update already gets logged
+    there via record_gold_price), so there is nothing left to save
+    separately."""
     return False
 
 
 def latest():
-    return load_json(LATEST).get("price")
+    """Most recently recorded gold price (عيار 21). Derived from
+    GoldPriceHistory in MySQL — see first_today() docstring for why
+    this replaced the old local-JSON-file approach."""
+    row = one(
+        "SELECT price_21 FROM GoldPriceHistory "
+        "ORDER BY created_at DESC LIMIT 1"
+    )
+    return float(row["price_21"]) if row else None
 
 
 def save_latest(p, admin_id=None):
-    save_json(LATEST, {
-        "price": round(p),
-        "updated_at": datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S"),
-    })
     p24, p21, p18 = calc(p)
     record_gold_price(p21, p24, p18, admin_id)
 
 
 def comparison(p):
-    old = load_json(HISTORY).get(yesterday())
+    old = first_price_on_date(yesterday())
     if old is None:
         return None
 
@@ -1173,6 +1294,27 @@ def price_text(p):
 # =========================================================
 # MENUS
 # =========================================================
+
+def gold_screen_kb(telegram_id):
+    tg_subscribed = is_gold_subscribed(telegram_id)
+    wa_subscribed = is_whatsapp_subscribed(telegram_id)
+
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            "🔕 إلغاء الاشتراك (تليجرام)"
+            if tg_subscribed else
+            "🔔 اشترك في تحديثات السعر (تليجرام)",
+            callback_data="goldunsub" if tg_subscribed else "goldsub",
+        )],
+        [InlineKeyboardButton(
+            "🔕 إلغاء الاشتراك (واتساب)"
+            if wa_subscribed else
+            "📱 اشترك في تحديثات السعر (واتساب)",
+            callback_data="goldwunsub" if wa_subscribed else "goldwsub",
+        )],
+        [InlineKeyboardButton("⬅️ الرئيسية", callback_data="home")],
+    ])
+
 
 def home(admin=False):
     k = [
@@ -1506,6 +1648,153 @@ async def auto_post_tick(context):
             mark_scheduled_post_ran(sp["id"], today_str)
     except Exception as e:
         print("Auto Post Tick Error:", repr(e), flush=True)
+
+
+async def broadcast_gold_update(context, new_price):
+    """
+    Sends the new gold price to every customer who subscribed via
+    the 🔔 button under 'أسعار الذهب'. Best-effort per user — a
+    blocked bot or deactivated account for one subscriber never
+    stops the broadcast to the rest. A small delay between sends
+    avoids hitting Telegram's flood limits on large lists.
+    """
+    ids = gold_subscriber_ids()
+    if not ids:
+        return
+
+    txt = "🔔 تحديث سعر الذهب\n\n" + price_text(new_price)
+    sent, failed = 0, 0
+
+    for uid in ids:
+        try:
+            await context.bot.send_message(chat_id=uid, text=txt)
+            sent += 1
+        except Exception as e:
+            failed += 1
+            print(f"Gold Broadcast Failed for {uid}:", repr(e), flush=True)
+        await asyncio.sleep(0.05)
+
+    log_action(
+        ADMIN_ID, "GOLD_PRICE_BROADCAST",
+        new_value=f"sent={sent} failed={failed}",
+    )
+
+
+def whatsapp_send_template(phone_number, p24, p21, p18):
+    """
+    Sends the approved 'gold_price_update' WhatsApp template to a
+    single phone number via the WhatsApp Cloud API. WhatsApp only
+    allows business-initiated messages through pre-approved
+    templates — free-form text is not allowed outside a customer's
+    own 24h reply window. Returns {"ok": bool, "message"/"post_id"}.
+    """
+    if not WHATSAPP_PHONE_NUMBER_ID:
+        return {
+            "ok": False,
+            "message": "❌ WHATSAPP_PHONE_NUMBER_ID غير موجود في Railway.",
+        }
+
+    if not FACEBOOK_PAGE_ACCESS_TOKEN:
+        return {
+            "ok": False,
+            "message": "❌ FACEBOOK_PAGE_TOKEN غير موجود في Railway.",
+        }
+
+    template_name = os.getenv(
+        "WHATSAPP_GOLD_TEMPLATE", "gold_price_update"
+    ).strip()
+    template_lang = os.getenv(
+        "WHATSAPP_TEMPLATE_LANG", "ar_EG"
+    ).strip()
+
+    graph_version = os.getenv("FACEBOOK_GRAPH_VERSION", "v26.0").strip()
+    if not graph_version.startswith("v"):
+        graph_version = "v" + graph_version
+
+    url = (
+        f"https://graph.facebook.com/{graph_version}"
+        f"/{WHATSAPP_PHONE_NUMBER_ID}/messages"
+    )
+
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": phone_number,
+        "type": "template",
+        "template": {
+            "name": template_name,
+            "language": {"code": template_lang},
+            "components": [{
+                "type": "body",
+                "parameters": [
+                    {"type": "text", "text": str(p24)},
+                    {"type": "text", "text": str(p21)},
+                    {"type": "text", "text": str(p18)},
+                ],
+            }],
+        },
+    }
+
+    try:
+        r = requests.post(
+            url,
+            headers={
+                "Authorization": f"Bearer {FACEBOOK_PAGE_ACCESS_TOKEN}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=30,
+        )
+        try:
+            data = r.json()
+        except Exception:
+            data = {}
+
+        print(f"WA SEND STATUS ({phone_number}): {r.status_code}", flush=True)
+        print(f"WA SEND RESPONSE: {r.text}", flush=True)
+
+        if r.status_code >= 300:
+            return {"ok": False, "message": fb_error_text(data)}
+
+        msg_id = (
+            (data.get("messages") or [{}])[0].get("id")
+            if data.get("messages") else None
+        )
+        return {"ok": True, "post_id": msg_id}
+
+    except requests.RequestException as e:
+        return {"ok": False, "message": repr(e)}
+
+
+async def broadcast_gold_update_whatsapp(context, new_price):
+    """
+    Sends the approved WhatsApp template with the new gold price to
+    every subscribed WhatsApp number. Best-effort per number, with a
+    short delay between sends to stay well under WhatsApp's rate
+    limits.
+    """
+    numbers = whatsapp_subscriber_numbers()
+    if not numbers:
+        return
+
+    p24, p21, p18 = calc(new_price)
+    sent, failed = 0, 0
+
+    for number in numbers:
+        result = whatsapp_send_template(number, p24, p21, p18)
+        if result.get("ok"):
+            sent += 1
+        else:
+            failed += 1
+            print(
+                f"WhatsApp Broadcast Failed for {number}:",
+                result.get("message"), flush=True,
+            )
+        await asyncio.sleep(0.1)
+
+    log_action(
+        ADMIN_ID, "GOLD_PRICE_BROADCAST_WHATSAPP",
+        new_value=f"sent={sent} failed={failed}",
+    )
 
 
 async def maybe_send_gold_alert(context, prev_price, new_price):
@@ -2706,6 +2995,8 @@ async def text(update, context):
             reply_markup=gold_menu(),
         )
         await maybe_send_gold_alert(context, prev_p, p)
+        await broadcast_gold_update(context, p)
+        await broadcast_gold_update_whatsapp(context, p)
         return
 
     if s == "main":
@@ -2891,6 +3182,27 @@ async def text(update, context):
             reply_markup=product_pick_kb(
                 ps, 0, "searchprodo", "aprod"
             ),
+        )
+        return
+
+    if s == "wa_phone_input":
+        digits = re.sub(r"\D", "", t)
+
+        if not re.match(r"^20\d{9,10}$", digits):
+            await update.message.reply_text(
+                "❌ الرقم مش صحيح. اكتبه بالكود الدولي 20 من غير علامة +.\n"
+                "مثال: 201012345678"
+            )
+            return
+
+        set_whatsapp_subscription(update.effective_user.id, digits, True)
+        context.user_data.clear()
+
+        p = latest()
+        await update.message.reply_text(
+            "✅ تم الاشتراك في تحديثات واتساب.\n\n"
+            + (price_text(p) if p else ""),
+            reply_markup=gold_screen_kb(update.effective_user.id),
         )
         return
 
@@ -3271,13 +3583,14 @@ async def buttons(update, context):
         return
 
     if c == "history":
-        h = load_json(HISTORY)
-        txt = "📜 سجل الأسعار\n\n"
+        st = gold_period_stats(30)
+        txt = "📜 سجل الأسعار (آخر 30 يوم)\n\n"
 
-        if h:
+        if st:
             txt += "\n".join(
-                f"📅 {d} — {p} جنيه"
-                for d, p in sorted(h.items(), reverse=True)[:30]
+                f"📅 {r['created_at'].strftime('%Y-%m-%d %H:%M') if hasattr(r['created_at'], 'strftime') else r['created_at']}"
+                f" — {round(float(r['price_21']))} جنيه"
+                for r in reversed(st["rows"][-30:])
             )
         else:
             txt += "لا يوجد سجل."
@@ -3536,6 +3849,8 @@ async def buttons(update, context):
             "📊 الإحصائيات العامة\n\n"
             f"👥 إجمالي المستخدمين: {ut.get('total') or 0}\n"
             f"🟢 نشطون آخر 7 أيام: {ut.get('active_7d') or 0}\n"
+            f"🔔 مشتركين في تحديث السعر (تليجرام): {gold_subscriber_count()}\n"
+            f"📱 مشتركين في تحديث السعر (واتساب): {whatsapp_subscriber_count()}\n"
             f"📩 إجمالي الاستعلامات: {ut.get('inquiries') or 0}\n\n"
             f"💍 إجمالي المنتجات: {pt.get('total') or 0}\n"
             f"🟢 متاحة: {pt.get('available') or 0}\n"
@@ -4322,14 +4637,54 @@ async def buttons(update, context):
 
     if c == "gold":
         p = latest()
+        track_user(update)
 
         await q.edit_message_text(
             price_text(p) if p
             else "💎 لم يتم تحديث أسعار الذهب حتى الآن.",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("⬅️ الرئيسية", callback_data="home")]
-            ]),
+            reply_markup=gold_screen_kb(update.effective_user.id),
         )
+        return
+
+    if c in ("goldsub", "goldunsub"):
+        track_user(update)
+        subscribing = c == "goldsub"
+        set_gold_subscription(update.effective_user.id, subscribing)
+
+        p = latest()
+        await q.edit_message_text(
+            (
+                "✅ تم الاشتراك، هيوصلك تحديث تلقائي على تليجرام كل ما "
+                "سعر الذهب يتغير.\n\n"
+                if subscribing else
+                "🔕 تم إلغاء الاشتراك من تحديثات تليجرام.\n\n"
+            ) + (price_text(p) if p else ""),
+            reply_markup=gold_screen_kb(update.effective_user.id),
+        )
+        return
+
+    if c == "goldwsub":
+        track_user(update)
+        context.user_data.clear()
+        context.user_data["state"] = "wa_phone_input"
+
+        await q.edit_message_text(
+            "📱 اكتب رقم واتساب بتاعك عشان تستقبل تحديثات السعر.\n\n"
+            "مثال: 201012345678 (بالكود الدولي 20، من غير علامة +)"
+        )
+        return
+
+    if c == "goldwunsub":
+        track_user(update)
+        unsubscribe_whatsapp(update.effective_user.id)
+
+        p = latest()
+        await q.edit_message_text(
+            "🔕 تم إلغاء الاشتراك من تحديثات واتساب.\n\n"
+            + (price_text(p) if p else ""),
+            reply_markup=gold_screen_kb(update.effective_user.id),
+        )
+        return
         return
 
     # =====================================================
@@ -4368,6 +4723,8 @@ async def buttons(update, context):
                 save_first(p)
 
             await maybe_send_gold_alert(context, prev_p, p)
+            await broadcast_gold_update(context, p)
+            await broadcast_gold_update_whatsapp(context, p)
 
         log_publish(
             "telegram", status="success" if tg_ok else "failed",
