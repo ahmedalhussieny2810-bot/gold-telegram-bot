@@ -22,7 +22,7 @@ from telegram.ext import (
 # =========================================================
 # VERSION
 # =========================================================
-VERSION = "ALHUSSIENY_SHOP_SYSTEM_2026_08_13_V34"
+VERSION = "ALHUSSIENY_SHOP_SYSTEM_2026_08_13_V36"
 
 # =========================================================
 # ENV
@@ -973,6 +973,41 @@ def gold_alert_threshold():
         return 0
 
 
+def get_extra_admins():
+    v = get_setting("extra_admins", "")
+    ids = []
+    for part in (v or "").split(","):
+        part = part.strip()
+        if part.isdigit():
+            ids.append(int(part))
+    return ids
+
+
+def add_extra_admin(uid):
+    ids = get_extra_admins()
+    if uid in ids or uid == ADMIN_ID:
+        return False
+    ids.append(uid)
+    set_setting("extra_admins", ",".join(str(i) for i in ids))
+    return True
+
+
+def remove_extra_admin(uid):
+    ids = get_extra_admins()
+    if uid not in ids:
+        return False
+    ids.remove(uid)
+    set_setting("extra_admins", ",".join(str(i) for i in ids))
+    return True
+
+
+def all_admin_ids():
+    ids = get_extra_admins()
+    if ADMIN_ID and ADMIN_ID not in ids:
+        ids.append(ADMIN_ID)
+    return ids
+
+
 # =========================================================
 # POST TEMPLATES
 # =========================================================
@@ -981,7 +1016,7 @@ TEMPLATES = {
     "normal": {
         "name": "قالب أسعار عادي",
         "body": (
-            "💎 أسعار الذهب اليوم\n\n"
+            "💎 أسعار الذهب الآن\n\n"
             "🟡 عيار 24 : {price_24}\n"
             "🟡 عيار 21 : {price_21}\n"
             "🟡 عيار 18 : {price_18}\n\n"
@@ -1013,7 +1048,7 @@ TEMPLATES = {
     "links": {
         "name": "قالب أسعار + روابط المحل",
         "body": (
-            "💎 أسعار الذهب اليوم\n\n"
+            "💎 أسعار الذهب الآن\n\n"
             "🟡 عيار 24 : {price_24}\n"
             "🟡 عيار 21 : {price_21}\n"
             "🟡 عيار 18 : {price_18}\n\n"
@@ -1444,16 +1479,21 @@ def home(admin=False):
     return InlineKeyboardMarkup(k)
 
 
-def admin_menu():
-    return InlineKeyboardMarkup([
+def admin_menu(owner=False):
+    rows = [
         [InlineKeyboardButton("📝 منشور جديد", callback_data="newpost")],
         [InlineKeyboardButton("💰 إدارة أسعار الذهب", callback_data="agold")],
         [InlineKeyboardButton("💍 إدارة المنتجات", callback_data="aprod")],
         [InlineKeyboardButton("📂 إدارة الأقسام", callback_data="acat")],
         [InlineKeyboardButton("⏰ النشر التلقائي", callback_data="schedmenu")],
         [InlineKeyboardButton("📊 الإحصائيات", callback_data="stats")],
-        [InlineKeyboardButton("⬅️ الرئيسية", callback_data="home")],
-    ])
+    ]
+    if owner:
+        rows.append(
+            [InlineKeyboardButton("👥 إدارة الأدمنز", callback_data="adminlist")]
+        )
+    rows.append([InlineKeyboardButton("⬅️ الرئيسية", callback_data="home")])
+    return InlineKeyboardMarkup(rows)
 
 
 def scheduler_menu():
@@ -1682,6 +1722,14 @@ def newpost_menu(has_photo=False):
 def is_admin(update):
     return bool(
         update.effective_user
+        and update.effective_user.id in all_admin_ids()
+    )
+
+
+def is_owner(update):
+    return bool(
+        update.effective_user
+        and ADMIN_ID
         and update.effective_user.id == ADMIN_ID
     )
 
@@ -1911,17 +1959,20 @@ async def maybe_send_gold_alert(context, prev_price, new_price):
     sign = "+" if diff > 0 else ""
 
     try:
-        if ADMIN_ID:
-            await context.bot.send_message(
-                chat_id=ADMIN_ID,
-                text=(
-                    f"🔔 تغير سعر الذهب\n\n"
-                    f"عيار 21:\n"
-                    f"السابق: {round(prev_price)}\n"
-                    f"الجديد: {round(new_price)}\n\n"
-                    f"التغير:\n{arrow} {sign}{diff} جنيه"
-                ),
-            )
+        text = (
+            f"🔔 تغير سعر الذهب\n\n"
+            f"عيار 21:\n"
+            f"السابق: {round(prev_price)}\n"
+            f"الجديد: {round(new_price)}\n\n"
+            f"التغير:\n{arrow} {sign}{diff} جنيه"
+        )
+        for admin_id in all_admin_ids():
+            try:
+                await context.bot.send_message(chat_id=admin_id, text=text)
+            except Exception as e:
+                print(
+                    f"Gold Alert Send Error ({admin_id}):", repr(e), flush=True
+                )
         log_action(
             ADMIN_ID, "GOLD_ALERT_TRIGGERED",
             old_value=round(prev_price), new_value=round(new_price),
@@ -1942,12 +1993,10 @@ async def start(update, context):
 
 
 async def show_id(update, context):
-    if is_admin(update):
-        await update.message.reply_text(
-            f"🆔 Telegram ID الخاص بالأدمن:\n\n{ADMIN_ID}"
-        )
-    else:
-        await update.message.reply_text("❌ الأمر ده متاح للأدمن فقط.")
+    u = update.effective_user
+    await update.message.reply_text(
+        f"🆔 آيدي تليجرام بتاعك:\n\n{u.id}"
+    )
 
 
 # =========================================================
@@ -3344,6 +3393,43 @@ async def text(update, context):
         )
         return
 
+    if s == "admin_add":
+        if not is_owner(update):
+            context.user_data.clear()
+            await update.message.reply_text("❌ غير مسموح.")
+            return
+
+        if not t.strip().isdigit():
+            await update.message.reply_text(
+                "❌ اكتب آيدي تليجرام صحيح (أرقام بس)."
+            )
+            return
+
+        uid = int(t.strip())
+        context.user_data.clear()
+
+        ok = add_extra_admin(uid)
+
+        if ok:
+            log_action(
+                update.effective_user.id, "OWNER_ADDED_ADMIN",
+                object_type="user", object_id=uid,
+            )
+            try:
+                await context.bot.send_message(
+                    chat_id=uid,
+                    text="👑 تم إضافتك كأدمن في بوت مجوهرات الحسيني.\n"
+                         "استخدم /start عشان تشوف لوحة التحكم.",
+                )
+            except Exception as e:
+                print("Notify New Admin Error:", repr(e), flush=True)
+
+        await update.message.reply_text(
+            "✅ تم إضافة الأدمن." if ok
+            else "⚠️ الآيدي ده أدمن بالفعل."
+        )
+        return
+
     if s == "sched_time":
         if not is_admin(update):
             context.user_data.clear()
@@ -3429,7 +3515,7 @@ async def buttons(update, context):
         context.user_data.clear()
         await q.edit_message_text(
             "👑 لوحة التحكم\n\nاختار العملية:",
-            reply_markup=admin_menu(),
+            reply_markup=admin_menu(owner=is_owner(update)),
         )
         return
 
@@ -4009,6 +4095,91 @@ async def buttons(update, context):
         await q.edit_message_text(
             "🎨 اختار القالب:",
             reply_markup=scheduler_template_menu(sid),
+        )
+        return
+
+    if c == "adminlist":
+        if not is_owner(update):
+            return
+
+        ids = get_extra_admins()
+        lines = ["👥 إدارة الأدمنز", "", f"👑 المالك: {ADMIN_ID}"]
+
+        k = []
+        if ids:
+            lines.append("")
+            lines.append("الأدمنز الإضافيين:")
+            for uid in ids:
+                lines.append(f"• {uid}")
+                k.append([InlineKeyboardButton(
+                    f"🗑 حذف {uid}", callback_data=f"admindel:{uid}"
+                )])
+        else:
+            lines.append("")
+            lines.append("لا يوجد أدمنز إضافيين.")
+
+        k.append([InlineKeyboardButton(
+            "➕ إضافة أدمن", callback_data="adminadd"
+        )])
+        k.append([InlineKeyboardButton("👑 لوحة التحكم", callback_data="admin")])
+
+        await q.edit_message_text(
+            "\n".join(lines), reply_markup=InlineKeyboardMarkup(k)
+        )
+        return
+
+    if c == "adminadd":
+        if not is_owner(update):
+            return
+
+        context.user_data.clear()
+        context.user_data["state"] = "admin_add"
+
+        await q.edit_message_text(
+            "➕ ابعتلي آيدي تليجرام بتاع الشخص اللي عايز تضيفه أدمن.\n\n"
+            "لو معرفش الآيدي بتاعه، خليه يبعتلك أي رسالة للبوت ويستخدم "
+            "أمر /id عشان يجيبه."
+        )
+        return
+
+    if c.startswith("admindel:"):
+        if not is_owner(update):
+            return
+
+        uid = int(c.split(":")[1])
+        ok = remove_extra_admin(uid)
+
+        if ok:
+            log_action(
+                update.effective_user.id, "OWNER_REMOVED_ADMIN",
+                object_type="user", object_id=uid,
+            )
+
+        await q.edit_message_text(
+            "✅ تم حذف الأدمن." if ok else "⚠️ مش موجود أصلاً.",
+        )
+        ids = get_extra_admins()
+        lines = ["👥 إدارة الأدمنز", "", f"👑 المالك: {ADMIN_ID}"]
+        k = []
+        if ids:
+            lines.append("")
+            lines.append("الأدمنز الإضافيين:")
+            for i in ids:
+                lines.append(f"• {i}")
+                k.append([InlineKeyboardButton(
+                    f"🗑 حذف {i}", callback_data=f"admindel:{i}"
+                )])
+        else:
+            lines.append("")
+            lines.append("لا يوجد أدمنز إضافيين.")
+        k.append([InlineKeyboardButton(
+            "➕ إضافة أدمن", callback_data="adminadd"
+        )])
+        k.append([InlineKeyboardButton("👑 لوحة التحكم", callback_data="admin")])
+        await context.bot.send_message(
+            chat_id=q.message.chat_id,
+            text="\n".join(lines),
+            reply_markup=InlineKeyboardMarkup(k),
         )
         return
 
@@ -4835,17 +5006,24 @@ async def buttons(update, context):
             parts.append(f"💍 {p['name']}")
 
         try:
-            if ADMIN_ID:
-                await context.bot.send_photo(
-                    chat_id=ADMIN_ID,
-                    photo=p["Photo_id"],
-                    caption="\n".join(parts),
-                    reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton(
-                            "💬 رد على العميل", callback_data=f"reply:{u.id}"
-                        )
-                    ]]),
+            reply_kb = InlineKeyboardMarkup([[
+                InlineKeyboardButton(
+                    "💬 رد على العميل", callback_data=f"reply:{u.id}"
                 )
+            ]])
+            for admin_id in all_admin_ids():
+                try:
+                    await context.bot.send_photo(
+                        chat_id=admin_id,
+                        photo=p["Photo_id"],
+                        caption="\n".join(parts),
+                        reply_markup=reply_kb,
+                    )
+                except Exception as e:
+                    print(
+                        f"Inquiry Notify Error ({admin_id}):",
+                        repr(e), flush=True,
+                    )
         except Exception as e:
             print("Inquiry Notify Error:", repr(e), flush=True)
 
@@ -5074,7 +5252,7 @@ async def buttons(update, context):
         if not txt and not photo_id:
             await q.edit_message_text(
                 "❌ المنشور غير موجود، ابدأ من جديد.",
-                reply_markup=admin_menu(),
+                reply_markup=admin_menu(owner=is_owner(update)),
             )
             return
 
@@ -5140,7 +5318,7 @@ async def buttons(update, context):
                 lines.append(fb_result["story_message"])
             await q.edit_message_text(
                 "\n".join(lines),
-                reply_markup=admin_menu(),
+                reply_markup=admin_menu(owner=is_owner(update)),
             )
             return
 
@@ -5149,7 +5327,7 @@ async def buttons(update, context):
                 "✅ تم النشر في تليجرام."
                 if tg_ok
                 else "❌ فشل النشر في تليجرام.",
-                reply_markup=admin_menu(),
+                reply_markup=admin_menu(owner=is_owner(update)),
             )
             return
 
@@ -5159,7 +5337,7 @@ async def buttons(update, context):
                 lines.append(ig_result["story_message"])
             await q.edit_message_text(
                 "\n".join(lines),
-                reply_markup=admin_menu(),
+                reply_markup=admin_menu(owner=is_owner(update)),
             )
             return
 
@@ -5196,7 +5374,7 @@ async def buttons(update, context):
 
         await q.edit_message_text(
             "\n".join(result_lines),
-            reply_markup=admin_menu(),
+            reply_markup=admin_menu(owner=is_owner(update)),
         )
         return
 
