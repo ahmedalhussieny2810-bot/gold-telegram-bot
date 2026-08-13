@@ -22,7 +22,7 @@ from telegram.ext import (
 # =========================================================
 # VERSION
 # =========================================================
-VERSION = "ALHUSSIENY_SHOP_SYSTEM_2026_08_13_V39"
+VERSION = "ALHUSSIENY_SHOP_SYSTEM_2026_08_13_V41"
 
 # =========================================================
 # ENV
@@ -1450,7 +1450,9 @@ def home(admin=False, subscribed=False):
         [InlineKeyboardButton("💎 أسعار الذهب", callback_data="gold")],
         [InlineKeyboardButton("💍 المنتجات", callback_data="products")],
         [InlineKeyboardButton(
-            "🔕 إيقاف الإشعارات" if subscribed else "🔔 تفعيل الإشعارات",
+            "🟢 الإشعارات: شغالة (دوس للإيقاف)"
+            if subscribed else
+            "🔴 الإشعارات: متوقفة (دوس عشان توصلك)",
             callback_data="notifunsub" if subscribed else "notifsub",
         )],
     ]
@@ -2073,6 +2075,8 @@ async def start(update, context):
     await update.message.reply_text(
         "💎 مجوهرات الحسيني\n\n"
         "أهلاً بيك في البوت الرسمي لمجوهرات الحسيني - بورسعيد ✨\n\n"
+        "🔔 فعّل الإشعارات تحت عشان يوصلك سعر الذهب والمنتجات "
+        "الجديدة أول بأول، من غير ما تفتح البوت كل شوية.\n\n"
         "اختار من القائمة 👇",
         reply_markup=home(is_admin(update), is_gold_subscribed(update.effective_user.id)),
     )
