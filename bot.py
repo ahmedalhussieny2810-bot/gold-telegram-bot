@@ -22,7 +22,7 @@ from telegram.ext import (
 # =========================================================
 # VERSION
 # =========================================================
-VERSION = "ALHUSSIENY_SHOP_SYSTEM_2026_08_13_V29"
+VERSION = "ALHUSSIENY_SHOP_SYSTEM_2026_08_13_V30"
 
 # =========================================================
 # ENV
@@ -155,6 +155,10 @@ def init_db():
             """)
 
             for q in (
+                "ALTER TABLE Users ADD COLUMN total_interactions "
+                "INT UNSIGNED NOT NULL DEFAULT 0",
+                "ALTER TABLE Users ADD COLUMN inquiries_count "
+                "INT UNSIGNED NOT NULL DEFAULT 0",
                 "ALTER TABLE Users ADD COLUMN subscribed_gold "
                 "TINYINT(1) NOT NULL DEFAULT 0",
                 "ALTER TABLE Users ADD COLUMN whatsapp_number "
