@@ -22,7 +22,7 @@ from telegram.ext import (
 # =========================================================
 # VERSION
 # =========================================================
-VERSION = "ALHUSSIENY_SHOP_SYSTEM_2026_08_13_V36"
+VERSION = "ALHUSSIENY_SHOP_SYSTEM_2026_08_13_V39"
 
 # =========================================================
 # ENV
@@ -1432,16 +1432,9 @@ def price_text(p):
 # =========================================================
 
 def gold_screen_kb(telegram_id):
-    tg_subscribed = is_gold_subscribed(telegram_id)
     wa_subscribed = is_whatsapp_subscribed(telegram_id)
 
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(
-            "🔕 إلغاء الاشتراك (تليجرام)"
-            if tg_subscribed else
-            "🔔 اشترك في تحديثات السعر (تليجرام)",
-            callback_data="goldunsub" if tg_subscribed else "goldsub",
-        )],
         [InlineKeyboardButton(
             "🔕 إلغاء الاشتراك (واتساب)"
             if wa_subscribed else
@@ -1452,10 +1445,14 @@ def gold_screen_kb(telegram_id):
     ])
 
 
-def home(admin=False):
+def home(admin=False, subscribed=False):
     k = [
         [InlineKeyboardButton("💎 أسعار الذهب", callback_data="gold")],
         [InlineKeyboardButton("💍 المنتجات", callback_data="products")],
+        [InlineKeyboardButton(
+            "🔕 إيقاف الإشعارات" if subscribed else "🔔 تفعيل الإشعارات",
+            callback_data="notifunsub" if subscribed else "notifsub",
+        )],
     ]
 
     if admin:
@@ -1579,13 +1576,56 @@ def cat_menu():
     ])
 
 
+def products_paused():
+    return get_setting("products_paused", "0") == "1"
+
+
+def set_products_paused(paused):
+    set_setting("products_paused", "1" if paused else "0")
+
+
+def find_category_by_name(name, parent=None):
+    row = one(
+        "SELECT id FROM Categories WHERE LOWER(TRIM(name))=%s "
+        + ("AND parent_id=%s" if parent is not None else "AND parent_id IS NULL"),
+        (name,) if parent is None else (name, parent),
+    )
+    return row["id"] if row else None
+
+
+def products_paused_kb():
+    gold_id = find_category_by_name("ذهب")
+    k = []
+
+    if gold_id:
+        bars_id = find_category_by_name("سبائك", gold_id)
+        coins_id = find_category_by_name("عملات", gold_id)
+        if bars_id:
+            k.append([InlineKeyboardButton(
+                "🧱 سبائك", callback_data=f"cm:{bars_id}"
+            )])
+        if coins_id:
+            k.append([InlineKeyboardButton(
+                "🪙 عملات", callback_data=f"cm:{coins_id}"
+            )])
+
+    k.append([InlineKeyboardButton("⬅️ الرئيسية", callback_data="home")])
+    return InlineKeyboardMarkup(k)
+
+
 def prod_menu():
+    paused = products_paused()
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("➕ إضافة منتج", callback_data="addprod")],
         [InlineKeyboardButton("📋 عرض المنتجات", callback_data="viewprod")],
         [InlineKeyboardButton("✏️ تعديل منتج", callback_data="editprod:0")],
         [InlineKeyboardButton("🔎 بحث عن منتج", callback_data="searchprod")],
         [InlineKeyboardButton("🗑 حذف منتج", callback_data="deleteprod")],
+        [InlineKeyboardButton(
+            "▶️ تفعيل عرض المنتجات للعملاء" if paused
+            else "⏸️ إيقاف عرض المنتجات مؤقتاً",
+            callback_data="toggleprodpause"
+        )],
         [InlineKeyboardButton("⬅️ لوحة التحكم", callback_data="admin")],
     ])
 
@@ -1801,11 +1841,12 @@ async def auto_post_tick(context):
 
 async def broadcast_gold_update(context, new_price):
     """
-    Sends the new gold price to every customer who subscribed via
-    the 🔔 button under 'أسعار الذهب'. Best-effort per user — a
-    blocked bot or deactivated account for one subscriber never
-    stops the broadcast to the rest. A small delay between sends
-    avoids hitting Telegram's flood limits on large lists.
+    Sends the new gold price to every customer subscribed to
+    notifications (🔔 تفعيل الإشعارات on the main menu). Best-effort
+    per user — a blocked bot or deactivated account for one
+    subscriber never stops the broadcast to the rest. A small delay
+    between sends avoids hitting Telegram's flood limits on large
+    lists.
     """
     ids = gold_subscriber_ids()
     if not ids:
@@ -1825,6 +1866,51 @@ async def broadcast_gold_update(context, new_price):
 
     log_action(
         ADMIN_ID, "GOLD_PRICE_BROADCAST",
+        new_value=f"sent={sent} failed={failed}",
+    )
+
+
+async def broadcast_new_product(context, photo_id, name, code, price, desc):
+    """
+    Sends a "new product" notification to every customer subscribed
+    to notifications (same subscriber list as gold price updates —
+    the 🔔 button is a single general notifications toggle).
+    """
+    ids = gold_subscriber_ids()
+    if not ids:
+        return
+
+    parts = ["✨ منتج جديد وصل!", ""]
+    if name:
+        parts.append(f"💍 {name}")
+    if code:
+        parts.append(f"🔖 الكود: {code}")
+    parts.append(
+        f"💰 السعر: {round(float(price))} جنيه"
+        if price not in (None, "") else "💰 السعر: للاستعلام"
+    )
+    if desc:
+        parts.append(f"\n{desc}")
+
+    caption = "\n".join(parts)
+    sent, failed = 0, 0
+
+    for uid in ids:
+        try:
+            if photo_id:
+                await context.bot.send_photo(
+                    chat_id=uid, photo=photo_id, caption=caption
+                )
+            else:
+                await context.bot.send_message(chat_id=uid, text=caption)
+            sent += 1
+        except Exception as e:
+            failed += 1
+            print(f"New Product Broadcast Failed for {uid}:", repr(e), flush=True)
+        await asyncio.sleep(0.05)
+
+    log_action(
+        ADMIN_ID, "NEW_PRODUCT_BROADCAST",
         new_value=f"sent={sent} failed={failed}",
     )
 
@@ -1988,7 +2074,7 @@ async def start(update, context):
         "💎 مجوهرات الحسيني\n\n"
         "أهلاً بيك في البوت الرسمي لمجوهرات الحسيني - بورسعيد ✨\n\n"
         "اختار من القائمة 👇",
-        reply_markup=home(is_admin(update)),
+        reply_markup=home(is_admin(update), is_gold_subscribed(update.effective_user.id)),
     )
 
 
@@ -3043,16 +3129,14 @@ async def photo(update, context):
         return
 
     cid = context.user_data.get("cid")
+    name = context.user_data.get("name")
+    code = context.user_data.get("code")
+    price = context.user_data.get("price")
+    desc = context.user_data.get("desc")
+    photo_id = update.message.photo[-1].file_id
 
     try:
-        pid = add_product(
-            cid,
-            update.message.photo[-1].file_id,
-            context.user_data.get("name"),
-            context.user_data.get("code"),
-            context.user_data.get("price"),
-            context.user_data.get("desc"),
-        )
+        pid = add_product(cid, photo_id, name, code, price, desc)
 
         context.user_data.clear()
 
@@ -3065,6 +3149,8 @@ async def photo(update, context):
             f"✅ تم إضافة المنتج بنجاح.\n🆔 #{pid}",
             reply_markup=prod_menu(),
         )
+
+        await broadcast_new_product(context, photo_id, name, code, price, desc)
     except Exception as e:
         print("Product error:", repr(e), flush=True)
         log_action(
@@ -3382,8 +3468,17 @@ async def text(update, context):
             )
             return
 
+        wa_return = context.user_data.get("wa_return", "gold")
         set_whatsapp_subscription(update.effective_user.id, digits, True)
         context.user_data.clear()
+
+        if wa_return == "home":
+            await update.message.reply_text(
+                "✅ تم تفعيل الإشعارات على تليجرام وواتساب.\n\n"
+                "💎 مجوهرات الحسيني\n\nاختار من القائمة 👇",
+                reply_markup=home(is_admin(update), True),
+            )
+            return
 
         p = latest()
         await update.message.reply_text(
@@ -3485,7 +3580,7 @@ async def text(update, context):
 
     await update.message.reply_text(
         "❌ مش فاهم طلبك.\nاستخدم /start لفتح القائمة.",
-        reply_markup=home(is_admin(update)),
+        reply_markup=home(is_admin(update), is_gold_subscribed(update.effective_user.id)),
     )
 
 
@@ -3503,7 +3598,7 @@ async def buttons(update, context):
         context.user_data.clear()
         await q.edit_message_text(
             "💎 مجوهرات الحسيني\n\nاختار من القائمة 👇",
-            reply_markup=home(is_admin(update)),
+            reply_markup=home(is_admin(update), is_gold_subscribed(update.effective_user.id)),
         )
         return
 
@@ -3538,6 +3633,14 @@ async def buttons(update, context):
         return
 
     if c == "products":
+        if products_paused():
+            await q.edit_message_text(
+                "🚧 المنتجات غير متاحة حالياً، وسيتم التحديث قريبًا.\n\n"
+                "الأسعار المحسوبة (سبائك وعملات) لسه متاحة عادي:",
+                reply_markup=products_paused_kb(),
+            )
+            return
+
         ms = cats()
 
         if not ms:
@@ -3606,6 +3709,20 @@ async def buttons(update, context):
         back_cb = (
             f"cm:{cur['parent_id']}" if cur["parent_id"] else "products"
         )
+
+        # Regular product browsing can be paused by the admin (e.g.
+        # while re-stocking) without affecting the "سبائك"/"عملات"
+        # computed-price catalogs, which stay open to customers.
+        if (
+            cur["name"].strip() not in PROTECTED_FIXED_CATEGORIES
+            and products_paused()
+        ):
+            await q.edit_message_text(
+                "🚧 المنتجات غير متاحة حالياً، وسيتم التحديث قريبًا.\n\n"
+                "الأسعار المحسوبة (سبائك وعملات) لسه متاحة عادي:",
+                reply_markup=products_paused_kb(),
+            )
+            return
 
         # "سبائك" and "عملات" are fixed, price-computed catalogs, not
         # regular browsable/product categories — show their weight
@@ -4195,7 +4312,7 @@ async def buttons(update, context):
             "📊 الإحصائيات العامة\n\n"
             f"👥 إجمالي المستخدمين: {ut.get('total') or 0}\n"
             f"🟢 نشطون آخر 7 أيام: {ut.get('active_7d') or 0}\n"
-            f"🔔 مشتركين في تحديث السعر (تليجرام): {gold_subscriber_count()}\n"
+            f"🔔 مشتركين في الإشعارات (تليجرام): {gold_subscriber_count()}\n"
             f"📱 مشتركين في تحديث السعر (واتساب): {whatsapp_subscriber_count()}\n"
             f"📩 إجمالي الاستعلامات: {ut.get('inquiries') or 0}\n\n"
             f"💍 إجمالي المنتجات: {pt.get('total') or 0}\n"
@@ -4610,6 +4727,30 @@ async def buttons(update, context):
 
         await q.edit_message_text(
             "💎 اكتب اسم المنتج.\nمثال: خاتم ذهب موديل ناعم"
+        )
+        return
+
+    if c == "toggleprodpause":
+        if not is_admin(update):
+            return
+
+        new_state = not products_paused()
+        set_products_paused(new_state)
+
+        log_action(
+            update.effective_user.id,
+            "ADMIN_PAUSED_PRODUCTS" if new_state else "ADMIN_RESUMED_PRODUCTS",
+        )
+
+        await q.edit_message_text(
+            (
+                "⏸️ تم إيقاف عرض المنتجات للعملاء مؤقتاً.\n"
+                "(سبائك وعملات هتفضل شغالة عادي، وإنت كأدمن هتقدر "
+                "تضيف/تعدل منتجات براحتك)"
+                if new_state else
+                "▶️ تم تفعيل عرض المنتجات للعملاء تاني."
+            ),
+            reply_markup=prod_menu(),
         )
         return
 
@@ -5069,20 +5210,57 @@ async def buttons(update, context):
         )
         return
 
-    if c in ("goldsub", "goldunsub"):
+    if c == "notifsub":
         track_user(update)
-        subscribing = c == "goldsub"
-        set_gold_subscription(update.effective_user.id, subscribing)
+        set_gold_subscription(update.effective_user.id, True)
 
-        p = latest()
+        wa_subscribed = is_whatsapp_subscribed(update.effective_user.id)
+
+        if wa_subscribed:
+            await q.edit_message_text(
+                "💎 مجوهرات الحسيني\n\n"
+                "✅ تم تفعيل الإشعارات، هيوصلك تلقائي أي منتج جديد "
+                "أو تغيير في سعر الذهب على تليجرام وواتساب.\n\n"
+                "اختار من القائمة 👇",
+                reply_markup=home(is_admin(update), True),
+            )
+            return
+
         await q.edit_message_text(
-            (
-                "✅ تم الاشتراك، هيوصلك تحديث تلقائي على تليجرام كل ما "
-                "سعر الذهب يتغير.\n\n"
-                if subscribing else
-                "🔕 تم إلغاء الاشتراك من تحديثات تليجرام.\n\n"
-            ) + (price_text(p) if p else ""),
-            reply_markup=gold_screen_kb(update.effective_user.id),
+            "✅ تم تفعيل الإشعارات على تليجرام.\n\n"
+            "عايز تستقبلها على واتساب كمان؟",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "📱 أضف رقم واتساب", callback_data="notifwa"
+                )],
+                [InlineKeyboardButton(
+                    "⏭ لأ، تليجرام بس", callback_data="home"
+                )],
+            ]),
+        )
+        return
+
+    if c == "notifwa":
+        track_user(update)
+        context.user_data.clear()
+        context.user_data.update(state="wa_phone_input", wa_return="home")
+
+        await q.edit_message_text(
+            "📱 اكتب رقم واتساب بتاعك عشان تستقبل الإشعارات عليه.\n\n"
+            "مثال: 201012345678 (بالكود الدولي 20، من غير علامة +)"
+        )
+        return
+
+    if c == "notifunsub":
+        track_user(update)
+        set_gold_subscription(update.effective_user.id, False)
+        unsubscribe_whatsapp(update.effective_user.id)
+
+        await q.edit_message_text(
+            "💎 مجوهرات الحسيني\n\n"
+            "🔕 تم إيقاف الإشعارات (تليجرام وواتساب).\n\n"
+            "اختار من القائمة 👇",
+            reply_markup=home(is_admin(update), False),
         )
         return
 
@@ -5137,7 +5315,7 @@ async def buttons(update, context):
         if not txt or p is None:
             await q.edit_message_text(
                 "❌ السعر انتهى.",
-                reply_markup=home(True),
+                reply_markup=home(True, is_gold_subscribed(update.effective_user.id)),
             )
             return
 
@@ -5185,7 +5363,7 @@ async def buttons(update, context):
                     "❌ فشل النشر على Facebook."
                 ) if fb_result
                 else "❌ لم يتم تنفيذ النشر على Facebook.",
-                reply_markup=home(True),
+                reply_markup=home(True, is_gold_subscribed(update.effective_user.id)),
             )
             return
 
@@ -5194,7 +5372,7 @@ async def buttons(update, context):
                 "✅ تم النشر في تليجرام."
                 if tg_ok
                 else "❌ فشل النشر في تليجرام.",
-                reply_markup=home(True),
+                reply_markup=home(True, is_gold_subscribed(update.effective_user.id)),
             )
             return
 
@@ -5235,7 +5413,7 @@ async def buttons(update, context):
 
         await q.edit_message_text(
             "\n".join(result_lines),
-            reply_markup=home(True),
+            reply_markup=home(True, is_gold_subscribed(update.effective_user.id)),
         )
         return
 
