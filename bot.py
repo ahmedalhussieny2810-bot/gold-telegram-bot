@@ -1820,6 +1820,9 @@ def gold_menu():
         [InlineKeyboardButton(
             "🧪 اختبار إشعار واتساب", callback_data="testwa"
         )],
+        [InlineKeyboardButton(
+            "🔄 إعادة ضبط جدول واتساب", callback_data="resetwa"
+        )],
         [InlineKeyboardButton("⬅️ لوحة التحكم", callback_data="admin")],
     ])
 
@@ -4355,6 +4358,29 @@ async def buttons(update, context):
         await context.bot.send_message(
             chat_id=q.message.chat_id,
             text="🧪 نتيجة اختبار واتساب:\n\n" + "\n".join(lines),
+            reply_markup=gold_menu(),
+        )
+        return
+
+    if c == "resetwa":
+        if not is_admin(update):
+            return
+
+        # Clears today's "already sent" markers for both the
+        # afternoon and evening WhatsApp broadcast slots, so the
+        # next price update triggers a real send instead of being
+        # silently skipped as "already sent today".
+        for slot in ("afternoon", "evening"):
+            set_setting(f"wa_slot_{slot}_sent_date", "")
+
+        log_action(
+            update.effective_user.id, "ADMIN_RESET_WHATSAPP_SLOTS",
+        )
+
+        await q.edit_message_text(
+            "✅ تم إعادة ضبط جدول واتساب.\n"
+            "التحديث الجاي للسعر هيتبعت على واتساب عادي "
+            "(حسب فترة الظهر/المسا).",
             reply_markup=gold_menu(),
         )
         return
