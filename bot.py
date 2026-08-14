@@ -9,7 +9,10 @@ from urllib.parse import urlparse, quote
 import requests
 import pymysql
 from dotenv import load_dotenv
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
+from telegram import (
+    Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand,
+    BotCommandScopeChat, BotCommandScopeDefault,
+)
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -861,6 +864,17 @@ def whatsapp_subscriber_count():
     return (row or {}).get("c", 0)
 
 
+def whatsapp_notifications_enabled():
+    """
+    Admin kill-switch for the WhatsApp subscription flow (separate
+    from the wa_slot_* scheduling logic). Defaults to OFF ("0") so a
+    fresh deploy never lets customers subscribe to a channel that
+    isn't approved by Meta yet — the admin turns it on explicitly
+    with the "🟢 تفعيل" button once WhatsApp is live.
+    """
+    return get_setting("wa_notifications_enabled", "0") == "1"
+
+
 # =========================================================
 # LOGS
 # =========================================================
@@ -1051,6 +1065,8 @@ def all_admin_ids():
 # POST TEMPLATES
 # =========================================================
 
+BOT_LINK = os.getenv("BOT_LINK", "https://t.me/Aalhussieny_bot").strip()
+
 TEMPLATES = {
     "normal": {
         "name": "قالب أسعار عادي",
@@ -1059,7 +1075,8 @@ TEMPLATES = {
             "🟡 عيار 24 : {price_24}\n"
             "🟡 عيار 21 : {price_21}\n"
             "🟡 عيار 18 : {price_18}\n\n"
-            "📍 {shop_name}\n\n"
+            "📍 {shop_name}\n"
+            "🤖 {bot_link}\n\n"
             "🌐 {website}"
         ),
     },
@@ -1073,6 +1090,7 @@ TEMPLATES = {
             "🟡 عيار 18 : {price_18} جنيه\n\n"
             "💫 جمال يدوم... يليق بك\n"
             "📍 {shop_name}\n"
+            "🤖 {bot_link}\n"
             "💬 {whatsapp}"
         ),
     },
@@ -1092,6 +1110,7 @@ TEMPLATES = {
             "🟡 عيار 21 : {price_21}\n"
             "🟡 عيار 18 : {price_18}\n\n"
             "📍 {shop_name}\n"
+            "🤖 {bot_link}\n"
             "🌐 الموقع: {website}\n"
             "💬 واتساب: {whatsapp}\n"
             "📍 الموقع على الخريطة: {maps}"
@@ -1106,6 +1125,7 @@ TEMPLATES = {
             "🟡 عيار 21 : {price_21}\n"
             "🟡 عيار 18 : {price_18}\n\n"
             "زورونا اليوم في {shop_name}\n"
+            "🤖 {bot_link}\n"
             "🌐 {website}"
         ),
     },
@@ -1127,6 +1147,7 @@ def render_template(key, price21):
         website=WEBSITE,
         whatsapp=WHATSAPP,
         maps=MAPS,
+        bot_link=BOT_LINK,
     )
 
 
@@ -1811,6 +1832,7 @@ def status_pick_kb(pid):
 
 
 def gold_menu():
+    wa_on = whatsapp_notifications_enabled()
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("✏️ تحديث السعر", callback_data="updategold")],
         [InlineKeyboardButton("📊 أسعار اليوم", callback_data="goldtoday")],
@@ -1822,6 +1844,11 @@ def gold_menu():
         )],
         [InlineKeyboardButton(
             "🔄 إعادة ضبط جدول واتساب", callback_data="resetwa"
+        )],
+        [InlineKeyboardButton(
+            "🔴 إيقاف الاشتراك في واتساب" if wa_on
+            else "🟢 تفعيل الاشتراك في واتساب",
+            callback_data="togglewa",
         )],
         [InlineKeyboardButton("⬅️ لوحة التحكم", callback_data="admin")],
     ])
@@ -2176,11 +2203,17 @@ async def broadcast_gold_update_whatsapp(context, new_price):
 
     Returns a dict describing exactly what happened, so the caller
     can show the admin a clear reason instead of silence:
-      {"status": "no_subscribers" | "before_noon" | "already_sent"
-                 | "sent",
+      {"status": "no_subscribers" | "disabled" | "before_noon"
+                 | "already_sent" | "sent",
        "slot": "afternoon"/"evening"/None,
        "sent": int, "failed": int, "details": [str, ...]}
     """
+    if not whatsapp_notifications_enabled():
+        # Admin switch is off (e.g. still waiting on Meta's review).
+        # Numbers keep getting collected in the background, but we
+        # don't attempt to actually send until the admin flips it on.
+        return {"status": "disabled"}
+
     numbers = whatsapp_subscriber_numbers()
     if not numbers:
         return {"status": "no_subscribers"}
@@ -2297,6 +2330,24 @@ async def show_id(update, context):
     u = update.effective_user
     await update.message.reply_text(
         f"🆔 آيدي تليجرام بتاعك:\n\n{u.id}"
+    )
+
+
+async def update_price_shortcut(update, context):
+    """
+    Admin-only shortcut command that skips straight to "send me the
+    new price" instead of going through Gold menu → تحديث السعر.
+    Shows up next to /start in Telegram's "/" command menu.
+    """
+    if not is_admin(update):
+        return
+
+    track_user(update)
+    context.user_data.clear()
+    context.user_data["state"] = "gold"
+
+    await update.message.reply_text(
+        "✏️ ابعت سعر عيار 21 الجديد.\nمثال: 7000"
     )
 
 
@@ -3495,6 +3546,10 @@ async def text(update, context):
 
         wa_result = await broadcast_gold_update_whatsapp(context, p)
         wa_status_map = {
+            "disabled": (
+                "🔒 واتساب: الخدمة متوقفة حاليًا (مش مفعّلة). "
+                "الأرقام بتتسجل عادي وهتستقبل التحديثات أول ما تفعّلها."
+            ),
             "no_subscribers": "⚠️ واتساب: مفيش مشتركين حالياً.",
             "before_noon": (
                 "⏳ واتساب: لسه قبل الساعة 12 الضهر — "
@@ -3757,6 +3812,35 @@ async def text(update, context):
         wa_return = context.user_data.get("wa_return", "gold")
         set_whatsapp_subscription(update.effective_user.id, digits, True)
         context.user_data.clear()
+
+        if not whatsapp_notifications_enabled():
+            # Meta hasn't approved WhatsApp messaging yet — we still
+            # save the number so this person is already on the list
+            # and gets included automatically the moment the admin
+            # flips the switch on, but we're upfront that nothing
+            # will arrive on WhatsApp just yet.
+            soon_text = (
+                "✅ تم تسجيل رقمك بنجاح.\n\n"
+                "⏳ خدمة تحديثات السعر على واتساب هتكون متاحة قريبًا "
+                "(لسه تحت المراجعة من ميتا). هتوصلك التحديثات على "
+                "واتساب تلقائي أول ما تتفعل، من غير ما تحتاج تعمل "
+                "حاجة تاني.\n\n"
+                "لحد وقتها، الإشعارات على تليجرام بتوصل أول بأول."
+            )
+            if wa_return == "home":
+                await update.message.reply_text(
+                    soon_text
+                    + "\n\n💎 " + SHOP_NAME + "\n\nاختار من القائمة 👇",
+                    reply_markup=home(is_admin(update), True),
+                )
+                return
+
+            p = latest()
+            await update.message.reply_text(
+                soon_text + "\n\n" + (price_text(p) if p else ""),
+                reply_markup=gold_screen_kb(update.effective_user.id),
+            )
+            return
 
         wa_note = (
             "\n\nℹ️ ملحوظة: السعر بيتحدث على واتساب مرتين بس في اليوم "
@@ -4423,6 +4507,53 @@ async def buttons(update, context):
             "(حسب فترة الظهر/المسا).",
             reply_markup=gold_menu(),
         )
+        return
+
+    if c == "togglewa":
+        if not is_admin(update):
+            return
+
+        currently_on = whatsapp_notifications_enabled()
+        new_state = not currently_on
+        set_setting("wa_notifications_enabled", "1" if new_state else "0")
+
+        log_action(
+            update.effective_user.id, "ADMIN_TOGGLED_WHATSAPP_SIGNUPS",
+            new_value="on" if new_state else "off",
+        )
+
+        if new_state:
+            # Just turned ON — let existing Telegram subscribers know
+            # WhatsApp is live now, since they were told "coming soon"
+            # while it was off.
+            ids = gold_subscriber_ids()
+            sent = 0
+            for uid in ids:
+                try:
+                    await context.bot.send_message(
+                        chat_id=uid,
+                        text=(
+                            "🎉 خدمة تحديثات السعر على واتساب اشتغلت "
+                            "دلوقتي!\n\n"
+                            "تقدر تشترك من قائمة 💎 أسعار الذهب."
+                        ),
+                    )
+                    sent += 1
+                except Exception:
+                    pass
+                await asyncio.sleep(0.05)
+
+            await q.edit_message_text(
+                f"🟢 تم تفعيل الاشتراك في واتساب.\n"
+                f"اتبعت إعلان لـ {sent} مشترك على تليجرام.",
+                reply_markup=gold_menu(),
+            )
+        else:
+            await q.edit_message_text(
+                "🔴 تم إيقاف الاشتراك في واتساب.\n"
+                "أي عميل هيحاول يشترك هيتقاله إن الخدمة قريبًا.",
+                reply_markup=gold_menu(),
+            )
         return
 
     if c == "goldtoday":
@@ -6192,11 +6323,29 @@ async def error(update, context):
 async def setup_bot_commands(app):
     """Registers the persistent command menu (the '/' button next to
     the message box) so /start is always one tap away, even after the
-    person closes and reopens the chat."""
+    person closes and reopens the chat. /updateprice is scoped to
+    admin chats only — regular customers never see it."""
     try:
-        await app.bot.set_my_commands([
+        await app.bot.set_my_commands(
+            [BotCommand("start", "🏠 القائمة الرئيسية")],
+            scope=BotCommandScopeDefault(),
+        )
+
+        admin_commands = [
             BotCommand("start", "🏠 القائمة الرئيسية"),
-        ])
+            BotCommand("updateprice", "✏️ تحديث سعر الذهب"),
+        ]
+        for admin_id in all_admin_ids():
+            try:
+                await app.bot.set_my_commands(
+                    admin_commands,
+                    scope=BotCommandScopeChat(chat_id=admin_id),
+                )
+            except Exception as e:
+                print(
+                    f"Set Admin Commands Error ({admin_id}):",
+                    repr(e), flush=True,
+                )
     except Exception as e:
         print("Set Commands Error:", repr(e), flush=True)
 
@@ -6228,6 +6377,7 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("id", show_id))
+    app.add_handler(CommandHandler("updateprice", update_price_shortcut))
 
     app.add_handler(
         MessageHandler(filters.PHOTO, photo)
