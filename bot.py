@@ -22,7 +22,7 @@ from telegram.ext import (
 # =========================================================
 # VERSION
 # =========================================================
-VERSION = "ALHUSSIENY_SHOP_SYSTEM_2026_08_13_V42"
+VERSION = "ALHUSSIENY_SHOP_SYSTEM_2026_08_13_V44"
 
 # =========================================================
 # ENV
@@ -2009,12 +2009,47 @@ def whatsapp_send_template(phone_number, p24, p21, p18):
 async def broadcast_gold_update_whatsapp(context, new_price):
     """
     Sends the approved WhatsApp template with the new gold price to
-    every subscribed WhatsApp number. Best-effort per number, with a
-    short delay between sends to stay well under WhatsApp's rate
-    limits.
+    every subscribed WhatsApp number — but only twice a day, at two
+    fixed windows, instead of on every price change:
+      - the FIRST price update after 12:00 PM (afternoon slot)
+      - the FIRST price update after 07:00 PM (evening slot)
+    Any other price change that day is skipped on WhatsApp (it still
+    goes out over Telegram, which has no such limit).
+
+    WHY: our template is categorized "Marketing" by Meta, and
+    WhatsApp enforces a hard cap of ~2 marketing messages per unique
+    recipient per day (across ALL businesses) — extra sends past
+    that are silently dropped (error 131049) and can hurt our
+    quality rating. Gold prices can change many times a day, so we
+    pick two fixed times instead of just "first N sends".
     """
     numbers = whatsapp_subscriber_numbers()
     if not numbers:
+        return
+
+    now = datetime.now(TZ)
+    today_str = now.strftime("%Y-%m-%d")
+
+    if now.hour >= 19:
+        slot = "evening"
+    elif now.hour >= 12:
+        slot = "afternoon"
+    else:
+        # Before the afternoon window even opens — nothing to send
+        # on WhatsApp yet today.
+        return
+
+    setting_key = f"wa_slot_{slot}_sent_date"
+
+    if get_setting(setting_key) == today_str:
+        log_action(
+            ADMIN_ID, "GOLD_PRICE_BROADCAST_WHATSAPP",
+            status="skipped",
+            error=(
+                f"'{slot}' slot already sent today — "
+                "update sent via Telegram only."
+            ),
+        )
         return
 
     p24, p21, p18 = calc(new_price)
@@ -2032,9 +2067,16 @@ async def broadcast_gold_update_whatsapp(context, new_price):
             )
         await asyncio.sleep(0.1)
 
+    # Mark this slot as used for today, even if some individual sends
+    # failed — we only get one shot at each slot regardless, and we
+    # don't want a partial failure to trigger a second attempt later
+    # in the same window and risk going over the per-recipient cap.
+    if sent or failed:
+        set_setting(setting_key, today_str)
+
     log_action(
         ADMIN_ID, "GOLD_PRICE_BROADCAST_WHATSAPP",
-        new_value=f"sent={sent} failed={failed}",
+        new_value=f"sent={sent} failed={failed} (slot={slot})",
     )
 
 
@@ -3480,18 +3522,27 @@ async def text(update, context):
         set_whatsapp_subscription(update.effective_user.id, digits, True)
         context.user_data.clear()
 
+        wa_note = (
+            "\n\nℹ️ ملحوظة: السعر بيتحدث على واتساب مرتين بس في اليوم "
+            "(بعد الساعة 12 الضهر، وبعد الساعة 7 بالليل)، بسبب قيود "
+            "شركة ميتا على الرسائل الترويجية. لو عايز تحديثات فورية "
+            "أكتر، الإشعارات على تليجرام بتوصل أول بأول من غير أي حد."
+        )
+
         if wa_return == "home":
             await update.message.reply_text(
-                "✅ تم تفعيل الإشعارات على تليجرام وواتساب.\n\n"
-                "💎 مجوهرات الحسيني\n\nاختار من القائمة 👇",
+                "✅ تم تفعيل الإشعارات على تليجرام وواتساب."
+                + wa_note
+                + "\n\n💎 مجوهرات الحسيني\n\nاختار من القائمة 👇",
                 reply_markup=home(is_admin(update), True),
             )
             return
 
         p = latest()
         await update.message.reply_text(
-            "✅ تم الاشتراك في تحديثات واتساب.\n\n"
-            + (price_text(p) if p else ""),
+            "✅ تم الاشتراك في تحديثات واتساب."
+            + wa_note
+            + "\n\n" + (price_text(p) if p else ""),
             reply_markup=gold_screen_kb(update.effective_user.id),
         )
         return
