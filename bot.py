@@ -22,7 +22,7 @@ from telegram.ext import (
 # =========================================================
 # VERSION
 # =========================================================
-VERSION = "ALHUSSIENY_SHOP_SYSTEM_2026_08_13_V41"
+VERSION = "ALHUSSIENY_SHOP_SYSTEM_2026_08_13_V42"
 
 # =========================================================
 # ENV
@@ -404,7 +404,7 @@ def cats(parent=None):
         return many("""
             SELECT id,name FROM Categories
             WHERE parent_id IS NULL
-            ORDER BY name
+            ORDER BY id
         """)
 
     return many("""
@@ -413,7 +413,11 @@ def cats(parent=None):
         LEFT JOIN Products p ON p.category_id=c.id
         WHERE c.parent_id=%s
         GROUP BY c.id,c.name
-        ORDER BY c.name
+        ORDER BY
+            CASE WHEN c.name='سبائك' THEN 0
+                 WHEN c.name='عملات' THEN 1
+                 ELSE 2 END,
+            c.id ASC
     """, (parent,))
 
 
