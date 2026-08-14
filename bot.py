@@ -2173,10 +2173,17 @@ async def broadcast_gold_update_whatsapp(context, new_price):
     that are silently dropped (error 131049) and can hurt our
     quality rating. Gold prices can change many times a day, so we
     pick two fixed times instead of just "first N sends".
+
+    Returns a dict describing exactly what happened, so the caller
+    can show the admin a clear reason instead of silence:
+      {"status": "no_subscribers" | "before_noon" | "already_sent"
+                 | "sent",
+       "slot": "afternoon"/"evening"/None,
+       "sent": int, "failed": int, "details": [str, ...]}
     """
     numbers = whatsapp_subscriber_numbers()
     if not numbers:
-        return
+        return {"status": "no_subscribers"}
 
     now = datetime.now(TZ)
     today_str = now.strftime("%Y-%m-%d")
@@ -2188,7 +2195,7 @@ async def broadcast_gold_update_whatsapp(context, new_price):
     else:
         # Before the afternoon window even opens — nothing to send
         # on WhatsApp yet today.
-        return
+        return {"status": "before_noon", "slot": None}
 
     setting_key = f"wa_slot_{slot}_sent_date"
 
@@ -2201,10 +2208,11 @@ async def broadcast_gold_update_whatsapp(context, new_price):
                 "update sent via Telegram only."
             ),
         )
-        return
+        return {"status": "already_sent", "slot": slot}
 
     p24, p21, p18 = calc(new_price)
     sent, failed = 0, 0
+    details = []
 
     for number in numbers:
         result = whatsapp_send_template(number, p24, p21, p18)
@@ -2212,6 +2220,7 @@ async def broadcast_gold_update_whatsapp(context, new_price):
             sent += 1
         else:
             failed += 1
+            details.append(f"{number}: {result.get('message')}")
             print(
                 f"WhatsApp Broadcast Failed for {number}:",
                 result.get("message"), flush=True,
@@ -2229,6 +2238,11 @@ async def broadcast_gold_update_whatsapp(context, new_price):
         ADMIN_ID, "GOLD_PRICE_BROADCAST_WHATSAPP",
         new_value=f"sent={sent} failed={failed} (slot={slot})",
     )
+
+    return {
+        "status": "sent", "slot": slot,
+        "sent": sent, "failed": failed, "details": details,
+    }
 
 
 async def maybe_send_gold_alert(context, prev_price, new_price):
@@ -3478,7 +3492,33 @@ async def text(update, context):
         )
         await maybe_send_gold_alert(context, prev_p, p)
         await broadcast_gold_update(context, p)
-        await broadcast_gold_update_whatsapp(context, p)
+
+        wa_result = await broadcast_gold_update_whatsapp(context, p)
+        wa_status_map = {
+            "no_subscribers": "⚠️ واتساب: مفيش مشتركين حالياً.",
+            "before_noon": (
+                "⏳ واتساب: لسه قبل الساعة 12 الضهر — "
+                "أول فترة إرسال بتبدأ بعدها."
+            ),
+            "already_sent": lambda r: (
+                f"⏭️ واتساب: اتخطى — فترة "
+                f"({'الظهر' if r['slot'] == 'afternoon' else 'المسا'}) "
+                "اتبعتت فعلاً النهاردة."
+            ),
+            "sent": lambda r: (
+                f"✅ واتساب: اتبعت — نجح {r['sent']} وفشل {r['failed']}"
+                + (
+                    "\n" + "\n".join(f"❌ {d}" for d in r["details"][:5])
+                    if r["failed"] else ""
+                )
+            ),
+        }
+        wa_status = wa_status_map.get(wa_result.get("status"))
+        wa_line = (
+            wa_status(wa_result) if callable(wa_status)
+            else wa_status or "❓ واتساب: حالة غير معروفة."
+        )
+        await update.message.reply_text(wa_line)
         return
 
     if s == "main":
