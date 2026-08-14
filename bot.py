@@ -22,7 +22,7 @@ from telegram.ext import (
 # =========================================================
 # VERSION
 # =========================================================
-VERSION = "ALHUSSIENY_SHOP_SYSTEM_2026_08_13_V44"
+VERSION = "ALHUSSIENY_SHOP_SYSTEM_2026_08_13_V45"
 
 # =========================================================
 # ENV
@@ -1485,6 +1485,9 @@ def home(admin=False, subscribed=False):
 def admin_menu(owner=False):
     rows = [
         [InlineKeyboardButton("📝 منشور جديد", callback_data="newpost")],
+        [InlineKeyboardButton(
+            "📢 إشعار مخصص للمشتركين", callback_data="customnotif"
+        )],
         [InlineKeyboardButton("💰 إدارة أسعار الذهب", callback_data="agold")],
         [InlineKeyboardButton("💍 إدارة المنتجات", callback_data="aprod")],
         [InlineKeyboardButton("📂 إدارة الأقسام", callback_data="acat")],
@@ -1919,6 +1922,36 @@ async def broadcast_new_product(context, photo_id, name, code, price, desc):
         ADMIN_ID, "NEW_PRODUCT_BROADCAST",
         new_value=f"sent={sent} failed={failed}",
     )
+
+
+async def broadcast_custom_notification(context, admin_id, text, photo_id=None):
+    """
+    Sends a free-form, admin-written announcement to every customer
+    subscribed to notifications. Separate from — and independent of
+    — the automatic gold price / new product broadcasts.
+    """
+    ids = gold_subscriber_ids()
+    sent, failed = 0, 0
+
+    for uid in ids:
+        try:
+            if photo_id:
+                await context.bot.send_photo(
+                    chat_id=uid, photo=photo_id, caption=text or None
+                )
+            else:
+                await context.bot.send_message(chat_id=uid, text=text)
+            sent += 1
+        except Exception as e:
+            failed += 1
+            print(f"Custom Notification Failed for {uid}:", repr(e), flush=True)
+        await asyncio.sleep(0.05)
+
+    log_action(
+        admin_id, "ADMIN_CUSTOM_NOTIFICATION",
+        new_value=f"sent={sent} failed={failed}: {(text or '')[:200]}",
+    )
+    return sent, failed
 
 
 def whatsapp_send_template(phone_number, p24, p21, p18):
@@ -3172,6 +3205,29 @@ async def photo(update, context):
         )
         return
 
+    if state == "custom_notif":
+        if not is_admin(update):
+            context.user_data.clear()
+            await update.message.reply_text("❌ غير مسموح.")
+            return
+
+        photo_id = update.message.photo[-1].file_id
+        caption = update.message.caption or ""
+        context.user_data.clear()
+
+        await update.message.reply_text("⏳ جاري الإرسال...")
+
+        sent, failed = await broadcast_custom_notification(
+            context, update.effective_user.id, caption, photo_id=photo_id
+        )
+
+        await update.message.reply_text(
+            f"✅ اتبعت الإشعار.\n📤 وصل لـ {sent} شخص"
+            + (f" (فشل مع {failed})" if failed else "") + ".",
+            reply_markup=admin_menu(owner=is_owner(update)),
+        )
+        return
+
     if state != "product_photo":
         await update.message.reply_text(
             "❌ ابدأ إضافة المنتج من لوحة التحكم."
@@ -3584,6 +3640,27 @@ async def text(update, context):
         )
         return
 
+    if s == "custom_notif":
+        if not is_admin(update):
+            context.user_data.clear()
+            await update.message.reply_text("❌ غير مسموح.")
+            return
+
+        context.user_data.clear()
+
+        await update.message.reply_text("⏳ جاري الإرسال...")
+
+        sent, failed = await broadcast_custom_notification(
+            context, update.effective_user.id, t
+        )
+
+        await update.message.reply_text(
+            f"✅ اتبعت الإشعار.\n📤 وصل لـ {sent} شخص"
+            + (f" (فشل مع {failed})" if failed else "") + ".",
+            reply_markup=admin_menu(owner=is_owner(update)),
+        )
+        return
+
     if s == "sched_time":
         if not is_admin(update):
             context.user_data.clear()
@@ -3685,6 +3762,27 @@ async def buttons(update, context):
             "📝 ابعت المنشور:\n\n"
             "- اكتب نص، أو\n"
             "- ابعت صورة (تقدر تحط تعليق عليها كنص المنشور)",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ إلغاء", callback_data="admin")]
+            ]),
+        )
+        return
+
+    if c == "customnotif":
+        if not is_admin(update):
+            await q.answer("❌ غير مسموح.", show_alert=True)
+            return
+
+        count = gold_subscriber_count()
+        context.user_data.clear()
+        context.user_data["state"] = "custom_notif"
+
+        await q.edit_message_text(
+            f"📢 اكتب الإشعار اللي عايز تبعته لكل المشتركين على "
+            f"تليجرام ({count} مشترك).\n\n"
+            "- اكتب نص، أو\n"
+            "- ابعت صورة (تقدر تحط تعليق عليها كنص الإشعار)\n\n"
+            "⚠️ ده منفصل تماماً عن تنبيهات السعر والمنتجات التلقائية.",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("❌ إلغاء", callback_data="admin")]
             ]),
