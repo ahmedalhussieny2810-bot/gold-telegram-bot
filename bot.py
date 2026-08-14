@@ -22,7 +22,7 @@ from telegram.ext import (
 # =========================================================
 # VERSION
 # =========================================================
-VERSION = "ALHUSSIENY_SHOP_SYSTEM_2026_08_13_V46"
+VERSION = "ALHUSSIENY_SHOP_SYSTEM_2026_08_13_V48"
 
 # =========================================================
 # ENV
@@ -44,13 +44,37 @@ except Exception:
 
 TZ = ZoneInfo("Africa/Cairo")
 
-WEBSITE = "https://link.gettap.co/alhussienyjewelry"
-TG_CHANNEL = "https://t.me/alhussienyjewelry"
-FACEBOOK = "https://www.facebook.com/alhussienyjewelry"
-INSTAGRAM = "https://www.instagram.com/alhussienyjewelry"
-MAPS = "https://maps.app.goo.gl/1X6NJrNM4u1azpFR6"
-WHATSAPP = "https://wa.me/201067365567"
-PHONE = "01067365567"
+# =========================================================
+# SHOP IDENTITY — all configurable via Railway env vars, so a new
+# client's shop can be deployed by copying this same file and
+# setting different env vars (no code edits needed per shop).
+# Defaults keep this exact deployment (مجوهرات الحسيني) working
+# unchanged even if these vars are never set.
+# =========================================================
+SHOP_NAME = os.getenv("SHOP_NAME", "مجوهرات الحسيني").strip()
+SHOP_LOCATION = os.getenv("SHOP_LOCATION", "بورسعيد").strip()
+SHOP_FULL_NAME = f"{SHOP_NAME} - {SHOP_LOCATION}" if SHOP_LOCATION else SHOP_NAME
+
+WEBSITE = os.getenv(
+    "SHOP_WEBSITE", "https://link.gettap.co/alhussienyjewelry"
+).strip()
+TG_CHANNEL = os.getenv(
+    "SHOP_TG_CHANNEL", "https://t.me/alhussienyjewelry"
+).strip()
+FACEBOOK = os.getenv(
+    "SHOP_FACEBOOK", "https://www.facebook.com/alhussienyjewelry"
+).strip()
+INSTAGRAM = os.getenv(
+    "SHOP_INSTAGRAM", "https://www.instagram.com/alhussienyjewelry"
+).strip()
+MAPS = os.getenv(
+    "SHOP_MAPS", "https://maps.app.goo.gl/1X6NJrNM4u1azpFR6"
+).strip()
+PHONE = os.getenv("SHOP_PHONE", "01067365567").strip()
+WHATSAPP = f"https://wa.me/{os.getenv('SHOP_WHATSAPP_NUMBER', '201067365567').strip()}"
+SHOP_ADDRESS = os.getenv(
+    "SHOP_ADDRESS", "بورسعيد - شارع أسوان أمام صيدلية جلال"
+).strip()
 
 HISTORY = "gold_history.json"
 LATEST = "latest_gold_price.json"
@@ -1042,7 +1066,7 @@ TEMPLATES = {
     "luxury": {
         "name": "قالب فاخر",
         "body": (
-            "✨💍 مجوهرات الحسيني — أسعار الذهب ✨\n\n"
+            "✨💍 " + SHOP_NAME + " — أسعار الذهب ✨\n\n"
             "📅 {date} — 🕐 {time}\n\n"
             "🟡 عيار 24 : {price_24} جنيه\n"
             "🟡 عيار 21 : {price_21} جنيه\n"
@@ -1076,7 +1100,7 @@ TEMPLATES = {
     "offer": {
         "name": "قالب عروض",
         "body": (
-            "🔥 عرض خاص اليوم في مجوهرات الحسيني 🔥\n\n"
+            "🔥 عرض خاص اليوم في " + SHOP_NAME + " 🔥\n\n"
             "💎 أسعار الذهب:\n"
             "🟡 عيار 24 : {price_24}\n"
             "🟡 عيار 21 : {price_21}\n"
@@ -1099,7 +1123,7 @@ def render_template(key, price21):
         price_18=p18,
         date=now.strftime("%Y-%m-%d"),
         time=now.strftime("%H:%M"),
-        shop_name="مجوهرات الحسيني - بورسعيد",
+        shop_name=SHOP_FULL_NAME,
         website=WEBSITE,
         whatsapp=WHATSAPP,
         maps=MAPS,
@@ -1476,7 +1500,7 @@ def price_text(p):
             f"🟡 عيار 21 : {p21}",
             f"🟡 عيار 18 : {p18}",
             "",
-            "📍 بورسعيد - شارع أسوان أمام صيدلية جلال",
+            "📍 " + SHOP_ADDRESS,
             "",
             "🌐 " + WEBSITE,
         ]
@@ -1793,6 +1817,9 @@ def gold_menu():
         [InlineKeyboardButton("📅 تاريخ الأسعار", callback_data="histmenu")],
         [InlineKeyboardButton("🔔 تنبيهات السعر", callback_data="alertmenu")],
         [InlineKeyboardButton("📢 نشر السعر", callback_data="publish")],
+        [InlineKeyboardButton(
+            "🧪 اختبار إشعار واتساب", callback_data="testwa"
+        )],
         [InlineKeyboardButton("⬅️ لوحة التحكم", callback_data="admin")],
     ])
 
@@ -2240,8 +2267,8 @@ async def start(update, context):
     context.user_data.clear()
     track_user(update)
     await update.message.reply_text(
-        "💎 مجوهرات الحسيني\n\n"
-        "أهلاً بيك في البوت الرسمي لمجوهرات الحسيني - بورسعيد ✨\n\n"
+        "💎 " + SHOP_NAME + "\n\n"
+        "أهلاً بيك في البوت الرسمي لـ" + SHOP_FULL_NAME + " ✨\n\n"
         "🔔 فعّل الإشعارات تحت عشان يوصلك سعر الذهب والمنتجات "
         "الجديدة أول بأول، من غير ما تفتح البوت كل شوية.\n\n"
         "اختار من القائمة 👇",
@@ -3655,7 +3682,7 @@ async def text(update, context):
         try:
             await context.bot.send_message(
                 chat_id=target_id,
-                text=f"💬 رد من مجوهرات الحسيني:\n\n{t}",
+                text=f"💬 رد من {SHOP_NAME}:\n\n{t}",
             )
             log_action(
                 update.effective_user.id, "ADMIN_REPLIED_TO_CUSTOMER",
@@ -3699,7 +3726,7 @@ async def text(update, context):
             await update.message.reply_text(
                 "✅ تم تفعيل الإشعارات على تليجرام وواتساب."
                 + wa_note
-                + "\n\n💎 مجوهرات الحسيني\n\nاختار من القائمة 👇",
+                + "\n\n💎 " + SHOP_NAME + "\n\nاختار من القائمة 👇",
                 reply_markup=home(is_admin(update), True),
             )
             return
@@ -3738,7 +3765,7 @@ async def text(update, context):
             try:
                 await context.bot.send_message(
                     chat_id=uid,
-                    text="👑 تم إضافتك كأدمن في بوت مجوهرات الحسيني.\n"
+                    text="👑 تم إضافتك كأدمن في بوت " + SHOP_NAME + ".\n"
                          "استخدم /start عشان تشوف لوحة التحكم.",
                 )
             except Exception as e:
@@ -3881,7 +3908,7 @@ async def buttons(update, context):
     if c == "home":
         context.user_data.clear()
         await q.edit_message_text(
-            "💎 مجوهرات الحسيني\n\nاختار من القائمة 👇",
+            "💎 " + SHOP_NAME + "\n\nاختار من القائمة 👇",
             reply_markup=home(is_admin(update), is_gold_subscribed(update.effective_user.id)),
         )
         return
@@ -4093,7 +4120,7 @@ async def buttons(update, context):
         ])
 
         await q.edit_message_text(
-            "💍 منتجات مجوهرات الحسيني\n\nاختار القسم:",
+            "💍 منتجات " + SHOP_NAME + "\n\nاختار القسم:",
             reply_markup=InlineKeyboardMarkup(k),
         )
         return
@@ -4274,6 +4301,61 @@ async def buttons(update, context):
 
         await q.edit_message_text(
             "✏️ ابعت سعر عيار 21 الجديد.\nمثال: 7000"
+        )
+        return
+
+    if c == "testwa":
+        if not is_admin(update):
+            return
+
+        if not WHATSAPP_PHONE_NUMBER_ID:
+            await q.edit_message_text(
+                "❌ WHATSAPP_PHONE_NUMBER_ID غير موجود في Railway Variables.",
+                reply_markup=gold_menu(),
+            )
+            return
+
+        p21 = latest()
+        if not p21:
+            await q.edit_message_text(
+                "❌ لا يوجد سعر ذهب محفوظ للاختبار بيه.",
+                reply_markup=gold_menu(),
+            )
+            return
+
+        numbers = whatsapp_subscriber_numbers()
+        if not numbers:
+            await q.edit_message_text(
+                "⚠️ مفيش حد مشترك في واتساب حالياً عشان نختبر عليه.\n"
+                "اشترك برقمك الأول من القائمة الرئيسية.",
+                reply_markup=gold_menu(),
+            )
+            return
+
+        await q.edit_message_text(
+            f"🧪 جاري إرسال اختبار لـ {len(numbers)} رقم "
+            "(من غير التقيد بمواعيد 12/7 — ده اختبار يدوي بس)..."
+        )
+
+        p24, p21c, p18 = calc(p21)
+        lines = []
+
+        for number in numbers:
+            result = whatsapp_send_template(number, p24, p21c, p18)
+            if result.get("ok"):
+                lines.append(f"✅ {number} — نجح (id: {result.get('post_id')})")
+            else:
+                lines.append(f"❌ {number} — فشل: {result.get('message')}")
+
+        log_action(
+            update.effective_user.id, "ADMIN_TESTED_WHATSAPP",
+            new_value="\n".join(lines)[:2000],
+        )
+
+        await context.bot.send_message(
+            chat_id=q.message.chat_id,
+            text="🧪 نتيجة اختبار واتساب:\n\n" + "\n".join(lines),
+            reply_markup=gold_menu(),
         )
         return
 
@@ -5615,7 +5697,7 @@ async def buttons(update, context):
 
     if c == "phone":
         await q.edit_message_text(
-            f"📞 مجوهرات الحسيني\n\n{PHONE}\n\nللتواصل المباشر:",
+            f"📞 {SHOP_NAME}\n\n{PHONE}\n\nللتواصل المباشر:",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("💬 واتساب", url=WHATSAPP)],
                 [InlineKeyboardButton("⬅️ الرئيسية", callback_data="home")],
@@ -5646,7 +5728,7 @@ async def buttons(update, context):
 
         if wa_subscribed:
             await q.edit_message_text(
-                "💎 مجوهرات الحسيني\n\n"
+                "💎 " + SHOP_NAME + "\n\n"
                 "✅ تم تفعيل الإشعارات، هيوصلك تلقائي أي منتج جديد "
                 "أو تغيير في سعر الذهب على تليجرام وواتساب.\n\n"
                 "اختار من القائمة 👇",
@@ -5685,7 +5767,7 @@ async def buttons(update, context):
         unsubscribe_whatsapp(update.effective_user.id)
 
         await q.edit_message_text(
-            "💎 مجوهرات الحسيني\n\n"
+            "💎 " + SHOP_NAME + "\n\n"
             "🔕 تم إيقاف الإشعارات (تليجرام وواتساب).\n\n"
             "اختار من القائمة 👇",
             reply_markup=home(is_admin(update), False),
