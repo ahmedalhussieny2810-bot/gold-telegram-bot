@@ -22,7 +22,7 @@ from telegram.ext import (
 # =========================================================
 # VERSION
 # =========================================================
-VERSION = "ALHUSSIENY_SHOP_SYSTEM_2026_08_13_V45"
+VERSION = "ALHUSSIENY_SHOP_SYSTEM_2026_08_13_V46"
 
 # =========================================================
 # ENV
@@ -231,6 +231,17 @@ def init_db():
                     template_key VARCHAR(50) NOT NULL DEFAULT 'normal',
                     enabled TINYINT(1) NOT NULL DEFAULT 1,
                     last_run_date DATE NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
+            x.execute("""
+                CREATE TABLE IF NOT EXISTS SavedNotifications(
+                    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                    admin_id BIGINT NULL,
+                    title VARCHAR(100) NOT NULL,
+                    body TEXT NULL,
+                    photo_id VARCHAR(255) NULL,
                     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
                 )
             """)
@@ -1194,6 +1205,47 @@ def mark_scheduled_post_ran(sid, date_str):
         c.close()
 
 
+# =========================================================
+# SAVED (REUSABLE) NOTIFICATIONS
+# =========================================================
+
+def saved_notifications():
+    return many(
+        "SELECT id,title,body,photo_id FROM SavedNotifications "
+        "ORDER BY id DESC"
+    )
+
+
+def get_saved_notification(nid):
+    return one(
+        "SELECT id,title,body,photo_id FROM SavedNotifications WHERE id=%s",
+        (nid,),
+    )
+
+
+def add_saved_notification(admin_id, title, body, photo_id=None):
+    c = db()
+    try:
+        with c.cursor() as x:
+            x.execute("""
+                INSERT INTO SavedNotifications(admin_id,title,body,photo_id)
+                VALUES(%s,%s,%s,%s)
+            """, (admin_id, title.strip(), body, photo_id))
+            return x.lastrowid
+    finally:
+        c.close()
+
+
+def delete_saved_notification(nid):
+    c = db()
+    try:
+        with c.cursor() as x:
+            x.execute("DELETE FROM SavedNotifications WHERE id=%s", (nid,))
+            return bool(x.rowcount)
+    finally:
+        c.close()
+
+
 def gold_today_stats():
     rows = gold_history_range(
         datetime.now(TZ).strftime("%Y-%m-%d 00:00:00"),
@@ -1486,7 +1538,7 @@ def admin_menu(owner=False):
     rows = [
         [InlineKeyboardButton("📝 منشور جديد", callback_data="newpost")],
         [InlineKeyboardButton(
-            "📢 إشعار مخصص للمشتركين", callback_data="customnotif"
+            "📢 الإشعارات للمشتركين", callback_data="notifmenu"
         )],
         [InlineKeyboardButton("💰 إدارة أسعار الذهب", callback_data="agold")],
         [InlineKeyboardButton("💍 إدارة المنتجات", callback_data="aprod")],
@@ -1500,6 +1552,42 @@ def admin_menu(owner=False):
         )
     rows.append([InlineKeyboardButton("⬅️ الرئيسية", callback_data="home")])
     return InlineKeyboardMarkup(rows)
+
+
+def notif_menu():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            "✍️ إشعار سريع (يتبعت وخلاص)", callback_data="customnotif"
+        )],
+        [InlineKeyboardButton(
+            "💾 رسائل جاهزة (احفظها وابعتها وقت ما تحب)",
+            callback_data="savedlist"
+        )],
+        [InlineKeyboardButton("👑 لوحة التحكم", callback_data="admin")],
+    ])
+
+
+def saved_notif_list_kb():
+    rows = saved_notifications()
+    k = [
+        [InlineKeyboardButton(
+            f"💾 {r['title']}", callback_data=f"savedopen:{r['id']}"
+        )]
+        for r in rows
+    ]
+    k.append([InlineKeyboardButton(
+        "➕ حفظ رسالة جديدة", callback_data="savedadd"
+    )])
+    k.append([InlineKeyboardButton("⬅️ رجوع", callback_data="notifmenu")])
+    return InlineKeyboardMarkup(k)
+
+
+def saved_notif_item_kb(nid):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📤 ابعتها دلوقتي", callback_data=f"savedsend:{nid}")],
+        [InlineKeyboardButton("🗑 احذفها", callback_data=f"saveddel:{nid}")],
+        [InlineKeyboardButton("⬅️ رجوع", callback_data="savedlist")],
+    ])
 
 
 def scheduler_menu():
@@ -3224,7 +3312,29 @@ async def photo(update, context):
         await update.message.reply_text(
             f"✅ اتبعت الإشعار.\n📤 وصل لـ {sent} شخص"
             + (f" (فشل مع {failed})" if failed else "") + ".",
-            reply_markup=admin_menu(owner=is_owner(update)),
+            reply_markup=notif_menu(),
+        )
+        return
+
+    if state == "saved_notif_body":
+        if not is_admin(update):
+            context.user_data.clear()
+            await update.message.reply_text("❌ غير مسموح.")
+            return
+
+        title = context.user_data.get("saved_title", "رسالة")
+        photo_id = update.message.photo[-1].file_id
+        caption = update.message.caption or ""
+        context.user_data.clear()
+
+        add_saved_notification(
+            update.effective_user.id, title, caption, photo_id=photo_id
+        )
+
+        await update.message.reply_text(
+            f"✅ اتحفظت \"{title}\". تقدر تبعتها وقت ما تحب من "
+            "\"💾 رسائل جاهزة\".",
+            reply_markup=saved_notif_list_kb(),
         )
         return
 
@@ -3657,7 +3767,45 @@ async def text(update, context):
         await update.message.reply_text(
             f"✅ اتبعت الإشعار.\n📤 وصل لـ {sent} شخص"
             + (f" (فشل مع {failed})" if failed else "") + ".",
-            reply_markup=admin_menu(owner=is_owner(update)),
+            reply_markup=notif_menu(),
+        )
+        return
+
+    if s == "saved_notif_title":
+        if not is_admin(update):
+            context.user_data.clear()
+            await update.message.reply_text("❌ غير مسموح.")
+            return
+
+        if not t.strip():
+            await update.message.reply_text("❌ اكتب اسم للرسالة.")
+            return
+
+        context.user_data["saved_title"] = t.strip()
+        context.user_data["state"] = "saved_notif_body"
+
+        await update.message.reply_text(
+            "✍️ دلوقتي اكتب محتوى الرسالة نفسها (اللي هيوصل للعملاء).\n\n"
+            "- اكتب نص، أو\n"
+            "- ابعت صورة (تقدر تحط تعليق عليها كنص الرسالة)"
+        )
+        return
+
+    if s == "saved_notif_body":
+        if not is_admin(update):
+            context.user_data.clear()
+            await update.message.reply_text("❌ غير مسموح.")
+            return
+
+        title = context.user_data.get("saved_title", "رسالة")
+        context.user_data.clear()
+
+        add_saved_notification(update.effective_user.id, title, t)
+
+        await update.message.reply_text(
+            f"✅ اتحفظت \"{title}\". تقدر تبعتها وقت ما تحب من "
+            "\"💾 رسائل جاهزة\".",
+            reply_markup=saved_notif_list_kb(),
         )
         return
 
@@ -3768,6 +3916,18 @@ async def buttons(update, context):
         )
         return
 
+    if c == "notifmenu":
+        if not is_admin(update):
+            await q.answer("❌ غير مسموح.", show_alert=True)
+            return
+
+        await q.edit_message_text(
+            "📢 الإشعارات للمشتركين\n\n"
+            "اختار النوع:",
+            reply_markup=notif_menu(),
+        )
+        return
+
     if c == "customnotif":
         if not is_admin(update):
             await q.answer("❌ غير مسموح.", show_alert=True)
@@ -3778,14 +3938,125 @@ async def buttons(update, context):
         context.user_data["state"] = "custom_notif"
 
         await q.edit_message_text(
-            f"📢 اكتب الإشعار اللي عايز تبعته لكل المشتركين على "
+            f"✍️ اكتب الإشعار اللي عايز تبعته لكل المشتركين على "
             f"تليجرام ({count} مشترك).\n\n"
             "- اكتب نص، أو\n"
             "- ابعت صورة (تقدر تحط تعليق عليها كنص الإشعار)\n\n"
-            "⚠️ ده منفصل تماماً عن تنبيهات السعر والمنتجات التلقائية.",
+            "⚠️ ده هيتبعت فوراً ومش هيتحفظ - منفصل تماماً عن تنبيهات "
+            "السعر والمنتجات التلقائية.",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("❌ إلغاء", callback_data="admin")]
+                [InlineKeyboardButton("❌ إلغاء", callback_data="notifmenu")]
             ]),
+        )
+        return
+
+    if c == "savedlist":
+        if not is_admin(update):
+            await q.answer("❌ غير مسموح.", show_alert=True)
+            return
+
+        rows = saved_notifications()
+        await q.edit_message_text(
+            "💾 الرسائل الجاهزة\n\n"
+            + (
+                f"عندك {len(rows)} رسالة محفوظة، دوس على أي واحدة "
+                "عشان تبعتها أو تحذفها."
+                if rows else
+                "لسه معملتش رسائل محفوظة. دوس \"➕ حفظ رسالة جديدة\" "
+                "عشان تبدأ."
+            ),
+            reply_markup=saved_notif_list_kb(),
+        )
+        return
+
+    if c == "savedadd":
+        if not is_admin(update):
+            await q.answer("❌ غير مسموح.", show_alert=True)
+            return
+
+        context.user_data.clear()
+        context.user_data["state"] = "saved_notif_title"
+
+        await q.edit_message_text(
+            "💾 اكتب اسم قصير للرسالة عشان تعرفها بيه بعدين "
+            "(الاسم ده مش هيتبعت للعميل، بس لتسهيل الاختيار عليك).\n\n"
+            "مثال: عرض العيد"
+        )
+        return
+
+    if c.startswith("savedopen:"):
+        if not is_admin(update):
+            return
+
+        nid = int(c.split(":")[1])
+        n = get_saved_notification(nid)
+
+        if not n:
+            await q.edit_message_text(
+                "⚠️ الرسالة دي مش موجودة (يمكن اتحذفت).",
+                reply_markup=saved_notif_list_kb(),
+            )
+            return
+
+        preview = (n["body"] or "")[:300]
+        await q.edit_message_text(
+            f"💾 {n['title']}\n\n"
+            f"{'📸 فيها صورة\n\n' if n['photo_id'] else ''}"
+            f"{preview}",
+            reply_markup=saved_notif_item_kb(nid),
+        )
+        return
+
+    if c.startswith("savedsend:"):
+        if not is_admin(update):
+            return
+
+        nid = int(c.split(":")[1])
+        n = get_saved_notification(nid)
+
+        if not n:
+            await q.edit_message_text(
+                "⚠️ الرسالة دي مش موجودة.",
+                reply_markup=saved_notif_list_kb(),
+            )
+            return
+
+        await q.edit_message_text("⏳ جاري الإرسال...")
+
+        sent, failed = await broadcast_custom_notification(
+            context, update.effective_user.id, n["body"],
+            photo_id=n["photo_id"],
+        )
+
+        await context.bot.send_message(
+            chat_id=q.message.chat_id,
+            text=f"✅ اتبعتت \"{n['title']}\".\n📤 وصلت لـ {sent} شخص"
+                 + (f" (فشل مع {failed})" if failed else "") + ".",
+            reply_markup=saved_notif_list_kb(),
+        )
+        return
+
+    if c.startswith("saveddel:"):
+        if not is_admin(update):
+            return
+
+        nid = int(c.split(":")[1])
+        ok = delete_saved_notification(nid)
+
+        if ok:
+            log_action(
+                update.effective_user.id, "ADMIN_DELETED_SAVED_NOTIFICATION",
+                object_type="saved_notification", object_id=nid,
+            )
+
+        rows = saved_notifications()
+        await q.edit_message_text(
+            ("✅ تم الحذف.\n\n" if ok else "⚠️ مش موجودة أصلاً.\n\n")
+            + (
+                f"عندك {len(rows)} رسالة محفوظة."
+                if rows else "لسه معملتش رسائل محفوظة."
+            ),
+            reply_markup=saved_notif_list_kb(),
         )
         return
 
