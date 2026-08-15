@@ -2,7 +2,7 @@ import os
 import json
 import re
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo
 from urllib.parse import urlparse, quote
 
@@ -288,6 +288,19 @@ def init_db():
                     enabled TINYINT(1) NOT NULL DEFAULT 1,
                     last_run_date DATE NULL,
                     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
+            x.execute("""
+                CREATE TABLE IF NOT EXISTS OccasionReminders(
+                    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                    telegram_id BIGINT NOT NULL,
+                    label VARCHAR(100) NOT NULL,
+                    month TINYINT UNSIGNED NOT NULL,
+                    day TINYINT UNSIGNED NOT NULL,
+                    last_reminded_year SMALLINT UNSIGNED NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    INDEX(month, day)
                 )
             """)
 
@@ -1131,6 +1144,17 @@ def all_admin_ids():
 
 BOT_LINK = os.getenv("BOT_LINK", "https://t.me/Aalhussieny_bot").strip()
 
+
+def build_share_text(body):
+    """Wraps a calculator result with a shop signature + bot link,
+    so when a customer forwards it (e.g. on WhatsApp) whoever
+    receives it can try the bot themselves."""
+    return (
+        body
+        + f"\n\n💎 {SHOP_NAME}\n"
+        + f"🤖 جرب بنفسك: {BOT_LINK}"
+    )
+
 TEMPLATES = {
     "normal": {
         "name": "قالب أسعار عادي",
@@ -1381,6 +1405,44 @@ def mark_scheduled_notification_ran(nid, date_str):
                 "UPDATE ScheduledNotifications SET last_run_date=%s "
                 "WHERE id=%s",
                 (date_str, nid),
+            )
+    finally:
+        c.close()
+
+
+# =========================================================
+# OCCASION REMINDERS (customer-facing, e.g. birthdays)
+# =========================================================
+# A customer registers a recurring yearly occasion (month/day only —
+# no year, since it repeats). Once a day the tick job checks whether
+# today is exactly 7 days before any occasion and, if so, DMs that
+# customer a reminder — once per occasion per year.
+
+def add_occasion_reminder(telegram_id, label, month, day):
+    c = db()
+    try:
+        with c.cursor() as x:
+            x.execute("""
+                INSERT INTO OccasionReminders(telegram_id,label,month,day)
+                VALUES(%s,%s,%s,%s)
+            """, (telegram_id, label, month, day))
+            return x.lastrowid
+    finally:
+        c.close()
+
+
+def all_occasion_reminders():
+    return many("SELECT * FROM OccasionReminders")
+
+
+def mark_occasion_reminded(rid, year):
+    c = db()
+    try:
+        with c.cursor() as x:
+            x.execute(
+                "UPDATE OccasionReminders SET last_reminded_year=%s "
+                "WHERE id=%s",
+                (year, rid),
             )
     finally:
         c.close()
@@ -1726,6 +1788,22 @@ def gold_screen_kb(telegram_id):
 
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🧮 احسب دهبك", callback_data="calcgold")],
+        [
+            InlineKeyboardButton(
+                "🔄 استبدال قديم بجديد", callback_data="calctrade"
+            ),
+            InlineKeyboardButton(
+                "💵 بكام أشتري؟", callback_data="calcbudget"
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "📊 آخر 7 أيام", callback_data="pricehist7"
+            ),
+            InlineKeyboardButton(
+                "🎁 ذكرني بمناسبة", callback_data="addoccasion"
+            ),
+        ],
         [InlineKeyboardButton(
             "🔕 إلغاء الاشتراك (واتساب)"
             if wa_subscribed else
@@ -1734,6 +1812,18 @@ def gold_screen_kb(telegram_id):
         )],
         [InlineKeyboardButton("⬅️ الرئيسية", callback_data="home")],
     ])
+
+
+def calc_result_kb(telegram_id):
+    """Same as gold_screen_kb but with a share button pinned to the
+    top — used under calculator RESULT messages only (not menus),
+    since the result gets saved to calc_share_text right before this
+    keyboard is shown."""
+    base = gold_screen_kb(telegram_id)
+    rows = [
+        [InlineKeyboardButton("📤 شارك النتيجة", callback_data="calcshare")]
+    ] + list(base.inline_keyboard)
+    return InlineKeyboardMarkup(rows)
 
 
 def home(admin=False, subscribed=False):
@@ -2263,6 +2353,50 @@ async def auto_notification_tick(context):
             mark_scheduled_notification_ran(sn["id"], today_str)
     except Exception as e:
         print("Auto Notification Tick Error:", repr(e), flush=True)
+
+
+async def occasion_tick(context):
+    """Runs every minute via JobQueue but only acts at 09:00 daily.
+    DMs any customer whose registered occasion (birthday, anniversary,
+    etc.) is exactly 7 days away — once per occasion per year."""
+    try:
+        now = datetime.now(TZ)
+        if now.strftime("%H:%M") != "09:00":
+            return
+
+        today = now.date()
+        this_year = now.year
+
+        for r in all_occasion_reminders():
+            try:
+                target = date(this_year, r["month"], r["day"])
+            except ValueError:
+                continue  # e.g. Feb 29 in a non-leap year
+
+            if target - timedelta(days=7) != today:
+                continue
+            if r.get("last_reminded_year") == this_year:
+                continue
+
+            try:
+                await context.bot.send_message(
+                    chat_id=r["telegram_id"],
+                    text=(
+                        "🎁 تذكير!\n\n"
+                        f"باقي أسبوع على \"{r['label']}\" "
+                        f"({target.strftime('%d-%m')}).\n"
+                        "تقدر تزورنا بدري وتجهز الهدية 💛"
+                    ),
+                )
+            except Exception as e:
+                print(
+                    f"Occasion Reminder Failed for {r['telegram_id']}:",
+                    repr(e), flush=True,
+                )
+
+            mark_occasion_reminded(r["id"], this_year)
+    except Exception as e:
+        print("Occasion Tick Error:", repr(e), flush=True)
 
 
 async def broadcast_gold_update(context, new_price):
@@ -3844,7 +3978,7 @@ async def text(update, context):
             final_total = round(per_gram_mc * weight)
             mc_line = f"مصنعية الجرام: {round(charge)} جنيه\n"
 
-        await update.message.reply_text(
+        result_text = (
             "🧮 نتيجة الحساب (شامل المصنعية)\n\n"
             f"العيار: {karat}\n"
             f"الوزن: {weight} جرام\n"
@@ -3852,7 +3986,169 @@ async def text(update, context):
             f"قيمة الذهب: {gold_total} جنيه\n"
             + mc_line
             + f"\n💰 الإجمالي: {final_total} جنيه\n\n"
-            "⚠️ السعر تقريبي، والمصنعية النهائية بتتحدد في المحل.",
+            "⚠️ السعر تقريبي، والمصنعية النهائية بتتحدد في المحل."
+        )
+        context.user_data["calc_share_text"] = build_share_text(result_text)
+        await update.message.reply_text(
+            result_text,
+            reply_markup=calc_result_kb(update.effective_user.id),
+        )
+        return
+
+    if s == "trade_weight_input":
+        try:
+            weight = float(t.replace(",", "."))
+            if weight <= 0:
+                raise ValueError
+        except Exception:
+            await update.message.reply_text(
+                "❌ اكتب وزن صحيح بالجرام، مثال: 5 أو 3.5"
+            )
+            return
+
+        karat = context.user_data.get("trade_karat")
+        mode = context.user_data.get("trade_mode")
+        context.user_data.clear()
+
+        ok, _, old_total, _ = compute_calc_result(mode, karat, weight)
+        if not ok:
+            await update.message.reply_text(
+                "💎 لم يتم تحديث أسعار الذهب حتى الآن."
+            )
+            return
+
+        context.user_data.update(
+            state="trade_new_price_input",
+            trade_karat=karat, trade_weight=weight, trade_old_total=old_total,
+        )
+        await update.message.reply_text(
+            f"✅ قيمة قطعتك القديمة تقريبًا: {old_total} جنيه.\n\n"
+            "دلوقتي اكتب سعر القطعة الجديدة اللي عايز تاخدها (زي ما "
+            "قالهولك المحل، شامل المصنعية).\nمثال: 18000"
+        )
+        return
+
+    if s == "trade_new_price_input":
+        try:
+            new_price = float(t.replace(",", "."))
+            if new_price <= 0:
+                raise ValueError
+        except Exception:
+            await update.message.reply_text(
+                "❌ اكتب سعر صحيح بالجنيه، مثال: 18000"
+            )
+            return
+
+        karat = context.user_data.get("trade_karat")
+        weight = context.user_data.get("trade_weight")
+        old_total = context.user_data.get("trade_old_total")
+        context.user_data.clear()
+
+        if old_total is None:
+            await update.message.reply_text("❌ حصل خطأ، ابدأ من الأول.")
+            return
+
+        diff = round(new_price - old_total)
+        if diff > 0:
+            diff_line = f"💰 هتدفع فرق: {diff} جنيه"
+        elif diff < 0:
+            diff_line = f"🎉 هياخدلك المحل فرق: {abs(diff)} جنيه"
+        else:
+            diff_line = "✅ مفيش فرق، القيمتين متساويتين!"
+
+        trade_text = (
+            "🔄 نتيجة الاستبدال\n\n"
+            f"قيمة قطعتك القديمة (عيار {karat}، {weight} جرام): "
+            f"{old_total} جنيه\n"
+            f"سعر القطعة الجديدة: {round(new_price)} جنيه\n\n"
+            + diff_line
+        )
+        context.user_data["calc_share_text"] = build_share_text(trade_text)
+        await update.message.reply_text(
+            trade_text,
+            reply_markup=calc_result_kb(update.effective_user.id),
+        )
+        return
+
+    if s == "budget_amount_input":
+        try:
+            budget = float(t.replace(",", "."))
+            if budget <= 0:
+                raise ValueError
+        except Exception:
+            await update.message.reply_text(
+                "❌ اكتب مبلغ صحيح بالجنيه، مثال: 5000"
+            )
+            return
+
+        karat = context.user_data.get("budget_karat")
+        context.user_data.clear()
+
+        p21 = latest()
+        if not p21:
+            await update.message.reply_text(
+                "💎 لم يتم تحديث أسعار الذهب حتى الآن."
+            )
+            return
+
+        p24, p21c, p18 = calc(p21)
+        per_gram = {24: p24, 21: p21c, 18: p18}.get(karat)
+        grams = budget / per_gram
+
+        budget_text = (
+            "💵 بكام أقدر أشتري؟\n\n"
+            f"الميزانية: {round(budget)} جنيه\n"
+            f"العيار: {karat}\n"
+            f"سعر الجرام: {per_gram} جنيه\n\n"
+            f"⚖️ تقدر تاخد تقريبًا: {grams:.2f} جرام\n\n"
+            "⚠️ ده تقريبي وذهب صافي بس؛ وزن القطعة الفعلي هيقل شوية "
+            "عشان يغطي المصنعية."
+        )
+        context.user_data["calc_share_text"] = build_share_text(budget_text)
+        await update.message.reply_text(
+            budget_text,
+            reply_markup=calc_result_kb(update.effective_user.id),
+        )
+        return
+
+    if s == "occasion_label_input":
+        if not t.strip():
+            await update.message.reply_text("❌ اكتب اسم المناسبة.")
+            return
+
+        context.user_data["occasion_label"] = t.strip()[:100]
+        context.user_data["state"] = "occasion_date_input"
+
+        await update.message.reply_text(
+            "📅 اكتب تاريخ المناسبة بصيغة يوم-شهر (DD-MM).\n"
+            "مثال: 15-08"
+        )
+        return
+
+    if s == "occasion_date_input":
+        m = re.match(r"^([0-3]?\d)-(0?\d|1[0-2])$", t.strip())
+        if not m:
+            await update.message.reply_text(
+                "❌ الصيغة غلط. اكتب التاريخ بصيغة يوم-شهر.\nمثال: 15-08"
+            )
+            return
+
+        day, month = int(m.group(1)), int(m.group(2))
+        try:
+            date(2024, month, day)  # validates day fits in month (leap ok)
+        except ValueError:
+            await update.message.reply_text(
+                "❌ التاريخ ده مش موجود. اكتبه تاني.\nمثال: 15-08"
+            )
+            return
+
+        label = context.user_data.get("occasion_label", "مناسبة")
+        context.user_data.clear()
+
+        add_occasion_reminder(update.effective_user.id, label, month, day)
+
+        await update.message.reply_text(
+            f"🎉 تمام! هنفكّرك بـ\"{label}\" ({t.strip()}) قبلها بأسبوع.",
             reply_markup=gold_screen_kb(update.effective_user.id),
         )
         return
@@ -3912,15 +4208,19 @@ async def text(update, context):
         if compare_first:
             diff = total - compare_first["total"]
             sign = "+" if diff >= 0 else ""
-            await update.message.reply_text(
+            cmp_text = (
                 "⚖️ مقارنة القطعتين\n\n"
                 f"القطعة الأولى: عيار {compare_first['karat']}، "
                 f"{compare_first['weight']} جرام → "
                 f"{compare_first['total']} جنيه\n"
                 f"القطعة التانية: عيار {karat}، {weight} جرام → "
                 f"{total} جنيه\n\n"
-                f"💰 الفرق: {sign}{diff} جنيه",
-                reply_markup=gold_screen_kb(update.effective_user.id),
+                f"💰 الفرق: {sign}{diff} جنيه"
+            )
+            context.user_data["calc_share_text"] = build_share_text(cmp_text)
+            await update.message.reply_text(
+                cmp_text,
+                reply_markup=calc_result_kb(update.effective_user.id),
             )
             return
 
@@ -3945,8 +4245,9 @@ async def text(update, context):
             )
             return
 
+        context.user_data["calc_share_text"] = build_share_text(text)
         await update.message.reply_text(
-            text, reply_markup=gold_screen_kb(update.effective_user.id)
+            text, reply_markup=calc_result_kb(update.effective_user.id)
         )
         return
 
@@ -6529,6 +6830,17 @@ async def buttons(update, context):
     # "احسب دهبك" — customer-facing buy/sell price calculator
     # =====================================================
 
+    if c == "calcshare":
+        text = context.user_data.get("calc_share_text")
+        if not text:
+            await q.answer(
+                "النتيجة انتهت، احسب تاني من فضلك.", show_alert=True
+            )
+            return
+
+        await context.bot.send_message(chat_id=q.message.chat_id, text=text)
+        return
+
     if c == "calcgold":
         track_user(update)
 
@@ -6573,10 +6885,12 @@ async def buttons(update, context):
             last["last_calc_mode"], last["last_calc_karat"],
             float(last["last_calc_weight"]),
         )
+        if ok:
+            context.user_data["calc_share_text"] = build_share_text(text)
         await context.bot.send_message(
             chat_id=q.message.chat_id,
             text=text,
-            reply_markup=gold_screen_kb(update.effective_user.id),
+            reply_markup=calc_result_kb(update.effective_user.id),
         )
         return
 
@@ -6595,6 +6909,120 @@ async def buttons(update, context):
                 )],
                 [InlineKeyboardButton("⬅️ رجوع", callback_data="calcgold")],
             ]),
+        )
+        return
+
+    # ---- استبدال قطعة قديمة بجديدة ----
+
+    if c == "calctrade":
+        track_user(update)
+        context.user_data.clear()
+
+        await q.edit_message_text(
+            "🔄 استبدال قديم بجديد\n\n"
+            "الأول، اختار عيار القطعة القديمة اللي هتديها:",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "عيار 24", callback_data="calctradek:24"
+                )],
+                [InlineKeyboardButton(
+                    "عيار 21", callback_data="calctradek:21"
+                )],
+                [InlineKeyboardButton(
+                    "عيار 18", callback_data="calctradek:18"
+                )],
+                [InlineKeyboardButton("⬅️ رجوع", callback_data="gold")],
+            ]),
+        )
+        return
+
+    if c.startswith("calctradek:"):
+        karat = int(c.split(":")[1])
+        mode = "sell_bullion" if karat == 24 else "sell"
+
+        context.user_data.clear()
+        context.user_data.update(
+            state="trade_weight_input", trade_karat=karat, trade_mode=mode,
+        )
+        await q.edit_message_text(
+            "⚖️ اكتب وزن القطعة القديمة بالجرام.\nمثال: 5 أو 3.5"
+        )
+        return
+
+    # ---- بكام أقدر أشتري؟ (حاسبة الميزانية) ----
+
+    if c == "calcbudget":
+        track_user(update)
+        context.user_data.clear()
+
+        await q.edit_message_text(
+            "💵 بكام أقدر أشتري؟\n\nاختار العيار اللي عايز تحسب بيه:",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "عيار 24", callback_data="calcbudgetk:24"
+                )],
+                [InlineKeyboardButton(
+                    "عيار 21", callback_data="calcbudgetk:21"
+                )],
+                [InlineKeyboardButton(
+                    "عيار 18", callback_data="calcbudgetk:18"
+                )],
+                [InlineKeyboardButton("⬅️ رجوع", callback_data="gold")],
+            ]),
+        )
+        return
+
+    if c.startswith("calcbudgetk:"):
+        karat = int(c.split(":")[1])
+        context.user_data.clear()
+        context.user_data.update(
+            state="budget_amount_input", budget_karat=karat,
+        )
+        await q.edit_message_text(
+            "💰 اكتب الميزانية اللي معاك بالجنيه.\nمثال: 5000"
+        )
+        return
+
+    # ---- سعر آخر 7 أيام ----
+
+    if c == "pricehist7":
+        track_user(update)
+        st = gold_period_stats(7)
+
+        if not st:
+            await q.edit_message_text(
+                "📊 لسه مفيش بيانات كفاية لعرض آخر 7 أيام.",
+                reply_markup=gold_screen_kb(update.effective_user.id),
+            )
+            return
+
+        sign = "+" if st["change"] >= 0 else ""
+        arrow = "📈" if st["change"] > 0 else (
+            "📉" if st["change"] < 0 else "➡️"
+        )
+
+        await q.edit_message_text(
+            "📊 حركة سعر عيار 21 آخر 7 أيام\n\n"
+            f"أعلى سعر: {st['high']} جنيه\n"
+            f"أقل سعر: {st['low']} جنيه\n\n"
+            f"سعر بداية الفترة: {st['first']} جنيه\n"
+            f"السعر دلوقتي: {st['last']} جنيه\n\n"
+            f"{arrow} التغيّر: {sign}{st['change']} جنيه "
+            f"({sign}{st['pct']}%)",
+            reply_markup=gold_screen_kb(update.effective_user.id),
+        )
+        return
+
+    # ---- تذكير مناسبة ----
+
+    if c == "addoccasion":
+        track_user(update)
+        context.user_data.clear()
+        context.user_data["state"] = "occasion_label_input"
+
+        await q.edit_message_text(
+            "🎁 اكتب اسم المناسبة اللي عايز نفكّرك بيها.\n\n"
+            "مثال: عيد ميلاد ماما، خطوبة أختي"
         )
         return
 
@@ -6716,19 +7144,26 @@ async def buttons(update, context):
         total = context.user_data.get("calc_mc_total")
         context.user_data.clear()
 
+        final_text = (
+            f"العيار: {karat}\n"
+            f"الوزن: {weight} جرام\n"
+            f"💰 الإجمالي: {total} جنيه\n\n"
+            "⚠️ السعر ذهب صافي، مش شامل المصنعية."
+        ) if karat is not None else "✅ تمام."
+
         await q.edit_message_text(
-            (
-                f"✅ تمام، من غير مصنعية.\n\n"
-                f"العيار: {karat}\n"
-                f"الوزن: {weight} جرام\n"
-                f"💰 الإجمالي: {total} جنيه\n\n"
-                "⚠️ السعر ذهب صافي، مش شامل المصنعية."
-            ) if karat is not None else "✅ تمام.",
+            f"✅ تمام، من غير مصنعية.\n\n{final_text}"
+            if karat is not None else final_text,
         )
+
+        if karat is not None:
+            context.user_data["calc_share_text"] = build_share_text(
+                final_text
+            )
         await context.bot.send_message(
             chat_id=q.message.chat_id,
             text="اختار من القائمة 👇",
-            reply_markup=gold_screen_kb(update.effective_user.id),
+            reply_markup=calc_result_kb(update.effective_user.id),
         )
         return
 
@@ -6802,16 +7237,18 @@ async def buttons(update, context):
         _, p21c, _ = calc(p21)
         total = round(weight * p21c)
 
+        coin_text = (
+            f"🧮 نتيجة الحساب\n\n"
+            f"{label}\n"
+            f"سعر شراء الجرام: {p21c} جنيه\n\n"
+            f"💰 الإجمالي: {total} جنيه\n\n"
+            "⚠️ سعر العملة صافي، بدون أي خصم."
+        )
+        context.user_data["calc_share_text"] = build_share_text(coin_text)
         await context.bot.send_message(
             chat_id=q.message.chat_id,
-            text=(
-                f"🧮 نتيجة الحساب\n\n"
-                f"{label}\n"
-                f"سعر شراء الجرام: {p21c} جنيه\n\n"
-                f"💰 الإجمالي: {total} جنيه\n\n"
-                "⚠️ سعر العملة صافي، بدون أي خصم."
-            ),
-            reply_markup=gold_screen_kb(update.effective_user.id),
+            text=coin_text,
+            reply_markup=calc_result_kb(update.effective_user.id),
         )
         return
 
@@ -7301,6 +7738,9 @@ def main():
         app.job_queue.run_repeating(
             auto_notification_tick, interval=60, first=15,
             name="auto_notification_tick",
+        )
+        app.job_queue.run_repeating(
+            occasion_tick, interval=60, first=20, name="occasion_tick",
         )
         print("Auto-posting scheduler started (checks every 60s).", flush=True)
     else:
