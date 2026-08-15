@@ -3606,15 +3606,19 @@ async def text(update, context):
         if mode == "sell":
             discount = sell_discount_per_gram()
             per_gram = base - discount
+            price_label = "سعر شراء الجرام"
             note = (
                 f"⚠️ شامل خصم شراء المحل ({discount} جنيه/جرام). "
+                "هذه النسبه متغيره من محل لمحل ومن توقيت لتوقيت اخر. "
                 "السعر تقريبي وممكن يختلف بعد فحص القطعة في المحل."
             )
         elif mode == "sell_bullion":
             per_gram = base
+            price_label = "سعر شراء الجرام"
             note = "⚠️ سعر السبيكة صافي، بدون أي خصم."
         else:  # "buy"
             per_gram = base
+            price_label = "سعر الجرام"
             note = "⚠️ السعر ذهب صافي، مش شامل المصنعية."
 
         total = round(per_gram * weight)
@@ -3623,7 +3627,7 @@ async def text(update, context):
             "🧮 نتيجة الحساب\n\n"
             f"العيار: {karat}\n"
             f"الوزن: {weight} جرام\n"
-            f"سعر الجرام: {round(per_gram)} جنيه\n\n"
+            f"{price_label}: {round(per_gram)} جنيه\n\n"
             f"💰 الإجمالي: {total} جنيه\n\n"
             + note,
             reply_markup=gold_screen_kb(update.effective_user.id),
@@ -6187,7 +6191,7 @@ async def buttons(update, context):
             text=(
                 f"🧮 نتيجة الحساب\n\n"
                 f"{label}\n"
-                f"سعر الجرام: {p21c} جنيه\n\n"
+                f"سعر شراء الجرام: {p21c} جنيه\n\n"
                 f"💰 الإجمالي: {total} جنيه\n\n"
                 "⚠️ سعر العملة صافي، بدون أي خصم."
             ),
