@@ -192,6 +192,12 @@ def init_db():
                 "VARCHAR(20) NULL",
                 "ALTER TABLE Users ADD COLUMN subscribed_gold_whatsapp "
                 "TINYINT(1) NOT NULL DEFAULT 0",
+                "ALTER TABLE Users ADD COLUMN last_calc_mode "
+                "VARCHAR(20) NULL",
+                "ALTER TABLE Users ADD COLUMN last_calc_karat "
+                "TINYINT UNSIGNED NULL",
+                "ALTER TABLE Users ADD COLUMN last_calc_weight "
+                "DECIMAL(10,2) NULL",
             ):
                 try:
                     x.execute(q)
@@ -269,6 +275,18 @@ def init_db():
                     title VARCHAR(100) NOT NULL,
                     body TEXT NULL,
                     photo_id VARCHAR(255) NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
+            x.execute("""
+                CREATE TABLE IF NOT EXISTS ScheduledNotifications(
+                    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                    time_str VARCHAR(5) NOT NULL,
+                    label VARCHAR(50) NULL,
+                    body TEXT NOT NULL,
+                    enabled TINYINT(1) NOT NULL DEFAULT 1,
+                    last_run_date DATE NULL,
                     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
                 )
             """)
@@ -827,6 +845,34 @@ def set_whatsapp_subscription(telegram_id, phone_number, subscribed):
         c.close()
 
 
+def save_last_calc(telegram_id, mode, karat, weight):
+    """Remembers the customer's last "احسب دهبك" choice so next time
+    they open the calculator we can offer a one-tap repeat instead of
+    making them pick buy/sell → karat → type the weight again."""
+    c = db()
+    try:
+        with c.cursor() as x:
+            x.execute("""
+                UPDATE Users
+                SET last_calc_mode=%s, last_calc_karat=%s,
+                    last_calc_weight=%s
+                WHERE telegram_id=%s
+            """, (mode, karat, weight, telegram_id))
+    finally:
+        c.close()
+
+
+def get_last_calc(telegram_id):
+    row = one(
+        "SELECT last_calc_mode, last_calc_karat, last_calc_weight "
+        "FROM Users WHERE telegram_id=%s",
+        (telegram_id,),
+    )
+    if not row or not row.get("last_calc_mode"):
+        return None
+    return row
+
+
 def unsubscribe_whatsapp(telegram_id):
     c = db()
     try:
@@ -875,34 +921,38 @@ def whatsapp_notifications_enabled():
     return get_setting("wa_notifications_enabled", "0") == "1"
 
 
-def sell_discount_per_gram():
-    """
-    How much less per gram the shop pays when BUYING gold jewelry
-    back from a customer (i.e. what the customer sees when they
-    choose "هتبيع"). Admin-adjustable via the gold menu since this
-    margin changes over time / by shop policy — never hardcoded.
-    Doesn't apply to 24k bullion or 21k coins, which are bought back
-    at the plain per-gram price.
-    """
-    try:
-        return int(get_setting("sell_discount_per_gram", "100"))
-    except (TypeError, ValueError):
-        return 100
-
-
-def sell_discount_per_gram():
+def sell_discount_per_gram(karat):
     """
     How much per gram (in EGP) the shop deducts from the live gold
     price when quoting what it would PAY the customer to buy their
-    gold — as opposed to what the customer pays the shop, which is
-    the live price with no deduction. Admin-configurable (not a
-    hardcoded constant) because this margin shifts with the market
-    and isn't the same shop-to-shop.
+    gold jewelry back — as opposed to what the customer pays the
+    shop, which is the live price with no deduction. Tracked
+    separately per karat (21 vs 18) since the margin isn't
+    necessarily the same for both, and is admin-configurable (not a
+    hardcoded constant) because it shifts with the market and isn't
+    the same shop-to-shop. Doesn't apply to 24k bullion or 21k
+    coins, which are bought back at the plain per-gram price.
     """
     try:
-        return int(get_setting("sell_discount_per_gram", "100"))
+        return int(get_setting(f"sell_discount_{karat}", "100"))
     except (TypeError, ValueError):
         return 100
+
+
+def making_charge_per_gram():
+    """
+    Optional flat estimate (in EGP per gram) for "مصنعية" (making /
+    crafting charge) added on top of the raw gold value when a
+    customer is BUYING a piece — since the calculator only knows the
+    metal's value, not labor. Defaults to 0 (off) — the admin turns
+    it on by setting a value in the gold menu; the calculator then
+    shows both the plain gold-value total and an approximate
+    "with مصنعية" total side by side.
+    """
+    try:
+        return int(get_setting("making_charge_per_gram", "0"))
+    except (TypeError, ValueError):
+        return 0
 
 
 # =========================================================
@@ -1281,6 +1331,78 @@ def mark_scheduled_post_ran(sid, date_str):
 
 
 # =========================================================
+# SCHEDULED CUSTOM NOTIFICATIONS (daily, sent to subscribers)
+# =========================================================
+# Separate from ScheduledPosts (which posts the gold-price template
+# to Telegram/Facebook). These are free-text messages — e.g. Fajr,
+# opening, closing greetings — written once and auto-sent every day
+# at a fixed time to everyone subscribed to notifications.
+
+def scheduled_notifications():
+    return many(
+        "SELECT * FROM ScheduledNotifications ORDER BY time_str ASC"
+    )
+
+
+def scheduled_notification(nid):
+    return one(
+        "SELECT * FROM ScheduledNotifications WHERE id=%s", (nid,)
+    )
+
+
+def add_scheduled_notification(time_str, body, label=None):
+    c = db()
+    try:
+        with c.cursor() as x:
+            x.execute("""
+                INSERT INTO ScheduledNotifications(time_str,body,label)
+                VALUES(%s,%s,%s)
+            """, (time_str, body, label))
+            return x.lastrowid
+    finally:
+        c.close()
+
+
+def delete_scheduled_notification(nid):
+    c = db()
+    try:
+        with c.cursor() as x:
+            x.execute(
+                "DELETE FROM ScheduledNotifications WHERE id=%s", (nid,)
+            )
+            return bool(x.rowcount)
+    finally:
+        c.close()
+
+
+def toggle_scheduled_notification(nid):
+    c = db()
+    try:
+        with c.cursor() as x:
+            x.execute(
+                "UPDATE ScheduledNotifications SET enabled=1-enabled "
+                "WHERE id=%s",
+                (nid,),
+            )
+            return bool(x.rowcount)
+    finally:
+        c.close()
+
+
+def mark_scheduled_notification_ran(nid, date_str):
+    c = db()
+    try:
+        with c.cursor() as x:
+            x.execute(
+                "UPDATE ScheduledNotifications SET last_run_date=%s "
+                "WHERE id=%s",
+                (date_str, nid),
+            )
+    finally:
+        c.close()
+
+
+# =========================================================
 # SAVED (REUSABLE) NOTIFICATIONS
 # =========================================================
 
@@ -1457,6 +1579,69 @@ def calc(p):
         round(p),
         round(p * 6 / 7),
     )
+
+
+def compute_calc_result(mode, karat, weight):
+    """
+    Shared math + message-formatting for the "🧮 احسب دهبك" calculator
+    (buy / sell jewelry / sell bullion). Returns (ok, text, total) so
+    every entry point — typing a weight, repeating the last calc, or
+    comparing two pieces — produces an identical result and message.
+    """
+    p21 = latest()
+    if not p21:
+        return False, "💎 لم يتم تحديث أسعار الذهب حتى الآن.", None
+
+    p24, p21c, p18 = calc(p21)
+    per_gram_map = {24: p24, 21: p21c, 18: p18}
+    base = per_gram_map.get(karat)
+    if base is None:
+        return False, "❌ حصل خطأ، جرب تاني.", None
+
+    extra_line = ""
+    if mode == "sell":
+        discount = sell_discount_per_gram(karat)
+        per_gram = base - discount
+        price_label = "سعر شراء الجرام"
+        total_label = "الإجمالي"
+        note = (
+            f"⚠️ شامل خصم شراء المحل ({discount} جنيه/جرام). "
+            "هذه النسبه متغيره من محل لمحل ومن توقيت لتوقيت اخر. "
+            "السعر تقريبي وممكن يختلف بعد فحص القطعة في المحل."
+        )
+    elif mode == "sell_bullion":
+        per_gram = base
+        price_label = "سعر شراء الجرام"
+        total_label = "الإجمالي"
+        note = "⚠️ سعر السبيكة صافي، بدون أي خصم."
+    else:  # "buy"
+        per_gram = base
+        price_label = "سعر الجرام"
+        note = "⚠️ السعر ذهب صافي، مش شامل المصنعية."
+
+        mc = making_charge_per_gram()
+        if mc > 0:
+            total_label = "الإجمالي (ذهب فقط)"
+            total_with_charge = round((per_gram + mc) * weight)
+            extra_line = (
+                f"💰 الإجمالي التقريبي (شامل مصنعية تقديرية "
+                f"{mc} ج/جرام): {total_with_charge} جنيه\n\n"
+            )
+        else:
+            total_label = "الإجمالي"
+
+    total = round(per_gram * weight)
+
+    text = (
+        "🧮 نتيجة الحساب\n\n"
+        f"العيار: {karat}\n"
+        f"الوزن: {weight} جرام\n"
+        f"{price_label}: {round(per_gram)} جنيه\n\n"
+        f"💰 {total_label}: {total} جنيه\n\n"
+        + extra_line
+        + note
+    )
+    return True, text, total
 
 
 def today():
@@ -1639,7 +1824,41 @@ def notif_menu():
             "💾 رسائل جاهزة (احفظها وابعتها وقت ما تحب)",
             callback_data="savedlist"
         )],
+        [InlineKeyboardButton(
+            "⏰ إشعارات مجدولة يومية (فجر / صبح / مسا...)",
+            callback_data="schedlist"
+        )],
         [InlineKeyboardButton("👑 لوحة التحكم", callback_data="admin")],
+    ])
+
+
+def sched_notif_list_kb():
+    rows = scheduled_notifications()
+    k = [
+        [InlineKeyboardButton(
+            f"{'🟢' if r['enabled'] else '🔴'} {r['time_str']} — "
+            f"{(r.get('label') or r['body'])[:25]}",
+            callback_data=f"schedopen:{r['id']}",
+        )]
+        for r in rows
+    ]
+    k.append(
+        [InlineKeyboardButton("➕ إضافة إشعار مجدول", callback_data="schedadd")]
+    )
+    k.append([InlineKeyboardButton("⬅️ رجوع", callback_data="notifmenu")])
+    return InlineKeyboardMarkup(k)
+
+
+def sched_notif_item_kb(nid):
+    n = scheduled_notification(nid)
+    enabled = bool(n and n.get("enabled"))
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            "🔴 إيقاف" if enabled else "🟢 تفعيل",
+            callback_data=f"schedtoggle:{nid}",
+        )],
+        [InlineKeyboardButton("🗑 حذف", callback_data=f"scheddel:{nid}")],
+        [InlineKeyboardButton("⬅️ رجوع", callback_data="schedlist")],
     ])
 
 
@@ -1882,8 +2101,16 @@ def gold_menu():
             callback_data="togglewa",
         )],
         [InlineKeyboardButton(
-            f"💰 خصم الشراء منك: {sell_discount_per_gram()} ج/جرام",
-            callback_data="setselldiscount",
+            f"💰 خصم شراء عيار 21: {sell_discount_per_gram(21)} ج/جرام",
+            callback_data="setselldiscount:21",
+        )],
+        [InlineKeyboardButton(
+            f"💰 خصم شراء عيار 18: {sell_discount_per_gram(18)} ج/جرام",
+            callback_data="setselldiscount:18",
+        )],
+        [InlineKeyboardButton(
+            f"🛠️ مصنعية تقريبية: {making_charge_per_gram()} ج/جرام",
+            callback_data="setmakingcharge",
         )],
         [InlineKeyboardButton("⬅️ لوحة التحكم", callback_data="admin")],
     ])
@@ -2026,6 +2253,46 @@ async def auto_post_tick(context):
             mark_scheduled_post_ran(sp["id"], today_str)
     except Exception as e:
         print("Auto Post Tick Error:", repr(e), flush=True)
+
+
+async def auto_notification_tick(context):
+    """Runs every minute via JobQueue. Fires any due scheduled custom
+    notifications (Fajr / opening / closing greetings, etc.) to every
+    subscriber — same due-time/duplicate-guard pattern as
+    auto_post_tick, but sends free text instead of the price
+    template, and to subscribers instead of Telegram/Facebook."""
+    try:
+        now = datetime.now(TZ)
+        hhmm = now.strftime("%H:%M")
+        today_str = now.strftime("%Y-%m-%d")
+
+        for sn in scheduled_notifications():
+            if not sn.get("enabled"):
+                continue
+            if sn.get("time_str") != hhmm:
+                continue
+
+            last_run = sn.get("last_run_date")
+            last_run_str = (
+                last_run.strftime("%Y-%m-%d")
+                if hasattr(last_run, "strftime") else last_run
+            )
+            if last_run_str == today_str:
+                continue
+
+            sent, failed = await broadcast_custom_notification(
+                context, ADMIN_ID, sn.get("body") or ""
+            )
+
+            log_action(
+                ADMIN_ID, "AUTO_NOTIFICATION_SENT",
+                object_type="scheduled_notification", object_id=sn["id"],
+                new_value=f"sent={sent} failed={failed}",
+            )
+
+            mark_scheduled_notification_ran(sn["id"], today_str)
+    except Exception as e:
+        print("Auto Notification Tick Error:", repr(e), flush=True)
 
 
 async def broadcast_gold_update(context, new_price):
@@ -3562,15 +3829,48 @@ async def text(update, context):
             )
             return
 
-        set_setting("sell_discount_per_gram", str(new_discount))
+        karat = context.user_data.get("discount_karat", 21)
+        set_setting(f"sell_discount_{karat}", str(new_discount))
         log_action(
             update.effective_user.id, "ADMIN_CHANGED_SELL_DISCOUNT",
-            new_value=str(new_discount),
+            new_value=f"karat={karat} discount={new_discount}",
         )
         context.user_data.clear()
 
         await update.message.reply_text(
-            f"✅ تم تحديث خصم الشراء منك إلى {new_discount} جنيه/جرام.",
+            f"✅ تم تحديث خصم الشراء لعيار {karat} إلى "
+            f"{new_discount} جنيه/جرام.",
+            reply_markup=gold_menu(),
+        )
+        return
+
+    if s == "making_charge_input":
+        if not is_admin(update):
+            context.user_data.clear()
+            await update.message.reply_text("❌ غير مسموح.")
+            return
+
+        try:
+            new_charge = int(float(t))
+            if new_charge < 0:
+                raise ValueError
+        except Exception:
+            await update.message.reply_text(
+                "❌ اكتب رقم صحيح (بالجنيه)، مثال: 50 أو 0 للإيقاف"
+            )
+            return
+
+        set_setting("making_charge_per_gram", str(new_charge))
+        log_action(
+            update.effective_user.id, "ADMIN_CHANGED_MAKING_CHARGE",
+            new_value=str(new_charge),
+        )
+        context.user_data.clear()
+
+        await update.message.reply_text(
+            f"✅ تم تحديث المصنعية التقريبية إلى {new_charge} جنيه/جرام."
+            if new_charge else
+            "✅ تم إيقاف المصنعية التقريبية.",
             reply_markup=gold_menu(),
         )
         return
@@ -3586,54 +3886,64 @@ async def text(update, context):
             )
             return
 
-        p21 = latest()
-        if not p21:
-            context.user_data.clear()
-            await update.message.reply_text(
-                "💎 لم يتم تحديث أسعار الذهب حتى الآن."
-            )
-            return
-
-        p24, p21c, p18 = calc(p21)
-        per_gram_map = {24: p24, 21: p21c, 18: p18}
-
         mode = context.user_data.get("calc_mode")
         karat = context.user_data.get("calc_karat")
-        base = per_gram_map.get(karat)
+        compare_active = context.user_data.get("calc_compare_active")
+        compare_first = context.user_data.get("calc_compare_first")
         context.user_data.clear()
 
-        if base is None:
-            await update.message.reply_text("❌ حصل خطأ، جرب تاني.")
+        ok, text, total = compute_calc_result(mode, karat, weight)
+        if not ok:
+            await update.message.reply_text(text)
             return
 
-        if mode == "sell":
-            discount = sell_discount_per_gram()
-            per_gram = base - discount
-            price_label = "سعر شراء الجرام"
-            note = (
-                f"⚠️ شامل خصم شراء المحل ({discount} جنيه/جرام). "
-                "هذه النسبه متغيره من محل لمحل ومن توقيت لتوقيت اخر. "
-                "السعر تقريبي وممكن يختلف بعد فحص القطعة في المحل."
+        # "مقارنة سريعة" step 1: this was the FIRST piece — stash its
+        # result and ask for the second piece's karat instead of
+        # finalizing anything yet.
+        if compare_active and not compare_first:
+            context.user_data["calc_compare_active"] = True
+            context.user_data["calc_compare_first"] = {
+                "mode": mode, "karat": karat,
+                "weight": weight, "total": total,
+            }
+            await update.message.reply_text(
+                f"✅ سجلت القطعة الأولى: عيار {karat}، {weight} جرام "
+                f"→ {total} جنيه.\n\nدلوقتي اختار عيار القطعة التانية:",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(
+                        "عيار 24", callback_data=f"calccmpk2:{mode}:24"
+                    )],
+                    [InlineKeyboardButton(
+                        "عيار 21", callback_data=f"calccmpk2:{mode}:21"
+                    )],
+                    [InlineKeyboardButton(
+                        "عيار 18", callback_data=f"calccmpk2:{mode}:18"
+                    )],
+                ]),
             )
-        elif mode == "sell_bullion":
-            per_gram = base
-            price_label = "سعر شراء الجرام"
-            note = "⚠️ سعر السبيكة صافي، بدون أي خصم."
-        else:  # "buy"
-            per_gram = base
-            price_label = "سعر الجرام"
-            note = "⚠️ السعر ذهب صافي، مش شامل المصنعية."
+            return
 
-        total = round(per_gram * weight)
+        save_last_calc(update.effective_user.id, mode, karat, weight)
+
+        # مقارنة سريعة step 2: show the difference vs the first piece
+        # instead of just the plain result.
+        if compare_first:
+            diff = total - compare_first["total"]
+            sign = "+" if diff >= 0 else ""
+            await update.message.reply_text(
+                "⚖️ مقارنة القطعتين\n\n"
+                f"القطعة الأولى: عيار {compare_first['karat']}، "
+                f"{compare_first['weight']} جرام → "
+                f"{compare_first['total']} جنيه\n"
+                f"القطعة التانية: عيار {karat}، {weight} جرام → "
+                f"{total} جنيه\n\n"
+                f"💰 الفرق: {sign}{diff} جنيه",
+                reply_markup=gold_screen_kb(update.effective_user.id),
+            )
+            return
 
         await update.message.reply_text(
-            "🧮 نتيجة الحساب\n\n"
-            f"العيار: {karat}\n"
-            f"الوزن: {weight} جرام\n"
-            f"{price_label}: {round(per_gram)} جنيه\n\n"
-            f"💰 الإجمالي: {total} جنيه\n\n"
-            + note,
-            reply_markup=gold_screen_kb(update.effective_user.id),
+            text, reply_markup=gold_screen_kb(update.effective_user.id)
         )
         return
 
@@ -4092,6 +4402,54 @@ async def text(update, context):
         )
         return
 
+    if s == "sched_time_input":
+        if not is_admin(update):
+            context.user_data.clear()
+            await update.message.reply_text("❌ غير مسموح.")
+            return
+
+        if not re.match(r"^([01]\d|2[0-3]):([0-5]\d)$", t):
+            await update.message.reply_text(
+                "❌ الصيغة غلط. اكتب الموعد بصيغة HH:MM.\nمثال: 05:00"
+            )
+            return
+
+        context.user_data["sched_time"] = t
+        context.user_data["state"] = "sched_body_input"
+
+        await update.message.reply_text(
+            "✍️ دلوقتي اكتب نص الإشعار اللي هيتبعت تلقائي كل يوم "
+            f"الساعة {t}."
+        )
+        return
+
+    if s == "sched_body_input":
+        if not is_admin(update):
+            context.user_data.clear()
+            await update.message.reply_text("❌ غير مسموح.")
+            return
+
+        if not t.strip():
+            await update.message.reply_text("❌ اكتب نص الإشعار.")
+            return
+
+        time_str = context.user_data.get("sched_time")
+        context.user_data.clear()
+
+        nid = add_scheduled_notification(time_str, t.strip())
+        log_action(
+            update.effective_user.id, "ADMIN_ADDED_SCHEDULED_NOTIF",
+            new_value=t.strip()[:200],
+            object_type="scheduled_notification", object_id=nid,
+        )
+
+        await update.message.reply_text(
+            f"✅ تم جدولة الإشعار — هيتبعت تلقائي كل يوم الساعة "
+            f"{time_str} لكل المشتركين.",
+            reply_markup=sched_notif_list_kb(),
+        )
+        return
+
     if s == "sched_time":
         if not is_admin(update):
             context.user_data.clear()
@@ -4208,6 +4566,105 @@ async def buttons(update, context):
             "📢 الإشعارات للمشتركين\n\n"
             "اختار النوع:",
             reply_markup=notif_menu(),
+        )
+        return
+
+    if c == "schedlist":
+        if not is_admin(update):
+            await q.answer("❌ غير مسموح.", show_alert=True)
+            return
+
+        rows = scheduled_notifications()
+        await q.edit_message_text(
+            "⏰ الإشعارات المجدولة اليومية\n\n"
+            + (
+                "بتتبعت تلقائي كل يوم في ميعادها لكل المشتركين، "
+                "من غير ما تكتبها كل مرة."
+                if rows else
+                "لسه معملتش أي إشعار مجدول. دوس (➕) عشان تضيف واحد "
+                "(زي إشعار الفجر أو الصبح أو آخر اليوم)."
+            ),
+            reply_markup=sched_notif_list_kb(),
+        )
+        return
+
+    if c == "schedadd":
+        if not is_admin(update):
+            await q.answer("❌ غير مسموح.", show_alert=True)
+            return
+
+        context.user_data.clear()
+        context.user_data["state"] = "sched_time_input"
+
+        await q.edit_message_text(
+            "⏰ في أي ساعة يتبعت الإشعار كل يوم؟\n\n"
+            "اكتب الوقت بصيغة 24 ساعة (HH:MM)\n"
+            "مثال: 05:00 لأذان الفجر، أو 21:00 لآخر اليوم"
+        )
+        return
+
+    if c.startswith("schedopen:"):
+        if not is_admin(update):
+            await q.answer("❌ غير مسموح.", show_alert=True)
+            return
+
+        nid = int(c.split(":")[1])
+        n = scheduled_notification(nid)
+
+        if not n:
+            await q.edit_message_text(
+                "❌ الإشعار ده مش موجود.", reply_markup=sched_notif_list_kb()
+            )
+            return
+
+        status = "🟢 مفعّل" if n.get("enabled") else "🔴 متوقف"
+        await q.edit_message_text(
+            f"⏰ الميعاد: {n['time_str']}\n"
+            f"الحالة: {status}\n\n"
+            f"النص:\n{n['body']}",
+            reply_markup=sched_notif_item_kb(nid),
+        )
+        return
+
+    if c.startswith("schedtoggle:"):
+        if not is_admin(update):
+            await q.answer("❌ غير مسموح.", show_alert=True)
+            return
+
+        nid = int(c.split(":")[1])
+        toggle_scheduled_notification(nid)
+        log_action(
+            update.effective_user.id, "ADMIN_TOGGLED_SCHEDULED_NOTIF",
+            object_type="scheduled_notification", object_id=nid,
+        )
+
+        n = scheduled_notification(nid)
+        status = "🟢 مفعّل" if n and n.get("enabled") else "🔴 متوقف"
+        await q.edit_message_text(
+            f"⏰ الميعاد: {n['time_str']}\n"
+            f"الحالة: {status}\n\n"
+            f"النص:\n{n['body']}",
+            reply_markup=sched_notif_item_kb(nid),
+        )
+        return
+
+    if c.startswith("scheddel:"):
+        if not is_admin(update):
+            await q.answer("❌ غير مسموح.", show_alert=True)
+            return
+
+        nid = int(c.split(":")[1])
+        ok = delete_scheduled_notification(nid)
+        log_action(
+            update.effective_user.id, "ADMIN_DELETED_SCHEDULED_NOTIF",
+            object_type="scheduled_notification", object_id=nid,
+            status="success" if ok else "failed",
+        )
+
+        rows = scheduled_notifications()
+        await q.edit_message_text(
+            "🗑 تم حذف الإشعار المجدول." if ok else "❌ مقدرتش أحذفه.",
+            reply_markup=sched_notif_list_kb(),
         )
         return
 
@@ -4685,18 +5142,38 @@ async def buttons(update, context):
             )
         return
 
-    if c == "setselldiscount":
+    if c.startswith("setselldiscount:"):
+        if not is_admin(update):
+            return
+
+        karat = int(c.split(":")[1])
+        context.user_data.clear()
+        context.user_data.update(
+            state="sell_discount_input", discount_karat=karat,
+        )
+
+        await q.edit_message_text(
+            f"💰 اكتب قيمة الخصم الجديدة (بالجنيه للجرام) اللي "
+            f"المحل بياخده لما يشتري ذهب عيار {karat} مشغولات من "
+            "العميل.\n\n"
+            f"القيمة الحالية: {sell_discount_per_gram(karat)} جنيه/جرام\n"
+            "مثال: 100"
+        )
+        return
+
+    if c == "setmakingcharge":
         if not is_admin(update):
             return
 
         context.user_data.clear()
-        context.user_data["state"] = "sell_discount_input"
+        context.user_data["state"] = "making_charge_input"
 
         await q.edit_message_text(
-            "💰 اكتب قيمة الخصم الجديدة (بالجنيه للجرام) اللي "
-            "المحل بياخده لما يشتري ذهب مشغولات من العميل.\n\n"
-            f"القيمة الحالية: {sell_discount_per_gram()} جنيه/جرام\n"
-            "مثال: 100"
+            "🛠️ اكتب قيمة المصنعية التقريبية (بالجنيه للجرام) "
+            "اللي هتتضاف على سعر الذهب في حالة \"هتشتري\".\n\n"
+            f"القيمة الحالية: {making_charge_per_gram()} جنيه/جرام\n"
+            "اكتب 0 لو عايز توقفها خالص.\n"
+            "مثال: 50"
         )
         return
 
@@ -6067,8 +6544,61 @@ async def buttons(update, context):
 
     if c == "calcgold":
         track_user(update)
+
+        last = get_last_calc(update.effective_user.id)
+        k = []
+        if last:
+            mode_label = {
+                "buy": "شراء", "sell": "بيع", "sell_bullion": "بيع سبيكة",
+            }.get(last["last_calc_mode"], last["last_calc_mode"])
+            k.append([InlineKeyboardButton(
+                f"🔁 كرر آخر حسبة ({mode_label} - عيار "
+                f"{last['last_calc_karat']} - {last['last_calc_weight']} جم)",
+                callback_data="calcrepeat",
+            )])
+
+        k += [
+            [InlineKeyboardButton(
+                "🛒 هتشتري", callback_data="calcmode:buy"
+            )],
+            [InlineKeyboardButton(
+                "💰 هتبيع", callback_data="calcmode:sell"
+            )],
+            [InlineKeyboardButton(
+                "⚖️ قارن بين قطعتين", callback_data="calccompare"
+            )],
+            [InlineKeyboardButton("⬅️ رجوع", callback_data="gold")],
+        ]
+
         await q.edit_message_text(
             "🧮 احسب دهبك\n\nهتشتري ولا هتبيع؟",
+            reply_markup=InlineKeyboardMarkup(k),
+        )
+        return
+
+    if c == "calcrepeat":
+        last = get_last_calc(update.effective_user.id)
+        if not last:
+            await q.answer("مفيش حسبة سابقة.", show_alert=True)
+            return
+
+        ok, text, total = compute_calc_result(
+            last["last_calc_mode"], last["last_calc_karat"],
+            float(last["last_calc_weight"]),
+        )
+        await context.bot.send_message(
+            chat_id=q.message.chat_id,
+            text=text,
+            reply_markup=gold_screen_kb(update.effective_user.id),
+        )
+        return
+
+    if c == "calccompare":
+        context.user_data.clear()
+        context.user_data["calc_compare_active"] = True
+
+        await q.edit_message_text(
+            "⚖️ قارن بين قطعتين\n\nالقطعتين شراء ولا بيع؟",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton(
                     "🛒 هتشتري", callback_data="calcmode:buy"
@@ -6076,7 +6606,7 @@ async def buttons(update, context):
                 [InlineKeyboardButton(
                     "💰 هتبيع", callback_data="calcmode:sell"
                 )],
-                [InlineKeyboardButton("⬅️ رجوع", callback_data="gold")],
+                [InlineKeyboardButton("⬅️ رجوع", callback_data="calcgold")],
             ]),
         )
         return
@@ -6105,6 +6635,8 @@ async def buttons(update, context):
     if c.startswith("calck:"):
         _, mode, karat_s = c.split(":")
         karat = int(karat_s)
+        compare_active = context.user_data.get("calc_compare_active")
+        compare_first = context.user_data.get("calc_compare_first")
 
         # Selling 24k gold means it's bullion — bought back at the
         # plain per-gram price, no discount (same math as buying).
@@ -6114,6 +6646,10 @@ async def buttons(update, context):
                 state="calc_weight_input",
                 calc_mode="sell_bullion", calc_karat=24,
             )
+            if compare_active:
+                context.user_data["calc_compare_active"] = True
+                if compare_first:
+                    context.user_data["calc_compare_first"] = compare_first
             await q.edit_message_text(
                 "⚖️ اكتب وزن السبيكة بالجرام.\nمثال: 5 أو 3.5"
             )
@@ -6143,18 +6679,47 @@ async def buttons(update, context):
         context.user_data.update(
             state="calc_weight_input", calc_mode=mode, calc_karat=karat,
         )
+        if compare_active:
+            context.user_data["calc_compare_active"] = True
+            if compare_first:
+                context.user_data["calc_compare_first"] = compare_first
         await q.edit_message_text(
             "⚖️ اكتب وزن القطعة بالجرام.\nمثال: 5 أو 3.5"
         )
         return
 
     if c == "calc21type:jewelry":
+        compare_active = context.user_data.get("calc_compare_active")
+        compare_first = context.user_data.get("calc_compare_first")
         context.user_data.clear()
         context.user_data.update(
             state="calc_weight_input", calc_mode="sell", calc_karat=21,
         )
+        if compare_active:
+            context.user_data["calc_compare_active"] = True
+            if compare_first:
+                context.user_data["calc_compare_first"] = compare_first
         await q.edit_message_text(
             "⚖️ اكتب وزن القطعة بالجرام.\nمثال: 5 أو 3.5"
+        )
+        return
+
+    if c.startswith("calccmpk2:"):
+        _, mode, karat_s = c.split(":")
+        karat = int(karat_s)
+        compare_first = context.user_data.get("calc_compare_first")
+
+        if not compare_first:
+            await q.answer("حصل خطأ، ابدأ المقارنة من الأول.", show_alert=True)
+            return
+
+        context.user_data.clear()
+        context.user_data.update(
+            state="calc_weight_input", calc_mode=mode, calc_karat=karat,
+            calc_compare_active=True, calc_compare_first=compare_first,
+        )
+        await q.edit_message_text(
+            "⚖️ اكتب وزن القطعة التانية بالجرام.\nمثال: 5 أو 3.5"
         )
         return
 
@@ -6684,6 +7249,10 @@ def main():
     if app.job_queue is not None:
         app.job_queue.run_repeating(
             auto_post_tick, interval=60, first=10, name="auto_post_tick"
+        )
+        app.job_queue.run_repeating(
+            auto_notification_tick, interval=60, first=15,
+            name="auto_notification_tick",
         )
         print("Auto-posting scheduler started (checks every 60s).", flush=True)
     else:
