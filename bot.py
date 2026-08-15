@@ -875,6 +875,36 @@ def whatsapp_notifications_enabled():
     return get_setting("wa_notifications_enabled", "0") == "1"
 
 
+def sell_discount_per_gram():
+    """
+    How much less per gram the shop pays when BUYING gold jewelry
+    back from a customer (i.e. what the customer sees when they
+    choose "هتبيع"). Admin-adjustable via the gold menu since this
+    margin changes over time / by shop policy — never hardcoded.
+    Doesn't apply to 24k bullion or 21k coins, which are bought back
+    at the plain per-gram price.
+    """
+    try:
+        return int(get_setting("sell_discount_per_gram", "100"))
+    except (TypeError, ValueError):
+        return 100
+
+
+def sell_discount_per_gram():
+    """
+    How much per gram (in EGP) the shop deducts from the live gold
+    price when quoting what it would PAY the customer to buy their
+    gold — as opposed to what the customer pays the shop, which is
+    the live price with no deduction. Admin-configurable (not a
+    hardcoded constant) because this margin shifts with the market
+    and isn't the same shop-to-shop.
+    """
+    try:
+        return int(get_setting("sell_discount_per_gram", "100"))
+    except (TypeError, ValueError):
+        return 100
+
+
 # =========================================================
 # LOGS
 # =========================================================
@@ -1536,6 +1566,7 @@ def gold_screen_kb(telegram_id):
     wa_subscribed = is_whatsapp_subscribed(telegram_id)
 
     return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🧮 احسب دهبك", callback_data="calcgold")],
         [InlineKeyboardButton(
             "🔕 إلغاء الاشتراك (واتساب)"
             if wa_subscribed else
@@ -1849,6 +1880,10 @@ def gold_menu():
             "🔴 إيقاف الاشتراك في واتساب" if wa_on
             else "🟢 تفعيل الاشتراك في واتساب",
             callback_data="togglewa",
+        )],
+        [InlineKeyboardButton(
+            f"💰 خصم الشراء منك: {sell_discount_per_gram()} ج/جرام",
+            callback_data="setselldiscount",
         )],
         [InlineKeyboardButton("⬅️ لوحة التحكم", callback_data="admin")],
     ])
@@ -3508,6 +3543,93 @@ async def text(update, context):
         )
         return
 
+    if s == "sell_discount_input":
+        if not is_admin(update):
+            context.user_data.clear()
+            await update.message.reply_text("❌ غير مسموح.")
+            return
+
+        try:
+            new_discount = int(float(t))
+            if new_discount < 0:
+                raise ValueError
+        except Exception:
+            await update.message.reply_text(
+                "❌ اكتب رقم صحيح (بالجنيه)، مثال: 100"
+            )
+            return
+
+        set_setting("sell_discount_per_gram", str(new_discount))
+        log_action(
+            update.effective_user.id, "ADMIN_CHANGED_SELL_DISCOUNT",
+            new_value=str(new_discount),
+        )
+        context.user_data.clear()
+
+        await update.message.reply_text(
+            f"✅ تم تحديث خصم الشراء منك إلى {new_discount} جنيه/جرام.",
+            reply_markup=gold_menu(),
+        )
+        return
+
+    if s == "calc_weight_input":
+        try:
+            weight = float(t.replace(",", "."))
+            if weight <= 0:
+                raise ValueError
+        except Exception:
+            await update.message.reply_text(
+                "❌ اكتب وزن صحيح بالجرام، مثال: 5 أو 3.5"
+            )
+            return
+
+        p21 = latest()
+        if not p21:
+            context.user_data.clear()
+            await update.message.reply_text(
+                "💎 لم يتم تحديث أسعار الذهب حتى الآن."
+            )
+            return
+
+        p24, p21c, p18 = calc(p21)
+        per_gram_map = {24: p24, 21: p21c, 18: p18}
+
+        mode = context.user_data.get("calc_mode")
+        karat = context.user_data.get("calc_karat")
+        base = per_gram_map.get(karat)
+        context.user_data.clear()
+
+        if base is None:
+            await update.message.reply_text("❌ حصل خطأ، جرب تاني.")
+            return
+
+        if mode == "sell":
+            discount = sell_discount_per_gram()
+            per_gram = base - discount
+            note = (
+                f"⚠️ شامل خصم شراء المحل ({discount} جنيه/جرام). "
+                "السعر تقريبي وممكن يختلف بعد فحص القطعة في المحل."
+            )
+        elif mode == "sell_bullion":
+            per_gram = base
+            note = "⚠️ سعر السبيكة صافي، بدون أي خصم."
+        else:  # "buy"
+            per_gram = base
+            note = "⚠️ السعر ذهب صافي، مش شامل المصنعية."
+
+        total = round(per_gram * weight)
+
+        await update.message.reply_text(
+            "🧮 نتيجة الحساب\n\n"
+            f"العيار: {karat}\n"
+            f"الوزن: {weight} جرام\n"
+            f"سعر الجرام: {round(per_gram)} جنيه\n\n"
+            f"💰 الإجمالي: {total} جنيه\n\n"
+            + note,
+            reply_markup=gold_screen_kb(update.effective_user.id),
+        )
+        return
+
     if s == "gold":
         if not is_admin(update):
             context.user_data.clear()
@@ -4554,6 +4676,21 @@ async def buttons(update, context):
                 "أي عميل هيحاول يشترك هيتقاله إن الخدمة قريبًا.",
                 reply_markup=gold_menu(),
             )
+        return
+
+    if c == "setselldiscount":
+        if not is_admin(update):
+            return
+
+        context.user_data.clear()
+        context.user_data["state"] = "sell_discount_input"
+
+        await q.edit_message_text(
+            "💰 اكتب قيمة الخصم الجديدة (بالجنيه للجرام) اللي "
+            "المحل بياخده لما يشتري ذهب مشغولات من العميل.\n\n"
+            f"القيمة الحالية: {sell_discount_per_gram()} جنيه/جرام\n"
+            "مثال: 100"
+        )
         return
 
     if c == "goldtoday":
@@ -5913,6 +6050,147 @@ async def buttons(update, context):
             chat_id=q.message.chat_id,
             text=price_text(p) if p
             else "💎 لم يتم تحديث أسعار الذهب حتى الآن.",
+            reply_markup=gold_screen_kb(update.effective_user.id),
+        )
+        return
+
+    # =====================================================
+    # "احسب دهبك" — customer-facing buy/sell price calculator
+    # =====================================================
+
+    if c == "calcgold":
+        track_user(update)
+        await q.edit_message_text(
+            "🧮 احسب دهبك\n\nهتشتري ولا هتبيع؟",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "🛒 هتشتري", callback_data="calcmode:buy"
+                )],
+                [InlineKeyboardButton(
+                    "💰 هتبيع", callback_data="calcmode:sell"
+                )],
+                [InlineKeyboardButton("⬅️ رجوع", callback_data="gold")],
+            ]),
+        )
+        return
+
+    if c.startswith("calcmode:"):
+        mode = c.split(":")[1]  # "buy" | "sell"
+        back_cb = "calcgold"
+
+        await q.edit_message_text(
+            "🧮 اختار العيار:",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "عيار 24", callback_data=f"calck:{mode}:24"
+                )],
+                [InlineKeyboardButton(
+                    "عيار 21", callback_data=f"calck:{mode}:21"
+                )],
+                [InlineKeyboardButton(
+                    "عيار 18", callback_data=f"calck:{mode}:18"
+                )],
+                [InlineKeyboardButton("⬅️ رجوع", callback_data=back_cb)],
+            ]),
+        )
+        return
+
+    if c.startswith("calck:"):
+        _, mode, karat_s = c.split(":")
+        karat = int(karat_s)
+
+        # Selling 24k gold means it's bullion — bought back at the
+        # plain per-gram price, no discount (same math as buying).
+        if mode == "sell" and karat == 24:
+            context.user_data.clear()
+            context.user_data.update(
+                state="calc_weight_input",
+                calc_mode="sell_bullion", calc_karat=24,
+            )
+            await q.edit_message_text(
+                "⚖️ اكتب وزن السبيكة بالجرام.\nمثال: 5 أو 3.5"
+            )
+            return
+
+        # Selling 21k splits into "coins" (fixed, known weights —
+        # bought back at the plain price) vs "مشغولات" (jewelry,
+        # weighed and bought back at a discount).
+        if mode == "sell" and karat == 21:
+            await q.edit_message_text(
+                "💰 هتبيع عملات ولا مشغولات؟",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(
+                        "🪙 عملات", callback_data="calc21type:coins"
+                    )],
+                    [InlineKeyboardButton(
+                        "💍 مشغولات", callback_data="calc21type:jewelry"
+                    )],
+                    [InlineKeyboardButton(
+                        "⬅️ رجوع", callback_data="calcmode:sell"
+                    )],
+                ]),
+            )
+            return
+
+        context.user_data.clear()
+        context.user_data.update(
+            state="calc_weight_input", calc_mode=mode, calc_karat=karat,
+        )
+        await q.edit_message_text(
+            "⚖️ اكتب وزن القطعة بالجرام.\nمثال: 5 أو 3.5"
+        )
+        return
+
+    if c == "calc21type:jewelry":
+        context.user_data.clear()
+        context.user_data.update(
+            state="calc_weight_input", calc_mode="sell", calc_karat=21,
+        )
+        await q.edit_message_text(
+            "⚖️ اكتب وزن القطعة بالجرام.\nمثال: 5 أو 3.5"
+        )
+        return
+
+    if c == "calc21type:coins":
+        k = [
+            [InlineKeyboardButton(label, callback_data=f"calccoin:{i}")]
+            for i, (label, _) in enumerate(GOLD_COINS)
+        ]
+        k.append(
+            [InlineKeyboardButton("⬅️ رجوع", callback_data="calck:sell:21")]
+        )
+        await q.edit_message_text(
+            "🪙 اختار العملة:", reply_markup=InlineKeyboardMarkup(k)
+        )
+        return
+
+    if c.startswith("calccoin:"):
+        idx = int(c.split(":")[1])
+        if idx < 0 or idx >= len(GOLD_COINS):
+            return
+
+        label, weight = GOLD_COINS[idx]
+        p21 = latest()
+
+        if not p21:
+            await context.bot.send_message(
+                chat_id=q.message.chat_id,
+                text="💎 لم يتم تحديث أسعار الذهب حتى الآن.",
+            )
+            return
+
+        _, p21c, _ = calc(p21)
+        total = round(weight * p21c)
+
+        await context.bot.send_message(
+            chat_id=q.message.chat_id,
+            text=(
+                f"🧮 نتيجة الحساب\n\n"
+                f"{label}\n"
+                f"سعر الجرام: {p21c} جنيه\n\n"
+                f"💰 الإجمالي: {total} جنيه\n\n"
+                "⚠️ سعر العملة صافي، بدون أي خصم."
+            ),
             reply_markup=gold_screen_kb(update.effective_user.id),
         )
         return
