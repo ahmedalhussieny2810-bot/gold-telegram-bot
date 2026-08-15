@@ -939,22 +939,6 @@ def sell_discount_per_gram(karat):
         return 100
 
 
-def making_charge_per_gram():
-    """
-    Optional flat estimate (in EGP per gram) for "مصنعية" (making /
-    crafting charge) added on top of the raw gold value when a
-    customer is BUYING a piece — since the calculator only knows the
-    metal's value, not labor. Defaults to 0 (off) — the admin turns
-    it on by setting a value in the gold menu; the calculator then
-    shows both the plain gold-value total and an approximate
-    "with مصنعية" total side by side.
-    """
-    try:
-        return int(get_setting("making_charge_per_gram", "0"))
-    except (TypeError, ValueError):
-        return 0
-
-
 # =========================================================
 # LOGS
 # =========================================================
@@ -1617,18 +1601,8 @@ def compute_calc_result(mode, karat, weight):
     else:  # "buy"
         per_gram = base
         price_label = "سعر الجرام"
+        total_label = "الإجمالي"
         note = "⚠️ السعر ذهب صافي، مش شامل المصنعية."
-
-        mc = making_charge_per_gram()
-        if mc > 0:
-            total_label = "الإجمالي (ذهب فقط)"
-            total_with_charge = round((per_gram + mc) * weight)
-            extra_line = (
-                f"💰 الإجمالي التقريبي (شامل مصنعية تقديرية "
-                f"{mc} ج/جرام): {total_with_charge} جنيه\n\n"
-            )
-        else:
-            total_label = "الإجمالي"
 
     total = round(per_gram * weight)
 
@@ -1641,7 +1615,7 @@ def compute_calc_result(mode, karat, weight):
         + extra_line
         + note
     )
-    return True, text, total
+    return True, text, total, per_gram
 
 
 def today():
@@ -2107,10 +2081,6 @@ def gold_menu():
         [InlineKeyboardButton(
             f"💰 خصم شراء عيار 18: {sell_discount_per_gram(18)} ج/جرام",
             callback_data="setselldiscount:18",
-        )],
-        [InlineKeyboardButton(
-            f"🛠️ مصنعية تقريبية: {making_charge_per_gram()} ج/جرام",
-            callback_data="setmakingcharge",
         )],
         [InlineKeyboardButton("⬅️ لوحة التحكم", callback_data="admin")],
     ])
@@ -3844,34 +3814,46 @@ async def text(update, context):
         )
         return
 
-    if s == "making_charge_input":
-        if not is_admin(update):
-            context.user_data.clear()
-            await update.message.reply_text("❌ غير مسموح.")
-            return
-
+    if s == "calc_mc_amount_input":
         try:
-            new_charge = int(float(t))
-            if new_charge < 0:
+            charge = float(t.replace(",", "."))
+            if charge < 0:
                 raise ValueError
         except Exception:
             await update.message.reply_text(
-                "❌ اكتب رقم صحيح (بالجنيه)، مثال: 50 أو 0 للإيقاف"
+                "❌ اكتب رقم صحيح بالجنيه، مثال: 50 أو 300"
             )
             return
 
-        set_setting("making_charge_per_gram", str(new_charge))
-        log_action(
-            update.effective_user.id, "ADMIN_CHANGED_MAKING_CHARGE",
-            new_value=str(new_charge),
-        )
+        karat = context.user_data.get("calc_mc_karat")
+        weight = context.user_data.get("calc_mc_weight")
+        per_gram = context.user_data.get("calc_mc_pergram")
+        gold_total = context.user_data.get("calc_mc_total")
+        mc_type = context.user_data.get("calc_mc_type")
         context.user_data.clear()
 
+        if None in (karat, weight, per_gram, gold_total, mc_type):
+            await update.message.reply_text("❌ حصل خطأ، جرب تاني.")
+            return
+
+        if mc_type == "piece":
+            final_total = round(gold_total + charge)
+            mc_line = f"مصنعية القطعة كلها: {round(charge)} جنيه\n"
+        else:  # "gram"
+            per_gram_mc = per_gram + charge
+            final_total = round(per_gram_mc * weight)
+            mc_line = f"مصنعية الجرام: {round(charge)} جنيه\n"
+
         await update.message.reply_text(
-            f"✅ تم تحديث المصنعية التقريبية إلى {new_charge} جنيه/جرام."
-            if new_charge else
-            "✅ تم إيقاف المصنعية التقريبية.",
-            reply_markup=gold_menu(),
+            "🧮 نتيجة الحساب (شامل المصنعية)\n\n"
+            f"العيار: {karat}\n"
+            f"الوزن: {weight} جرام\n"
+            f"سعر الجرام: {round(per_gram)} جنيه\n"
+            f"قيمة الذهب: {gold_total} جنيه\n"
+            + mc_line
+            + f"\n💰 الإجمالي: {final_total} جنيه\n\n"
+            "⚠️ السعر تقريبي، والمصنعية النهائية بتتحدد في المحل.",
+            reply_markup=gold_screen_kb(update.effective_user.id),
         )
         return
 
@@ -3892,7 +3874,7 @@ async def text(update, context):
         compare_first = context.user_data.get("calc_compare_first")
         context.user_data.clear()
 
-        ok, text, total = compute_calc_result(mode, karat, weight)
+        ok, text, total, per_gram = compute_calc_result(mode, karat, weight)
         if not ok:
             await update.message.reply_text(text)
             return
@@ -3939,6 +3921,27 @@ async def text(update, context):
                 f"{total} جنيه\n\n"
                 f"💰 الفرق: {sign}{diff} جنيه",
                 reply_markup=gold_screen_kb(update.effective_user.id),
+            )
+            return
+
+        # Plain "هتشتري" result (not part of a comparison): offer to
+        # add the making charge the shop actually quotes them, since
+        # that's set at the counter, not by us.
+        if mode == "buy":
+            context.user_data.update(
+                calc_mc_karat=karat, calc_mc_weight=weight,
+                calc_mc_pergram=per_gram, calc_mc_total=total,
+            )
+            await update.message.reply_text(
+                text + "\n\nتحب تضيفلك مصنعية القطعة اللي هيقولهالك المحل؟",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(
+                        "✅ أضف مصنعية", callback_data="calcmcyes"
+                    )],
+                    [InlineKeyboardButton(
+                        "❌ من غير مصنعية", callback_data="calcmcno"
+                    )],
+                ]),
             )
             return
 
@@ -5158,22 +5161,6 @@ async def buttons(update, context):
             "العميل.\n\n"
             f"القيمة الحالية: {sell_discount_per_gram(karat)} جنيه/جرام\n"
             "مثال: 100"
-        )
-        return
-
-    if c == "setmakingcharge":
-        if not is_admin(update):
-            return
-
-        context.user_data.clear()
-        context.user_data["state"] = "making_charge_input"
-
-        await q.edit_message_text(
-            "🛠️ اكتب قيمة المصنعية التقريبية (بالجنيه للجرام) "
-            "اللي هتتضاف على سعر الذهب في حالة \"هتشتري\".\n\n"
-            f"القيمة الحالية: {making_charge_per_gram()} جنيه/جرام\n"
-            "اكتب 0 لو عايز توقفها خالص.\n"
-            "مثال: 50"
         )
         return
 
@@ -6582,7 +6569,7 @@ async def buttons(update, context):
             await q.answer("مفيش حسبة سابقة.", show_alert=True)
             return
 
-        ok, text, total = compute_calc_result(
+        ok, text, total, per_gram = compute_calc_result(
             last["last_calc_mode"], last["last_calc_karat"],
             float(last["last_calc_weight"]),
         )
@@ -6720,6 +6707,67 @@ async def buttons(update, context):
         )
         await q.edit_message_text(
             "⚖️ اكتب وزن القطعة التانية بالجرام.\nمثال: 5 أو 3.5"
+        )
+        return
+
+    if c == "calcmcno":
+        karat = context.user_data.get("calc_mc_karat")
+        weight = context.user_data.get("calc_mc_weight")
+        total = context.user_data.get("calc_mc_total")
+        context.user_data.clear()
+
+        await q.edit_message_text(
+            (
+                f"✅ تمام، من غير مصنعية.\n\n"
+                f"العيار: {karat}\n"
+                f"الوزن: {weight} جرام\n"
+                f"💰 الإجمالي: {total} جنيه\n\n"
+                "⚠️ السعر ذهب صافي، مش شامل المصنعية."
+            ) if karat is not None else "✅ تمام.",
+        )
+        await context.bot.send_message(
+            chat_id=q.message.chat_id,
+            text="اختار من القائمة 👇",
+            reply_markup=gold_screen_kb(update.effective_user.id),
+        )
+        return
+
+    if c == "calcmcyes":
+        if "calc_mc_karat" not in context.user_data:
+            await q.answer("حصل خطأ، احسب القطعة تاني.", show_alert=True)
+            return
+
+        await q.edit_message_text(
+            "المصنعية اللي هيقولهالك المحل، على القطعة كلها ولا "
+            "على الجرام؟",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "🧾 على القطعة كلها", callback_data="calcmctype:piece"
+                )],
+                [InlineKeyboardButton(
+                    "⚖️ على الجرام", callback_data="calcmctype:gram"
+                )],
+            ]),
+        )
+        return
+
+    if c.startswith("calcmctype:"):
+        mc_type = c.split(":")[1]  # "piece" | "gram"
+
+        if "calc_mc_karat" not in context.user_data:
+            await q.answer("حصل خطأ، احسب القطعة تاني.", show_alert=True)
+            return
+
+        context.user_data["calc_mc_type"] = mc_type
+        context.user_data["state"] = "calc_mc_amount_input"
+
+        await q.edit_message_text(
+            "💰 اكتب قيمة المصنعية بالجنيه اللي قالهالك المحل.\n\n"
+            + (
+                "مثال: 300 (على القطعة كلها)"
+                if mc_type == "piece" else
+                "مثال: 50 (للجرام)"
+            )
         )
         return
 
