@@ -305,6 +305,19 @@ def init_db():
             """)
 
             x.execute("""
+                CREATE TABLE IF NOT EXISTS Investments(
+                    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                    telegram_id BIGINT NOT NULL,
+                    weight DECIMAL(10,3) NOT NULL,
+                    karat TINYINT UNSIGNED NOT NULL,
+                    buy_price_per_gram DECIMAL(15,2) NOT NULL,
+                    buy_date DATE NOT NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    INDEX(telegram_id)
+                )
+            """)
+
+            x.execute("""
                 SELECT DISTINCT category
                 FROM Products
                 WHERE category IS NOT NULL
@@ -1516,6 +1529,53 @@ def delete_occasion_reminder(rid):
         c.close()
 
 
+# =========================================================
+# INVESTMENT TRACKING
+# =========================================================
+
+def add_investment(telegram_id, weight, karat, buy_price_per_gram, buy_date):
+    c = db()
+    try:
+        with c.cursor() as x:
+            x.execute("""
+                INSERT INTO Investments
+                (telegram_id,weight,karat,buy_price_per_gram,buy_date)
+                VALUES(%s,%s,%s,%s,%s)
+            """, (telegram_id, weight, karat, buy_price_per_gram, buy_date))
+    finally:
+        c.close()
+
+
+def list_investments(telegram_id):
+    return many("""
+        SELECT id,weight,karat,buy_price_per_gram,buy_date,created_at
+        FROM Investments
+        WHERE telegram_id=%s
+        ORDER BY created_at DESC
+    """, (telegram_id,))
+
+
+def get_investment(iid):
+    return one(
+        "SELECT id,telegram_id,weight,karat,buy_price_per_gram,buy_date "
+        "FROM Investments WHERE id=%s",
+        (iid,),
+    )
+
+
+def delete_investment(iid, telegram_id):
+    c = db()
+    try:
+        with c.cursor() as x:
+            x.execute(
+                "DELETE FROM Investments WHERE id=%s AND telegram_id=%s",
+                (iid, telegram_id),
+            )
+            return bool(x.rowcount)
+    finally:
+        c.close()
+
+
 
 # =========================================================
 # SAVED (REUSABLE) NOTIFICATIONS
@@ -1878,6 +1938,9 @@ def gold_screen_kb(telegram_id):
         )],
         [InlineKeyboardButton(
             "⚖️ تحويل عيار", callback_data="karatconvert"
+        )],
+        [InlineKeyboardButton(
+            "💰 تتبع استثمارك", callback_data="invtrack"
         )],
         [InlineKeyboardButton(
             "🔕 إلغاء الاشتراك (واتساب)"
@@ -4148,6 +4211,73 @@ async def text(update, context):
         await update.message.reply_text(
             result_text,
             reply_markup=calc_result_kb(update.effective_user.id),
+        )
+        return
+
+    if s == "inv_weight_input":
+        m = re.match(r"^(\d+(?:\.\d+)?)\s+(\d{1,2})$", t.strip())
+        if not m:
+            await update.message.reply_text(
+                "❌ اكتب الوزن والعيار مفصولين بمسافة.\nمثال: 20 21"
+            )
+            return
+
+        weight = float(m.group(1))
+        karat = int(m.group(2))
+
+        if weight <= 0:
+            await update.message.reply_text("❌ اكتب وزن أكبر من صفر.")
+            return
+        if not (1 <= karat <= 24):
+            await update.message.reply_text(
+                "❌ العيار لازم يكون رقم من 1 لـ 24."
+            )
+            return
+
+        context.user_data["inv_weight"] = weight
+        context.user_data["inv_karat"] = karat
+        context.user_data["state"] = "inv_price_input"
+
+        await update.message.reply_text(
+            "اكتب السعر اللي دفعته في الجرام (تقدر تحط فيه المصنعية "
+            "لو حابب).\nمثال: 6800"
+        )
+        return
+
+    if s == "inv_price_input":
+        t_clean = t.strip().replace(",", "")
+        try:
+            price = float(t_clean)
+        except ValueError:
+            await update.message.reply_text("❌ اكتب رقم بس.")
+            return
+
+        if price <= 0:
+            await update.message.reply_text("❌ اكتب سعر أكبر من صفر.")
+            return
+
+        weight = context.user_data.get("inv_weight")
+        karat = context.user_data.get("inv_karat")
+        if weight is None or karat is None:
+            await update.message.reply_text("ابدأ التسجيل من الأول من قائمة أسعار الذهب.")
+            return
+
+        add_investment(
+            update.effective_user.id, weight, karat, price, date.today()
+        )
+        context.user_data.clear()
+
+        await update.message.reply_text(
+            f"✅ اتسجلت: {weight} جرام عيار {karat} بسعر {round(price)} "
+            "ج/جرام.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "📊 استثماراتي", callback_data="invlist"
+                )],
+                [InlineKeyboardButton(
+                    "➕ سجّل عملية تانية", callback_data="invadd"
+                )],
+            ]),
         )
         return
 
@@ -7476,6 +7606,147 @@ async def buttons(update, context):
         await q.edit_message_text(
             f"القطعة: {weight} جرام عيار {karat}\n\nعايز تحولها لعيار كام؟",
             reply_markup=karat_target_kb(),
+        )
+        return
+
+    # ---- تتبع الاستثمار ----
+
+    if c == "invtrack":
+        track_user(update)
+        await q.edit_message_text(
+            "💰 تتبع استثمارك\n\n"
+            "سجّل عمليات شرائك للدهب، وتابع قيمتها دلوقتي مقارنة "
+            "بيوم ما اشتريتها.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "➕ سجّل عملية شراء", callback_data="invadd"
+                )],
+                [InlineKeyboardButton(
+                    "📊 استثماراتي", callback_data="invlist"
+                )],
+                [InlineKeyboardButton("⬅️ رجوع", callback_data="gold")],
+            ]),
+        )
+        return
+
+    if c == "invadd":
+        context.user_data.clear()
+        context.user_data["state"] = "inv_weight_input"
+        await q.edit_message_text(
+            "➕ سجّل عملية شراء\n\n"
+            "اكتب الوزن والعيار مفصولين بمسافة.\nمثال: 20 21"
+        )
+        return
+
+    if c == "invlist":
+        rows = list_investments(update.effective_user.id)
+        if not rows:
+            await q.edit_message_text(
+                "مفيش عندك أي عمليات شراء متسجلة لسه.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(
+                        "➕ سجّل عملية شراء", callback_data="invadd"
+                    )],
+                    [InlineKeyboardButton("⬅️ رجوع", callback_data="invtrack")],
+                ]),
+            )
+            return
+
+        p21 = latest()
+        if not p21:
+            await q.edit_message_text(
+                "💎 لم يتم تحديث أسعار الذهب حتى الآن."
+            )
+            return
+        p24, _, _ = calc(p21)
+
+        blocks = []
+        total_cost = 0
+        total_now = 0
+        kb_rows = []
+        for r in rows:
+            weight = float(r["weight"])
+            karat = r["karat"]
+            buy_price = float(r["buy_price_per_gram"])
+            now_price = p24 * (karat / 24)
+
+            cost = weight * buy_price
+            now_val = weight * now_price
+            diff = now_val - cost
+            pct = (diff / cost * 100) if cost else 0
+            total_cost += cost
+            total_now += now_val
+
+            bd = r["buy_date"]
+            bd_str = bd.strftime("%Y-%m-%d") if hasattr(bd, "strftime") else bd
+
+            arrow = "📈" if diff >= 0 else "📉"
+            blocks.append(
+                f"🔸 {weight} جرام عيار {karat} — اشتريتها {bd_str}\n"
+                f"سعر الشراء: {round(buy_price)} ج/جرام "
+                f"({round(cost)} ج)\n"
+                f"القيمة دلوقتي: {round(now_price)} ج/جرام "
+                f"({round(now_val)} ج)\n"
+                f"{arrow} {'ربح' if diff >= 0 else 'خسارة'}: "
+                f"{round(abs(diff))} ج ({pct:+.1f}%)"
+            )
+            kb_rows.append([InlineKeyboardButton(
+                f"🗑 حذف: {weight}جم عيار{karat} ({bd_str})",
+                callback_data=f"invdel:{r['id']}",
+            )])
+
+        total_diff = total_now - total_cost
+        total_pct = (total_diff / total_cost * 100) if total_cost else 0
+        summary = (
+            f"\n\n———————————\n"
+            f"الإجمالي: اشتريت بـ {round(total_cost)} ج، "
+            f"بتساوي دلوقتي {round(total_now)} ج\n"
+            f"{'📈 ربح' if total_diff >= 0 else '📉 خسارة'} إجمالي: "
+            f"{round(abs(total_diff))} ج ({total_pct:+.1f}%)"
+        )
+
+        text = "📊 استثماراتك في الدهب\n\n" + "\n\n".join(blocks) + summary
+        kb_rows.append([InlineKeyboardButton(
+            "➕ سجّل عملية شراء", callback_data="invadd"
+        )])
+        kb_rows.append([InlineKeyboardButton("⬅️ رجوع", callback_data="invtrack")])
+
+        await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb_rows))
+        return
+
+    if c.startswith("invdel:"):
+        iid = int(c.split(":")[1])
+        entry = get_investment(iid)
+        if not entry or entry["telegram_id"] != update.effective_user.id:
+            await q.answer("العملية دي مش موجودة.", show_alert=True)
+            return
+
+        await q.edit_message_text(
+            f"⚠️ متأكد عايز تحذف: {float(entry['weight'])} جرام "
+            f"عيار {entry['karat']}؟",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "🗑 اه، احذفها", callback_data=f"invdelconfirm:{iid}"
+                )],
+                [InlineKeyboardButton("❌ لأ، رجعني", callback_data="invlist")],
+            ]),
+        )
+        return
+
+    if c.startswith("invdelconfirm:"):
+        iid = int(c.split(":")[1])
+        entry = get_investment(iid)
+        if not entry or entry["telegram_id"] != update.effective_user.id:
+            await q.answer("العملية دي مش موجودة.", show_alert=True)
+            return
+
+        delete_investment(iid, update.effective_user.id)
+        await q.edit_message_text(
+            "✅ اتحذفت.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📊 استثماراتي", callback_data="invlist")],
+                [InlineKeyboardButton("⬅️ رجوع", callback_data="invtrack")],
+            ]),
         )
         return
 
