@@ -2,7 +2,7 @@ import os
 import json
 import re
 import asyncio
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, time as dtime
 from zoneinfo import ZoneInfo
 from urllib.parse import urlparse, quote
 
@@ -318,6 +318,17 @@ def init_db():
             """)
 
             x.execute("""
+                CREATE TABLE IF NOT EXISTS Birthdays(
+                    telegram_id BIGINT PRIMARY KEY,
+                    month TINYINT UNSIGNED NOT NULL,
+                    day TINYINT UNSIGNED NOT NULL,
+                    last_wished_year SMALLINT UNSIGNED NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    INDEX(month, day)
+                )
+            """)
+
+            x.execute("""
                 SELECT DISTINCT category
                 FROM Products
                 WHERE category IS NOT NULL
@@ -568,6 +579,61 @@ ZAKAT_DISCLAIMER = (
     "فقهي حول زكاة الذهب المستخدم كحلي شخصي (زينة)، فالأحوط الرجوع "
     "لجهة دينية موثوقة زي دار الإفتاء لتفصيل حالتك بالظبط."
 )
+
+# Business hours: every day except Friday 11:30 AM -> 12:30 AM (next day).
+# Friday: 1:00 PM -> 12:30 AM (next day). weekday(): Monday=0 ... Friday=4.
+SHOP_CLOSE_TIME = dtime(0, 30)
+SHOP_OPEN_TIME_FRIDAY = dtime(13, 0)
+SHOP_OPEN_TIME_OTHER = dtime(11, 30)
+
+
+def shop_hours_window(d):
+    """Returns (open_dt, close_dt) for the business day starting on date d."""
+    open_time = (
+        SHOP_OPEN_TIME_FRIDAY if d.weekday() == 4 else SHOP_OPEN_TIME_OTHER
+    )
+    open_dt = datetime.combine(d, open_time, tzinfo=TZ)
+    close_dt = datetime.combine(d + timedelta(days=1), SHOP_CLOSE_TIME, tzinfo=TZ)
+    return open_dt, close_dt
+
+
+def shop_open_status():
+    """Returns dict: is_open, next_change (datetime), today's window text."""
+    now = datetime.now(TZ)
+    today = now.date()
+
+    for d in (today - timedelta(days=1), today):
+        open_dt, close_dt = shop_hours_window(d)
+        if open_dt <= now <= close_dt:
+            return {
+                "is_open": True,
+                "next_change": close_dt,
+                "open_dt": open_dt,
+                "close_dt": close_dt,
+            }
+
+    # closed now -> next opening is today's window (if before it starts)
+    open_dt, close_dt = shop_hours_window(today)
+    if now < open_dt:
+        next_change = open_dt
+    else:
+        open_dt2, _ = shop_hours_window(today + timedelta(days=1))
+        next_change = open_dt2
+
+    return {
+        "is_open": False,
+        "next_change": next_change,
+        "open_dt": open_dt,
+        "close_dt": close_dt,
+    }
+
+
+def fmt_hm(dt):
+    h = dt.hour % 12
+    if h == 0:
+        h = 12
+    period = "ص" if dt.hour < 12 else "م"
+    return f"{h}:{dt.minute:02d} {period}"
 
 
 def rename_cat(cid, name):
@@ -1576,6 +1642,60 @@ def delete_investment(iid, telegram_id):
         c.close()
 
 
+# =========================================================
+# BIRTHDAYS
+# =========================================================
+
+def set_birthday(telegram_id, month, day):
+    c = db()
+    try:
+        with c.cursor() as x:
+            x.execute("""
+                INSERT INTO Birthdays(telegram_id,month,day)
+                VALUES(%s,%s,%s)
+                ON DUPLICATE KEY UPDATE
+                    month=VALUES(month), day=VALUES(day),
+                    last_wished_year=NULL
+            """, (telegram_id, month, day))
+    finally:
+        c.close()
+
+
+def get_birthday(telegram_id):
+    return one(
+        "SELECT * FROM Birthdays WHERE telegram_id=%s", (telegram_id,)
+    )
+
+
+def all_birthdays():
+    return many("SELECT * FROM Birthdays")
+
+
+def mark_birthday_wished(telegram_id, year):
+    c = db()
+    try:
+        with c.cursor() as x:
+            x.execute(
+                "UPDATE Birthdays SET last_wished_year=%s "
+                "WHERE telegram_id=%s",
+                (year, telegram_id),
+            )
+    finally:
+        c.close()
+
+
+def delete_birthday(telegram_id):
+    c = db()
+    try:
+        with c.cursor() as x:
+            x.execute(
+                "DELETE FROM Birthdays WHERE telegram_id=%s", (telegram_id,)
+            )
+            return bool(x.rowcount)
+    finally:
+        c.close()
+
+
 
 # =========================================================
 # SAVED (REUSABLE) NOTIFICATIONS
@@ -2023,6 +2143,12 @@ def home(admin=False, subscribed=False):
     k = [
         [InlineKeyboardButton("💎 أسعار الذهب", callback_data="gold")],
         [InlineKeyboardButton("💍 المنتجات", callback_data="products")],
+        [InlineKeyboardButton(
+            "🕐 المحل مفتوح دلوقتي؟", callback_data="shopstatus"
+        )],
+        [InlineKeyboardButton(
+            "🎂 سجّل تاريخ ميلادك", callback_data="birthdaymenu"
+        )],
         [InlineKeyboardButton(
             "🟢 الإشعارات: شغالة (دوس للإيقاف)"
             if subscribed else
@@ -2608,6 +2734,48 @@ async def occasion_tick(context):
             mark_occasion_reminded(r["id"], this_year)
     except Exception as e:
         print("Occasion Tick Error:", repr(e), flush=True)
+
+
+async def birthday_tick(context):
+    """Runs every minute via JobQueue but only acts at 09:00 daily.
+    DMs any customer whose registered birthday is today — once per
+    customer per year — with a greeting + shop-visit nudge."""
+    try:
+        now = datetime.now(TZ)
+        if now.strftime("%H:%M") != "09:00":
+            return
+
+        today = now.date()
+        this_year = now.year
+
+        for r in all_birthdays():
+            if (r["month"], r["day"]) != (today.month, today.day):
+                continue
+            if r.get("last_wished_year") == this_year:
+                continue
+
+            try:
+                await context.bot.send_message(
+                    chat_id=r["telegram_id"],
+                    text=(
+                        "🎂 كل سنة وانت طيب! 🎉\n\n"
+                        f"{SHOP_NAME} بتتمنالك سنة حلوة كلها فرح وسعادة ❤️\n\n"
+                        "إيه رأيك تزورنا النهاردة وتدلّع نفسك بهدية "
+                        "عيد ميلاد؟ 💍✨"
+                    ),
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("📍 موقع المحل", url=MAPS)],
+                    ]),
+                )
+            except Exception as e:
+                print(
+                    f"Birthday Greeting Failed for {r['telegram_id']}:",
+                    repr(e), flush=True,
+                )
+
+            mark_birthday_wished(r["telegram_id"], this_year)
+    except Exception as e:
+        print("Birthday Tick Error:", repr(e), flush=True)
 
 
 async def broadcast_gold_update(context, new_price):
@@ -4214,6 +4382,35 @@ async def text(update, context):
         )
         return
 
+    if s == "birthday_date_input":
+        m = re.match(r"^([0-3]?\d)-(0?\d|1[0-2])$", t.strip())
+        if not m:
+            await update.message.reply_text(
+                "❌ الصيغة غلط. اكتب التاريخ بصيغة يوم-شهر.\nمثال: 25-12"
+            )
+            return
+
+        day, month = int(m.group(1)), int(m.group(2))
+        try:
+            date(2024, month, day)  # validates day fits in month (leap ok)
+        except ValueError:
+            await update.message.reply_text(
+                "❌ التاريخ ده مش موجود. اكتبه تاني.\nمثال: 25-12"
+            )
+            return
+
+        context.user_data["state"] = None
+        set_birthday(update.effective_user.id, month, day)
+
+        await update.message.reply_text(
+            f"🎂 تمام! سجلنا ميلادك يوم {t.strip()}، وهنبعتلك تهنئة "
+            "كل سنة في يومك 💛",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ الرئيسية", callback_data="home")],
+            ]),
+        )
+        return
+
     if s == "inv_weight_input":
         m = re.match(r"^(\d+(?:\.\d+)?)\s+(\d{1,2})$", t.strip())
         if not m:
@@ -5238,6 +5435,119 @@ async def buttons(update, context):
         await q.edit_message_text(
             "💎 " + SHOP_NAME + "\n\nاختار من القائمة 👇",
             reply_markup=home(is_admin(update), is_gold_subscribed(update.effective_user.id)),
+        )
+        return
+
+    if c == "shopstatus":
+        st = shop_open_status()
+
+        if st["is_open"]:
+            text = (
+                "🟢 المحل مفتوح دلوقتي\n\n"
+                f"هيقفل الساعة {fmt_hm(st['next_change'])}."
+            )
+        else:
+            text = (
+                "🔴 المحل مقفول دلوقتي\n\n"
+                f"هيفتح الساعة {fmt_hm(st['next_change'])}."
+            )
+
+        text += (
+            "\n\n🕐 مواعيد العمل:\n"
+            "كل يوم من 11:30 ص لـ 12:30 ص (غير الجمعة)\n"
+            "الجمعة من 1:00 م لـ 12:30 ص"
+        )
+
+        await q.edit_message_text(
+            text,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ الرئيسية", callback_data="home")],
+            ]),
+        )
+        return
+
+    # ---- تسجيل عيد الميلاد ----
+
+    if c == "birthdaymenu":
+        track_user(update)
+        existing = get_birthday(update.effective_user.id)
+        if existing:
+            bday_str = f"{existing['day']:02d}-{existing['month']:02d}"
+            await q.edit_message_text(
+                f"🎂 تاريخ ميلادك المسجل: {bday_str}\n\n"
+                "هنبعتلك تهنئة في يوم ميلادك كل سنة 💛",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(
+                        "✏️ تغيير التاريخ", callback_data="birthdaychange"
+                    )],
+                    [InlineKeyboardButton(
+                        "🗑 إلغاء التسجيل", callback_data="birthdaydelete"
+                    )],
+                    [InlineKeyboardButton("⬅️ الرئيسية", callback_data="home")],
+                ]),
+            )
+            return
+
+        auto_month, auto_day = None, None
+        try:
+            chat = await context.bot.get_chat(update.effective_user.id)
+            bd = getattr(chat, "birthdate", None)
+            if bd:
+                auto_month, auto_day = bd.month, bd.day
+        except Exception:
+            pass
+
+        if auto_month and auto_day:
+            set_birthday(update.effective_user.id, auto_month, auto_day)
+            await q.edit_message_text(
+                "🎂 لقيت تاريخ ميلادك من تليجرام: "
+                f"{auto_day:02d}-{auto_month:02d}\n\n"
+                "سجلناه، وهنبعتلك تهنئة في يوم ميلادك كل سنة 💛\n\n"
+                "لو مش صح، تقدر تغيّره.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(
+                        "✏️ تغيير التاريخ", callback_data="birthdaychange"
+                    )],
+                    [InlineKeyboardButton("⬅️ الرئيسية", callback_data="home")],
+                ]),
+            )
+            return
+
+        context.user_data["state"] = "birthday_date_input"
+        await q.edit_message_text(
+            "🎂 سجّل تاريخ ميلادك\n\n"
+            "اكتب اليوم والشهر بصيغة يوم-شهر.\nمثال: 25-12"
+        )
+        return
+
+    if c == "birthdaychange":
+        context.user_data["state"] = "birthday_date_input"
+        await q.edit_message_text(
+            "✏️ اكتب تاريخ ميلادك الجديد بصيغة يوم-شهر.\nمثال: 25-12"
+        )
+        return
+
+    if c == "birthdaydelete":
+        await q.edit_message_text(
+            "⚠️ متأكد عايز تلغي تسجيل تاريخ ميلادك؟",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "🗑 اه، الغيه", callback_data="birthdaydeleteconfirm"
+                )],
+                [InlineKeyboardButton(
+                    "❌ لأ، رجعني", callback_data="birthdaymenu"
+                )],
+            ]),
+        )
+        return
+
+    if c == "birthdaydeleteconfirm":
+        delete_birthday(update.effective_user.id)
+        await q.edit_message_text(
+            "✅ اتلغى تسجيل تاريخ ميلادك.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ الرئيسية", callback_data="home")],
+            ]),
         )
         return
 
@@ -8563,6 +8873,9 @@ def main():
         )
         app.job_queue.run_repeating(
             occasion_tick, interval=60, first=20, name="occasion_tick",
+        )
+        app.job_queue.run_repeating(
+            birthday_tick, interval=60, first=25, name="birthday_tick",
         )
         print("Auto-posting scheduler started (checks every 60s).", flush=True)
     else:
