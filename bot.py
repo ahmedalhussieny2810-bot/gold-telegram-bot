@@ -345,6 +345,17 @@ def init_db():
                 )
             """)
 
+            x.execute("""
+                CREATE TABLE IF NOT EXISTS Favorites(
+                    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                    telegram_id BIGINT NOT NULL,
+                    product_id BIGINT UNSIGNED NOT NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE KEY uniq_fav(telegram_id, product_id),
+                    INDEX(telegram_id)
+                )
+            """)
+
             x.execute(
                 "SELECT id FROM ScheduledNotifications WHERE label=%s",
                 ("fajr",),
@@ -1303,6 +1314,30 @@ def maintenance_mode_on():
     return get_setting("maintenance_mode", "0") == "1"
 
 
+def try_claim_daily_task(key, value):
+    """Atomically claims a one-per-day (or one-per-period) scheduled
+    task stored as a Settings flag. Only the first caller to write a
+    NEW value for `key` gets True back — a second overlapping process
+    (e.g. two instances briefly alive during a Railway restart)
+    trying to claim the same key+value gets False and skips sending,
+    closing the duplicate-send race that a plain get/set check-then-
+    write pattern doesn't."""
+    c = db()
+    try:
+        with c.cursor() as x:
+            x.execute("""
+                INSERT INTO Settings(setting_key, setting_value)
+                VALUES(%s, %s)
+                ON DUPLICATE KEY UPDATE setting_value=VALUES(setting_value)
+            """, (key, value))
+            # MySQL: 1 row affected = fresh insert, 2 = value actually
+            # changed, 0 = value was already this exact value (lost
+            # the race to an earlier claim).
+            return x.rowcount > 0
+    finally:
+        c.close()
+
+
 def gold_alert_threshold():
     v = get_setting("gold_alert_threshold", "0")
     try:
@@ -1535,13 +1570,18 @@ def set_scheduled_post_template(sid, template_key):
 
 
 def mark_scheduled_post_ran(sid, date_str):
+    """Atomic claim: only updates (and returns True) if last_run_date
+    isn't already date_str, so two overlapping processes can't both
+    "win" and send the same scheduled post twice."""
     c = db()
     try:
         with c.cursor() as x:
             x.execute(
-                "UPDATE ScheduledPosts SET last_run_date=%s WHERE id=%s",
-                (date_str, sid),
+                "UPDATE ScheduledPosts SET last_run_date=%s "
+                "WHERE id=%s AND (last_run_date IS NULL OR last_run_date<>%s)",
+                (date_str, sid, date_str),
             )
+            return x.rowcount > 0
     finally:
         c.close()
 
@@ -1606,14 +1646,16 @@ def toggle_scheduled_notification(nid):
 
 
 def mark_scheduled_notification_ran(nid, date_str):
+    """Atomic claim — see mark_scheduled_post_ran."""
     c = db()
     try:
         with c.cursor() as x:
             x.execute(
                 "UPDATE ScheduledNotifications SET last_run_date=%s "
-                "WHERE id=%s",
-                (date_str, nid),
+                "WHERE id=%s AND (last_run_date IS NULL OR last_run_date<>%s)",
+                (date_str, nid, date_str),
             )
+            return x.rowcount > 0
     finally:
         c.close()
 
@@ -1644,14 +1686,17 @@ def all_occasion_reminders():
 
 
 def mark_occasion_reminded(rid, year):
+    """Atomic claim — see mark_scheduled_post_ran."""
     c = db()
     try:
         with c.cursor() as x:
             x.execute(
                 "UPDATE OccasionReminders SET last_reminded_year=%s "
-                "WHERE id=%s",
-                (year, rid),
+                "WHERE id=%s AND (last_reminded_year IS NULL "
+                "OR last_reminded_year<>%s)",
+                (year, rid, year),
             )
+            return x.rowcount > 0
     finally:
         c.close()
 
@@ -1765,14 +1810,17 @@ def all_birthdays():
 
 
 def mark_birthday_wished(telegram_id, year):
+    """Atomic claim — see mark_scheduled_post_ran."""
     c = db()
     try:
         with c.cursor() as x:
             x.execute(
                 "UPDATE Birthdays SET last_wished_year=%s "
-                "WHERE telegram_id=%s",
-                (year, telegram_id),
+                "WHERE telegram_id=%s AND (last_wished_year IS NULL "
+                "OR last_wished_year<>%s)",
+                (year, telegram_id, year),
             )
+            return x.rowcount > 0
     finally:
         c.close()
 
@@ -1787,6 +1835,53 @@ def delete_birthday(telegram_id):
             return bool(x.rowcount)
     finally:
         c.close()
+
+
+# =========================================================
+# FAVORITES (customer wishlist)
+# =========================================================
+
+def is_favorite(telegram_id, product_id):
+    return bool(one(
+        "SELECT id FROM Favorites WHERE telegram_id=%s AND product_id=%s",
+        (telegram_id, product_id),
+    ))
+
+
+def add_favorite(telegram_id, product_id):
+    c = db()
+    try:
+        with c.cursor() as x:
+            x.execute("""
+                INSERT IGNORE INTO Favorites(telegram_id, product_id)
+                VALUES(%s, %s)
+            """, (telegram_id, product_id))
+    finally:
+        c.close()
+
+
+def remove_favorite(telegram_id, product_id):
+    c = db()
+    try:
+        with c.cursor() as x:
+            x.execute(
+                "DELETE FROM Favorites WHERE telegram_id=%s "
+                "AND product_id=%s",
+                (telegram_id, product_id),
+            )
+            return bool(x.rowcount)
+    finally:
+        c.close()
+
+
+def list_favorites(telegram_id):
+    return many("""
+        SELECT p.*
+        FROM Favorites f
+        JOIN Products p ON p.id = f.product_id
+        WHERE f.telegram_id=%s
+        ORDER BY f.created_at DESC
+    """, (telegram_id,))
 
 
 # =========================================================
@@ -1907,14 +2002,17 @@ def delete_savings_goal(telegram_id):
 
 
 def mark_savings_goal_reminded(telegram_id, month_str):
+    """Atomic claim — see mark_scheduled_post_ran."""
     c = db()
     try:
         with c.cursor() as x:
             x.execute(
                 "UPDATE SavingsGoals SET last_reminded_month=%s "
-                "WHERE telegram_id=%s",
-                (month_str, telegram_id),
+                "WHERE telegram_id=%s AND (last_reminded_month IS NULL "
+                "OR last_reminded_month<>%s)",
+                (month_str, telegram_id, month_str),
             )
+            return x.rowcount > 0
     finally:
         c.close()
 
@@ -2295,6 +2393,39 @@ def gold_screen_kb(telegram_id):
     ])
 
 
+def product_display_kb(p, telegram_id, show_favorite_source=None):
+    """Buttons shown under a product photo: inquiry, WhatsApp
+    (tracked), location, website, and a favorite toggle. Shared
+    between the category product listing and the favorites list, so
+    both stay in sync automatically.
+    """
+    status = p.get("status") or "available"
+    rows = []
+
+    if status not in ("sold", "hidden"):
+        rows.append([InlineKeyboardButton(
+            "📩 استعلام عن المنتج", callback_data=f"inq:{p['id']}"
+        )])
+
+    is_fav = is_favorite(telegram_id, p["id"])
+    fav_source = f":{show_favorite_source}" if show_favorite_source else ""
+    rows.append([InlineKeyboardButton(
+        "💔 شيل من المفضلة" if is_fav else "⭐ أضف للمفضلة",
+        callback_data=f"favtoggle:{p['id']}{fav_source}",
+    )])
+
+    rows.append([
+        InlineKeyboardButton(
+            "💬 واتساب", callback_data=f"prodwa:{p['id']}"
+        ),
+        InlineKeyboardButton("📍 الموقع", url=MAPS),
+    ])
+    rows.append([
+        InlineKeyboardButton("🌐 الموقع الإلكتروني", url=WEBSITE),
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
 def calc_result_kb(telegram_id):
     """Same as gold_screen_kb but with a share button pinned to the
     top — used under calculator RESULT messages only (not menus),
@@ -2366,6 +2497,7 @@ def home(admin=False, subscribed=False):
     k = [
         [InlineKeyboardButton("💎 أسعار الذهب", callback_data="gold")],
         [InlineKeyboardButton("💍 المنتجات", callback_data="products")],
+        [InlineKeyboardButton("⭐ المفضلة", callback_data="favlist")],
         [InlineKeyboardButton(
             "🕐 المحل مفتوح دلوقتي؟", callback_data="shopstatus"
         )],
@@ -2426,6 +2558,9 @@ def admin_menu(owner=False):
         [InlineKeyboardButton("📊 الإحصائيات", callback_data="stats")],
         [InlineKeyboardButton(
             "🔥 تحليل المنتجات", callback_data="prodanalytics"
+        )],
+        [InlineKeyboardButton(
+            "❌ عمليات فشلت اليوم", callback_data="failedops"
         )],
         [InlineKeyboardButton(
             "🔥 منتج اليوم", callback_data="potdmenu"
@@ -2858,17 +2993,14 @@ async def auto_post_tick(context):
             if sp.get("time_str") != hhmm:
                 continue
 
-            last_run = sp.get("last_run_date")
-            last_run_str = (
-                last_run.strftime("%Y-%m-%d")
-                if hasattr(last_run, "strftime") else last_run
-            )
-            if last_run_str == today_str:
+            # Atomic claim FIRST: only one process can win this for a
+            # given id+date, closing the double-send race described
+            # in mark_scheduled_post_ran's docstring.
+            if not mark_scheduled_post_ran(sp["id"], today_str):
                 continue
 
             p = latest()
             if not p:
-                mark_scheduled_post_ran(sp["id"], today_str)
                 continue
 
             txt = render_template(sp.get("template_key") or "normal", p)
@@ -2903,8 +3035,6 @@ async def auto_post_tick(context):
                 object_type="schedule", object_id=sp["id"],
                 new_value=f"tg={tg_ok} fb={fb_ok}",
             )
-
-            mark_scheduled_post_ran(sp["id"], today_str)
     except Exception as e:
         print("Auto Post Tick Error:", repr(e), flush=True)
 
@@ -2926,12 +3056,7 @@ async def auto_notification_tick(context):
             if sn.get("time_str") != hhmm:
                 continue
 
-            last_run = sn.get("last_run_date")
-            last_run_str = (
-                last_run.strftime("%Y-%m-%d")
-                if hasattr(last_run, "strftime") else last_run
-            )
-            if last_run_str == today_str:
+            if not mark_scheduled_notification_ran(sn["id"], today_str):
                 continue
 
             sent, failed = await broadcast_custom_notification(
@@ -2943,8 +3068,6 @@ async def auto_notification_tick(context):
                 object_type="scheduled_notification", object_id=sn["id"],
                 new_value=f"sent={sent} failed={failed}",
             )
-
-            mark_scheduled_notification_ran(sn["id"], today_str)
     except Exception as e:
         print("Auto Notification Tick Error:", repr(e), flush=True)
 
@@ -2969,7 +3092,9 @@ async def occasion_tick(context):
 
             if target - timedelta(days=7) != today:
                 continue
-            if r.get("last_reminded_year") == this_year:
+
+            # Atomic claim FIRST — see mark_scheduled_post_ran.
+            if not mark_occasion_reminded(r["id"], this_year):
                 continue
 
             try:
@@ -3002,8 +3127,6 @@ async def occasion_tick(context):
                     f"Occasion Reminder Failed for {r['telegram_id']}:",
                     repr(e), flush=True,
                 )
-
-            mark_occasion_reminded(r["id"], this_year)
     except Exception as e:
         print("Occasion Tick Error:", repr(e), flush=True)
 
@@ -3023,7 +3146,8 @@ async def birthday_tick(context):
         for r in all_birthdays():
             if (r["month"], r["day"]) != (today.month, today.day):
                 continue
-            if r.get("last_wished_year") == this_year:
+
+            if not mark_birthday_wished(r["telegram_id"], this_year):
                 continue
 
             try:
@@ -3044,8 +3168,6 @@ async def birthday_tick(context):
                     f"Birthday Greeting Failed for {r['telegram_id']}:",
                     repr(e), flush=True,
                 )
-
-            mark_birthday_wished(r["telegram_id"], this_year)
     except Exception as e:
         print("Birthday Tick Error:", repr(e), flush=True)
 
@@ -3059,12 +3181,11 @@ async def tip_tick(context):
             return
 
         today_str = now.strftime("%Y-%m-%d")
-        if get_setting("last_tip_date") == today_str:
+        if not try_claim_daily_task("last_tip_date", today_str):
             return
 
         tip = GOLD_CARE_TIPS[now.timetuple().tm_yday % len(GOLD_CARE_TIPS)]
         await broadcast_custom_notification(context, ADMIN_ID, tip)
-        set_setting("last_tip_date", today_str)
     except Exception as e:
         print("Tip Tick Error:", repr(e), flush=True)
 
@@ -3087,7 +3208,7 @@ async def savings_goal_tick(context):
         p24, _, _ = calc(p21)
 
         for g in all_savings_goals():
-            if g.get("last_reminded_month") == month_str:
+            if not mark_savings_goal_reminded(g["telegram_id"], month_str):
                 continue
 
             now_price = p24 * (g["karat"] / 24)
@@ -3111,8 +3232,6 @@ async def savings_goal_tick(context):
                     f"Savings Goal Reminder Failed for {g['telegram_id']}:",
                     repr(e), flush=True,
                 )
-
-            mark_savings_goal_reminded(g["telegram_id"], month_str)
     except Exception as e:
         print("Savings Goal Tick Error:", repr(e), flush=True)
 
@@ -3126,10 +3245,9 @@ async def weekly_summary_tick(context):
             return
 
         week_str = now.strftime("%Y-W%W")
-        if get_setting("last_weekly_summary") == week_str:
-            return
-
         if not ADMIN_ID:
+            return
+        if not try_claim_daily_task("last_weekly_summary", week_str):
             return
 
         new_users = one(
@@ -3160,8 +3278,6 @@ async def weekly_summary_tick(context):
             await context.bot.send_message(chat_id=ADMIN_ID, text=text)
         except Exception as e:
             print("Weekly Summary Send Failed:", repr(e), flush=True)
-
-        set_setting("last_weekly_summary", week_str)
     except Exception as e:
         print("Weekly Summary Tick Error:", repr(e), flush=True)
 
@@ -3177,7 +3293,7 @@ async def potd_tick(context):
             return
 
         today_str = now.strftime("%Y-%m-%d")
-        if get_setting("potd_date") == today_str:
+        if not try_claim_daily_task("potd_date", today_str):
             return  # already set (manually or by an earlier tick) today
 
         row = one("""
@@ -3643,6 +3759,64 @@ async def show_id(update, context):
     await update.message.reply_text(
         f"🆔 آيدي تليجرام بتاعك:\n\n{u.id}"
     )
+
+
+async def favorites_command(update, context):
+    """/favorites — same list as the ⭐ المفضلة home-menu button, but
+    reachable directly from Telegram's "/" command menu."""
+    if maintenance_mode_on() and not is_admin(update):
+        await update.message.reply_text(
+            "🔧 البوت تحت التحديث دلوقتي، هيرجع يشتغل قريب. "
+            "حاول تاني بعد شوية 🙏"
+        )
+        return
+
+    track_user(update)
+    favs = list_favorites(update.effective_user.id)
+
+    if not favs:
+        await update.message.reply_text(
+            "⭐ المفضلة\n\n"
+            "مفيش منتجات في المفضلة لسه.\n"
+            "تقدر تضيف أي منتج يعجبك من قائمة 💍 المنتجات.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "💍 المنتجات", callback_data="products"
+                )],
+                [InlineKeyboardButton("⬅️ الرئيسية", callback_data="home")],
+            ]),
+        )
+        return
+
+    await update.message.reply_text(f"⭐ المفضلة عندك ({len(favs)})")
+
+    for p in favs:
+        parts = []
+        if p["name"]:
+            parts.append(f"💍 {p['name']}")
+        if p["code"]:
+            parts.append(f"🔖 الكود: {p['code']}")
+        parts.append(
+            f"💰 السعر: {round(float(p['price']))} جنيه"
+            if p.get("price") not in (None, "")
+            else "💰 السعر: للاستعلام"
+        )
+        status = p.get("status") or "available"
+        if status != "available":
+            parts.append(STATUS_LABELS.get(status, ""))
+        if p["description"]:
+            parts.append(f"\n{p['description']}")
+
+        try:
+            await update.message.reply_photo(
+                photo=p["Photo_id"],
+                caption="\n".join(parts) or None,
+                reply_markup=product_display_kb(
+                    p, update.effective_user.id
+                ),
+            )
+        except Exception as e:
+            print("Favorites Command Display Error:", repr(e), flush=True)
 
 
 async def update_price_shortcut(update, context):
@@ -6887,28 +7061,13 @@ async def buttons(update, context):
             if p["description"]:
                 parts.append(f"\n{p['description']}")
 
-            buttons_rows = []
-            if status not in ("sold", "hidden"):
-                buttons_rows.append([InlineKeyboardButton(
-                    "📩 استعلام عن المنتج",
-                    callback_data=f"inq:{p['id']}"
-                )])
-
-            buttons_rows.append([
-                InlineKeyboardButton(
-                    "💬 واتساب", callback_data=f"prodwa:{p['id']}"
-                ),
-                InlineKeyboardButton("📍 الموقع", url=MAPS),
-            ])
-            buttons_rows.append([
-                InlineKeyboardButton("🌐 الموقع الإلكتروني", url=WEBSITE),
-            ])
+            buttons_rows = product_display_kb(p, update.effective_user.id)
 
             try:
                 await q.message.reply_photo(
                     photo=p["Photo_id"],
                     caption="\n".join(parts) or None,
-                    reply_markup=InlineKeyboardMarkup(buttons_rows),
+                    reply_markup=buttons_rows,
                 )
                 inc_product_counter(p["id"], "views_count")
             except Exception as e:
@@ -8432,6 +8591,83 @@ async def buttons(update, context):
         )
         return
 
+    # ---- المفضلة ----
+
+    if c.startswith("favtoggle:"):
+        parts_c = c.split(":")
+        pid = int(parts_c[1])
+        p = product(pid)
+
+        if not p:
+            await q.answer("المنتج ده مش موجود.", show_alert=True)
+            return
+
+        uid = update.effective_user.id
+        if is_favorite(uid, pid):
+            remove_favorite(uid, pid)
+            await q.answer("💔 اتشال من المفضلة.")
+        else:
+            add_favorite(uid, pid)
+            await q.answer("⭐ اتضاف للمفضلة!")
+
+        try:
+            await q.edit_message_reply_markup(
+                reply_markup=product_display_kb(p, uid)
+            )
+        except Exception:
+            pass
+        return
+
+    if c == "favlist":
+        track_user(update)
+        favs = list_favorites(update.effective_user.id)
+
+        if not favs:
+            await q.edit_message_text(
+                "⭐ المفضلة\n\n"
+                "مفيش منتجات في المفضلة لسه.\n"
+                "تقدر تضيف أي منتج يعجبك من قائمة 💍 المنتجات.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(
+                        "💍 المنتجات", callback_data="products"
+                    )],
+                    [InlineKeyboardButton("⬅️ الرئيسية", callback_data="home")],
+                ]),
+            )
+            return
+
+        await q.edit_message_text(f"⭐ المفضلة عندك ({len(favs)})")
+
+        for p in favs:
+            parts = []
+            if p["name"]:
+                parts.append(f"💍 {p['name']}")
+            if p["code"]:
+                parts.append(f"🔖 الكود: {p['code']}")
+            parts.append(
+                f"💰 السعر: {round(float(p['price']))} جنيه"
+                if p.get("price") not in (None, "")
+                else "💰 السعر: للاستعلام"
+            )
+            status = p.get("status") or "available"
+            if status != "available":
+                parts.append(STATUS_LABELS.get(status, ""))
+            if p["description"]:
+                parts.append(f"\n{p['description']}")
+
+            try:
+                await context.bot.send_photo(
+                    chat_id=q.message.chat_id,
+                    photo=p["Photo_id"],
+                    caption="\n".join(parts) or None,
+                    reply_markup=product_display_kb(
+                        p, update.effective_user.id
+                    ),
+                )
+            except Exception as e:
+                print("Favorites Display Error:", repr(e), flush=True)
+        return
+
     # ---- تحليل المنتجات (Leads + Conversion) ----
 
     if c == "prodanalytics":
@@ -8487,6 +8723,65 @@ async def buttons(update, context):
                 )
         else:
             lines.append("لا توجد بيانات مشاهدات كافية لسه.")
+
+        await q.edit_message_text(
+            "\n".join(lines),
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ رجوع", callback_data="admin")],
+            ]),
+        )
+        return
+
+    # ---- عمليات فشلت اليوم ----
+
+    if c == "failedops":
+        if not is_admin(update):
+            return
+
+        rows = many("""
+            SELECT platform, error, content_snippet, created_at
+            FROM PublishLogs
+            WHERE status='failed' AND created_at >= CURDATE()
+            ORDER BY created_at DESC
+            LIMIT 15
+        """)
+
+        if not rows:
+            await q.edit_message_text(
+                "✅ مفيش عمليات فشلت النهاردة.",
+                reply_markup=admin_menu(owner=is_owner(update)),
+            )
+            return
+
+        PLATFORM_LABELS = {
+            "auto_telegram": "📱 تليجرام (تلقائي)",
+            "auto_facebook": "📘 فيسبوك (تلقائي)",
+            "telegram": "📱 تليجرام",
+            "facebook": "📘 فيسبوك",
+            "instagram": "📸 إنستجرام",
+        }
+
+        lines = [f"❌ عمليات فشلت النهاردة ({len(rows)})\n"]
+        for r in rows:
+            plat = PLATFORM_LABELS.get(r["platform"], r["platform"])
+            t_str = (
+                r["created_at"].strftime("%H:%M")
+                if hasattr(r["created_at"], "strftime") else r["created_at"]
+            )
+            snippet = (r["content_snippet"] or "").strip()
+            err = (r["error"] or "غير معروف").strip()
+            lines.append(
+                f"• {plat} — {t_str}\n"
+                f"  المحتوى: {snippet[:60] or '-'}\n"
+                f"  السبب: {err[:150]}"
+            )
+
+        lines.append(
+            "\nملحوظة: مفيش زرار \"إعادة محاولة\" تلقائي هنا، لأن "
+            "المنشورات (خصوصًا اللي فيها صور) مش متسجلة كاملة "
+            "بالتفصيل الكافي للإرسال تاني تلقائيًا. لو عايز تعيد أي "
+            "منشور من دول، اعمله يدوي من نفس المكان اللي نشرته منه."
+        )
 
         await q.edit_message_text(
             "\n".join(lines),
@@ -9911,12 +10206,16 @@ async def setup_bot_commands(app):
     admin chats only — regular customers never see it."""
     try:
         await app.bot.set_my_commands(
-            [BotCommand("start", "🏠 القائمة الرئيسية")],
+            [
+                BotCommand("start", "🏠 القائمة الرئيسية"),
+                BotCommand("favorites", "⭐ المفضلة"),
+            ],
             scope=BotCommandScopeDefault(),
         )
 
         admin_commands = [
             BotCommand("start", "🏠 القائمة الرئيسية"),
+            BotCommand("favorites", "⭐ المفضلة"),
             BotCommand("updateprice", "✏️ تحديث سعر الذهب"),
         ]
         for admin_id in all_admin_ids():
@@ -9961,6 +10260,7 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("id", show_id))
+    app.add_handler(CommandHandler("favorites", favorites_command))
     app.add_handler(CommandHandler("updateprice", update_price_shortcut))
 
     app.add_handler(
