@@ -2316,6 +2316,11 @@ def save_latest(p, admin_id=None):
 
 
 def comparison(p):
+    # Only show the vs-yesterday comparison line once a week, on
+    # Mondays — not on every price update/screen view.
+    if datetime.now(TZ).weekday() != 0:  # Monday == 0
+        return None
+
     old = first_price_on_date(yesterday())
     if old is None:
         return None
@@ -2329,9 +2334,26 @@ def comparison(p):
     return "➖ عيار 21 مستقر عن أول سعر أمس"
 
 
+def latest_update_time():
+    row = one(
+        "SELECT created_at FROM GoldPriceHistory "
+        "ORDER BY created_at DESC LIMIT 1"
+    )
+    return row["created_at"] if row else None
+
+
 def price_text(p):
     p24, p21, p18 = calc(p)
     c = comparison(p)
+
+    updated_at = latest_update_time()
+    updated_line = None
+    if updated_at is not None:
+        t_str = (
+            updated_at.strftime("%H:%M - %d/%m")
+            if hasattr(updated_at, "strftime") else str(updated_at)
+        )
+        updated_line = f"🕐 آخر تحديث: {t_str}"
 
     return "\n".join(
         ([c, ""] if c else [])
@@ -2341,6 +2363,9 @@ def price_text(p):
             f"🟡 عيار 24 : {p24}",
             f"🟡 عيار 21 : {p21}",
             f"🟡 عيار 18 : {p18}",
+        ]
+        + ([updated_line] if updated_line else [])
+        + [
             "",
             "📍 " + SHOP_ADDRESS,
             "",
