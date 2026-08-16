@@ -198,6 +198,8 @@ def init_db():
                 "TINYINT UNSIGNED NULL",
                 "ALTER TABLE Users ADD COLUMN last_calc_weight "
                 "DECIMAL(10,2) NULL",
+                "ALTER TABLE Users ADD COLUMN referred_by "
+                "BIGINT NULL",
             ):
                 try:
                     x.execute(q)
@@ -325,6 +327,59 @@ def init_db():
                     last_wished_year SMALLINT UNSIGNED NULL,
                     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     INDEX(month, day)
+                )
+            """)
+
+            x.execute(
+                "SELECT id FROM ScheduledNotifications WHERE label=%s",
+                ("fajr",),
+            )
+            if not x.fetchone():
+                x.execute("""
+                    INSERT INTO ScheduledNotifications
+                    (time_str,label,body,enabled)
+                    VALUES(%s,%s,%s,1)
+                """, (
+                    "04:55", "fajr",
+                    "🌅 حان الآن موعد آذان الفجر\n\n"
+                    "اللهم لك الحمد أنت نور السماوات والأرض، اللهم بلغنا "
+                    "هذا اليوم على خير، وارزقنا فيه صلاة خاشعة وقلبًا "
+                    "سليمًا ورزقًا حلالًا طيبًا.\n\n"
+                    "🤲 صلاة مقبولة ويوم مبارك عليكم جميعًا\n"
+                    f"من أسرة {SHOP_NAME} ❤️",
+                ))
+
+            x.execute("""
+                CREATE TABLE IF NOT EXISTS CallRequests(
+                    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                    telegram_id BIGINT NOT NULL,
+                    name VARCHAR(255) NULL,
+                    phone VARCHAR(30) NOT NULL,
+                    status ENUM('pending','done') NOT NULL DEFAULT 'pending',
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    done_at TIMESTAMP NULL,
+                    INDEX(status, created_at)
+                )
+            """)
+
+            for q in (
+                "ALTER TABLE CallRequests ADD COLUMN rating "
+                "TINYINT UNSIGNED NULL",
+            ):
+                try:
+                    x.execute(q)
+                except Exception:
+                    pass
+
+            x.execute("""
+                CREATE TABLE IF NOT EXISTS SavingsGoals(
+                    telegram_id BIGINT PRIMARY KEY,
+                    weight DECIMAL(10,3) NOT NULL,
+                    karat TINYINT UNSIGNED NOT NULL,
+                    months INT UNSIGNED NOT NULL,
+                    target_amount DECIMAL(15,2) NOT NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    last_reminded_month VARCHAR(7) NULL
                 )
             """)
 
@@ -579,6 +634,25 @@ ZAKAT_DISCLAIMER = (
     "فقهي حول زكاة الذهب المستخدم كحلي شخصي (زينة)، فالأحوط الرجوع "
     "لجهة دينية موثوقة زي دار الإفتاء لتفصيل حالتك بالظبط."
 )
+
+GOLD_CARE_TIPS = [
+    "💡 نصيحة اليوم: احفظي الدهب في علبة لوحده، عشان الاحتكاك مع "
+    "قطع تانية بيخدشه بمرور الوقت.",
+    "💡 نصيحة اليوم: شيلي الدهب قبل ما تستحمي أو تسبحي، لأن الكلور "
+    "والصابون بيضعفوا لمعانه على المدى الطويل.",
+    "💡 نصيحة اليوم: نضفي دهبك بفرشة أسنان ناعمة ومية دافية وصابون "
+    "خفيف، وجففيه كويس قبل ما ترجعيه للعلبة.",
+    "💡 نصيحة اليوم: عيار 21 أعلى نقاء من عيار 18، لكن عيار 18 أكتر "
+    "متانة في الاستخدام اليومي لأنه مخلوط بمعادن أقوى.",
+    "💡 نصيحة اليوم: ابعدي عطرك وكريماتك عن الدهب مباشرة، وحطي "
+    "الإكسسوار بعد ما العطر يجف تمامًا.",
+    "💡 نصيحة اليوم: افحصي أقفال السلاسل والحلق بتاعتك بين كل فترة "
+    "والتانية، عشان تلاحظي أي ضعف قبل ما تفقدي القطعة.",
+    "💡 نصيحة اليوم: احتفظي بفاتورة الشراء دايمًا — بتسهل عليكي "
+    "أي استبدال أو ضمان في المستقبل.",
+    "💡 نصيحة اليوم: الدهب الأصفر بيتحمل الاستخدام اليومي أكتر من "
+    "الدهب الأبيض، لأن طلاء الروديوم في الأبيض ممكن يخف مع الوقت.",
+]
 
 # Business hours: every day except Friday 11:30 AM -> 12:30 AM (next day).
 # Friday: 1:00 PM -> 12:30 AM (next day). weekday(): Monday=0 ... Friday=4.
@@ -849,7 +923,7 @@ def customer_products(cid):
 # USERS
 # =========================================================
 
-def track_user(update):
+def track_user(update, referred_by=None):
     u = update.effective_user
     if not u:
         return
@@ -872,9 +946,12 @@ def track_user(update):
                     x.execute("""
                         INSERT INTO Users
                         (telegram_id,first_name,last_name,username,
-                         total_interactions)
-                        VALUES(%s,%s,%s,%s,1)
-                    """, (u.id, u.first_name, u.last_name, u.username))
+                         total_interactions,referred_by)
+                        VALUES(%s,%s,%s,%s,1,%s)
+                    """, (
+                        u.id, u.first_name, u.last_name, u.username,
+                        referred_by,
+                    ))
         finally:
             c.close()
     except Exception as e:
@@ -1696,6 +1773,136 @@ def delete_birthday(telegram_id):
         c.close()
 
 
+# =========================================================
+# CALL REQUESTS (customer requests a phone call, FIFO queue)
+# =========================================================
+
+def add_call_request(telegram_id, name, phone):
+    c = db()
+    try:
+        with c.cursor() as x:
+            x.execute("""
+                INSERT INTO CallRequests(telegram_id,name,phone)
+                VALUES(%s,%s,%s)
+            """, (telegram_id, name, phone))
+            return x.lastrowid
+    finally:
+        c.close()
+
+
+def pending_call_requests():
+    return many(
+        "SELECT * FROM CallRequests WHERE status='pending' "
+        "ORDER BY created_at ASC"
+    )
+
+
+def pending_call_count_before(rid):
+    row = one(
+        "SELECT COUNT(*) AS n FROM CallRequests "
+        "WHERE status='pending' AND created_at < "
+        "(SELECT created_at FROM CallRequests WHERE id=%s)",
+        (rid,),
+    )
+    return row["n"] if row else 0
+
+
+def get_call_request(rid):
+    return one("SELECT * FROM CallRequests WHERE id=%s", (rid,))
+
+
+def mark_call_done(rid):
+    c = db()
+    try:
+        with c.cursor() as x:
+            x.execute(
+                "UPDATE CallRequests SET status='done', "
+                "done_at=CURRENT_TIMESTAMP WHERE id=%s",
+                (rid,),
+            )
+            return bool(x.rowcount)
+    finally:
+        c.close()
+
+
+def set_call_rating(rid, rating):
+    c = db()
+    try:
+        with c.cursor() as x:
+            x.execute(
+                "UPDATE CallRequests SET rating=%s WHERE id=%s",
+                (rating, rid),
+            )
+            return bool(x.rowcount)
+    finally:
+        c.close()
+
+
+def call_requests_this_week():
+    return many(
+        "SELECT * FROM CallRequests WHERE created_at >= "
+        "DATE_SUB(NOW(), INTERVAL 7 DAY)"
+    )
+
+
+# =========================================================
+# SAVINGS GOALS
+# =========================================================
+
+def set_savings_goal(telegram_id, weight, karat, months, target_amount):
+    c = db()
+    try:
+        with c.cursor() as x:
+            x.execute("""
+                INSERT INTO SavingsGoals
+                (telegram_id,weight,karat,months,target_amount)
+                VALUES(%s,%s,%s,%s,%s)
+                ON DUPLICATE KEY UPDATE
+                    weight=VALUES(weight), karat=VALUES(karat),
+                    months=VALUES(months),
+                    target_amount=VALUES(target_amount),
+                    last_reminded_month=NULL
+            """, (telegram_id, weight, karat, months, target_amount))
+    finally:
+        c.close()
+
+
+def get_savings_goal(telegram_id):
+    return one(
+        "SELECT * FROM SavingsGoals WHERE telegram_id=%s", (telegram_id,)
+    )
+
+
+def all_savings_goals():
+    return many("SELECT * FROM SavingsGoals")
+
+
+def delete_savings_goal(telegram_id):
+    c = db()
+    try:
+        with c.cursor() as x:
+            x.execute(
+                "DELETE FROM SavingsGoals WHERE telegram_id=%s",
+                (telegram_id,),
+            )
+            return bool(x.rowcount)
+    finally:
+        c.close()
+
+
+def mark_savings_goal_reminded(telegram_id, month_str):
+    c = db()
+    try:
+        with c.cursor() as x:
+            x.execute(
+                "UPDATE SavingsGoals SET last_reminded_month=%s "
+                "WHERE telegram_id=%s",
+                (month_str, telegram_id),
+            )
+    finally:
+        c.close()
+
+
 
 # =========================================================
 # SAVED (REUSABLE) NOTIFICATIONS
@@ -2150,6 +2357,18 @@ def home(admin=False, subscribed=False):
             "🎂 سجّل تاريخ ميلادك", callback_data="birthdaymenu"
         )],
         [InlineKeyboardButton(
+            "✍️ ابعت رسالة للإدارة", callback_data="contactadmin"
+        )],
+        [InlineKeyboardButton(
+            "📞 اطلب مكالمة", callback_data="callrequest"
+        )],
+        [InlineKeyboardButton(
+            "💰 هدف توفير للذهب", callback_data="savegoal"
+        )],
+        [InlineKeyboardButton(
+            "🔗 ادعُ صديق", callback_data="referral"
+        )],
+        [InlineKeyboardButton(
             "🟢 الإشعارات: شغالة (دوس للإيقاف)"
             if subscribed else
             "🔴 الإشعارات: متوقفة (دوس عشان توصلك)",
@@ -2189,6 +2408,9 @@ def admin_menu(owner=False):
         [InlineKeyboardButton("📂 إدارة الأقسام", callback_data="acat")],
         [InlineKeyboardButton("⏰ النشر التلقائي", callback_data="schedmenu")],
         [InlineKeyboardButton("📊 الإحصائيات", callback_data="stats")],
+        [InlineKeyboardButton(
+            "📞 طلبات المكالمات", callback_data="callqueue"
+        )],
     ]
     if owner:
         rows.append(
@@ -2196,6 +2418,31 @@ def admin_menu(owner=False):
         )
     rows.append([InlineKeyboardButton("⬅️ الرئيسية", callback_data="home")])
     return InlineKeyboardMarkup(rows)
+
+
+def call_queue_view(owner):
+    """Returns (text, keyboard) for the pending call-requests queue,
+    shared between the callqueue and calldone handlers."""
+    rows = pending_call_requests()
+    if not rows:
+        return (
+            "📞 مفيش طلبات مكالمات دلوقتي.",
+            admin_menu(owner=owner),
+        )
+
+    text = "📞 طلبات المكالمات (الأقدم فوق)\n\n"
+    kb_rows = []
+    for i, r in enumerate(rows, start=1):
+        ct = r["created_at"]
+        ct_str = ct.strftime("%H:%M") if hasattr(ct, "strftime") else ct
+        name = r.get("name") or "بدون اسم"
+        text += f"{i}. {name} — {r['phone']} ({ct_str})\n"
+        kb_rows.append([InlineKeyboardButton(
+            f"✅ تم: {name} ({r['phone']})",
+            callback_data=f"calldone:{r['id']}",
+        )])
+    kb_rows.append([InlineKeyboardButton("⬅️ رجوع", callback_data="admin")])
+    return text, InlineKeyboardMarkup(kb_rows)
 
 
 def notif_menu():
@@ -2778,6 +3025,122 @@ async def birthday_tick(context):
         print("Birthday Tick Error:", repr(e), flush=True)
 
 
+async def tip_tick(context):
+    """Runs every minute via JobQueue but only acts once at 12:00
+    daily. Broadcasts a rotating gold-care tip to gold subscribers."""
+    try:
+        now = datetime.now(TZ)
+        if now.strftime("%H:%M") != "12:00":
+            return
+
+        today_str = now.strftime("%Y-%m-%d")
+        if get_setting("last_tip_date") == today_str:
+            return
+
+        tip = GOLD_CARE_TIPS[now.timetuple().tm_yday % len(GOLD_CARE_TIPS)]
+        await broadcast_custom_notification(context, ADMIN_ID, tip)
+        set_setting("last_tip_date", today_str)
+    except Exception as e:
+        print("Tip Tick Error:", repr(e), flush=True)
+
+
+async def savings_goal_tick(context):
+    """Runs every minute via JobQueue but only acts once at 09:00 on
+    the 1st of each month. Reminds every customer with an active
+    savings goal, with the monthly amount recalculated against the
+    live gold price."""
+    try:
+        now = datetime.now(TZ)
+        if now.day != 1 or now.strftime("%H:%M") != "09:00":
+            return
+
+        month_str = now.strftime("%Y-%m")
+
+        p21 = latest()
+        if not p21:
+            return
+        p24, _, _ = calc(p21)
+
+        for g in all_savings_goals():
+            if g.get("last_reminded_month") == month_str:
+                continue
+
+            now_price = p24 * (g["karat"] / 24)
+            current_target = float(g["weight"]) * now_price
+            monthly = current_target / g["months"]
+
+            try:
+                await context.bot.send_message(
+                    chat_id=g["telegram_id"],
+                    text=(
+                        "💰 تذكير هدف التوفير\n\n"
+                        f"هدفك: {float(g['weight'])} جرام عيار "
+                        f"{g['karat']} خلال {g['months']} شهر.\n\n"
+                        f"بسعر النهاردة، محتاج توفر تقريبًا "
+                        f"{round(monthly)} ج الشهر ده عشان تفضل ماشي "
+                        "على الخطة."
+                    ),
+                )
+            except Exception as e:
+                print(
+                    f"Savings Goal Reminder Failed for {g['telegram_id']}:",
+                    repr(e), flush=True,
+                )
+
+            mark_savings_goal_reminded(g["telegram_id"], month_str)
+    except Exception as e:
+        print("Savings Goal Tick Error:", repr(e), flush=True)
+
+
+async def weekly_summary_tick(context):
+    """Runs every minute via JobQueue but only acts once at 20:00 on
+    Fridays. Sends the admin a quick activity summary for the week."""
+    try:
+        now = datetime.now(TZ)
+        if now.weekday() != 4 or now.strftime("%H:%M") != "20:00":
+            return
+
+        week_str = now.strftime("%Y-W%W")
+        if get_setting("last_weekly_summary") == week_str:
+            return
+
+        if not ADMIN_ID:
+            return
+
+        new_users = one(
+            "SELECT COUNT(*) AS n FROM Users WHERE first_seen >= "
+            "DATE_SUB(NOW(), INTERVAL 7 DAY)"
+        )
+        st = gold_period_stats(7)
+        calls = call_requests_this_week()
+        invs = one(
+            "SELECT COUNT(*) AS n FROM Investments WHERE created_at >= "
+            "DATE_SUB(NOW(), INTERVAL 7 DAY)"
+        )
+
+        price_line = (
+            f"أعلى سعر: {st['high']} ج، أقل سعر: {st['low']} ج"
+            if st else "لا يوجد بيانات أسعار كافية"
+        )
+
+        text = (
+            "📊 ملخص الأسبوع\n\n"
+            f"👥 مشتركين جدد: {new_users['n'] if new_users else 0}\n"
+            f"💎 {price_line}\n"
+            f"📞 طلبات مكالمات: {len(calls)}\n"
+            f"💰 عمليات استثمار متسجلة: {invs['n'] if invs else 0}"
+        )
+
+        try:
+            await context.bot.send_message(chat_id=ADMIN_ID, text=text)
+        except Exception as e:
+            print("Weekly Summary Send Failed:", repr(e), flush=True)
+
+        set_setting("last_weekly_summary", week_str)
+    except Exception as e:
+        print("Weekly Summary Tick Error:", repr(e), flush=True)
+
+
 async def broadcast_gold_update(context, new_price):
     """
     Sends the new gold price to every customer subscribed to
@@ -3100,7 +3463,19 @@ async def maybe_send_gold_alert(context, prev_price, new_price):
 
 async def start(update, context):
     context.user_data.clear()
-    track_user(update)
+
+    referred_by = None
+    if context.args:
+        arg = context.args[0]
+        if arg.startswith("ref_"):
+            try:
+                candidate = int(arg[4:])
+                if candidate != update.effective_user.id:
+                    referred_by = candidate
+            except ValueError:
+                pass
+
+    track_user(update, referred_by=referred_by)
     await update.message.reply_text(
         "💎 " + SHOP_NAME + "\n\n"
         "أهلاً بيك في البوت الرسمي لـ" + SHOP_FULL_NAME + " ✨\n\n"
@@ -4382,6 +4757,144 @@ async def text(update, context):
         )
         return
 
+    if s == "save_weight_input":
+        m = re.match(r"^(\d+(?:\.\d+)?)\s+(\d{1,2})$", t.strip())
+        if not m:
+            await update.message.reply_text(
+                "❌ اكتب الوزن والعيار مفصولين بمسافة.\nمثال: 10 21"
+            )
+            return
+
+        weight = float(m.group(1))
+        karat = int(m.group(2))
+
+        if weight <= 0:
+            await update.message.reply_text("❌ اكتب وزن أكبر من صفر.")
+            return
+        if not (1 <= karat <= 24):
+            await update.message.reply_text(
+                "❌ العيار لازم يكون رقم من 1 لـ 24."
+            )
+            return
+
+        context.user_data["save_weight"] = weight
+        context.user_data["save_karat"] = karat
+        context.user_data["state"] = "save_months_input"
+
+        await update.message.reply_text(
+            "على مدار كام شهر عايز توفر المبلغ ده؟\nمثال: 6"
+        )
+        return
+
+    if s == "save_months_input":
+        t_clean = t.strip()
+        if not t_clean.isdigit() or int(t_clean) <= 0:
+            await update.message.reply_text("❌ اكتب عدد شهور صحيح.\nمثال: 6")
+            return
+
+        months = int(t_clean)
+        weight = context.user_data.get("save_weight")
+        karat = context.user_data.get("save_karat")
+        if weight is None or karat is None:
+            await update.message.reply_text("ابدأ من الأول من القائمة الرئيسية.")
+            return
+
+        p21 = latest()
+        if not p21:
+            await update.message.reply_text(
+                "💎 لم يتم تحديث أسعار الذهب حتى الآن."
+            )
+            return
+
+        p24, _, _ = calc(p21)
+        now_price = p24 * (karat / 24)
+        target = weight * now_price
+        monthly = target / months
+
+        set_savings_goal(
+            update.effective_user.id, weight, karat, months, target
+        )
+        context.user_data.clear()
+
+        await update.message.reply_text(
+            "🎯 تمام! هدفك:\n\n"
+            f"{weight} جرام عيار {karat} خلال {months} شهر\n"
+            f"القيمة بسعر النهاردة: {round(target)} ج\n\n"
+            f"يعني محتاج توفر تقريبًا {round(monthly)} ج في الشهر.\n\n"
+            "هنفكّرك كل شهر بالمبلغ المحدث حسب سعر الذهب وقتها.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ الرئيسية", callback_data="home")],
+            ]),
+        )
+        return
+
+    if s == "call_phone_input":
+        phone = re.sub(r"[\s\-]", "", t.strip())
+        if not re.match(r"^\+?\d{8,15}$", phone):
+            await update.message.reply_text(
+                "❌ اكتب رقم موبايل صحيح.\nمثال: 01012345678"
+            )
+            return
+
+        u = update.effective_user
+        name = f"{u.first_name or ''} {u.last_name or ''}".strip() or "بدون اسم"
+
+        rid = add_call_request(u.id, name, phone)
+        position = pending_call_count_before(rid) + 1
+        context.user_data["state"] = None
+
+        if ADMIN_ID:
+            try:
+                await context.bot.send_message(
+                    chat_id=ADMIN_ID,
+                    text=(
+                        "📞 طلب مكالمة جديد\n\n"
+                        f"👤 {name}\n"
+                        f"📱 {phone}\n\n"
+                        "من لوحة التحكم → 📞 طلبات المكالمات."
+                    ),
+                )
+            except Exception as e:
+                print("Call Request Notify Failed:", repr(e), flush=True)
+
+        await update.message.reply_text(
+            "✅ اتسجل طلبك، هنكلمك في أقرب وقت.\n\n"
+            f"ترتيبك في قائمة الانتظار: {position}",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ الرئيسية", callback_data="home")],
+            ]),
+        )
+        return
+
+    if s == "contact_admin_input":
+        context.user_data["state"] = None
+
+        u = update.effective_user
+        sender = f"{u.first_name or ''} {u.last_name or ''}".strip() or "بدون اسم"
+        username_line = f"@{u.username}" if u.username else "بدون يوزر"
+
+        if ADMIN_ID:
+            try:
+                await context.bot.send_message(
+                    chat_id=ADMIN_ID,
+                    text=(
+                        "✍️ رسالة جديدة من عميل\n\n"
+                        f"👤 {sender} ({username_line})\n"
+                        f"🆔 {u.id}\n\n"
+                        f"{t}"
+                    ),
+                )
+            except Exception as e:
+                print("Contact Admin Forward Failed:", repr(e), flush=True)
+
+        await update.message.reply_text(
+            "✅ اتبعتت رسالتك للإدارة، هيتم الرد عليك في أقرب وقت.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ الرئيسية", callback_data="home")],
+            ]),
+        )
+        return
+
     if s == "birthday_date_input":
         m = re.match(r"^([0-3]?\d)-(0?\d|1[0-2])$", t.strip())
         if not m:
@@ -5545,6 +6058,189 @@ async def buttons(update, context):
         delete_birthday(update.effective_user.id)
         await q.edit_message_text(
             "✅ اتلغى تسجيل تاريخ ميلادك.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ الرئيسية", callback_data="home")],
+            ]),
+        )
+        return
+
+    # ---- تواصل مع الإدارة ----
+
+    if c == "contactadmin":
+        track_user(update)
+        context.user_data.clear()
+        context.user_data["state"] = "contact_admin_input"
+        await q.edit_message_text(
+            "✍️ اكتب رسالتك وهتوصل للإدارة على طول.\n\n"
+            "(استفسار، طلب، شكوى... أي حاجة)"
+        )
+        return
+
+    # ---- طلب مكالمة ----
+
+    if c == "callrequest":
+        track_user(update)
+        context.user_data.clear()
+        context.user_data["state"] = "call_phone_input"
+        await q.edit_message_text(
+            "📞 اطلب مكالمة\n\n"
+            "اكتب رقم موبايلك وهنكلمك عليه في أقرب وقت.\n"
+            "مثال: 01012345678"
+        )
+        return
+
+    if c == "callqueue":
+        if not is_admin(update):
+            return
+
+        text, kb = call_queue_view(is_owner(update))
+        await q.edit_message_text(text, reply_markup=kb)
+        return
+
+    if c.startswith("calldone:"):
+        if not is_admin(update):
+            return
+
+        rid = int(c.split(":")[1])
+        req = get_call_request(rid)
+        if not req:
+            await q.answer("الطلب ده مش موجود.", show_alert=True)
+            return
+
+        mark_call_done(rid)
+        await q.answer("✅ تمام، اتشال من القائمة.")
+
+        try:
+            await context.bot.send_message(
+                chat_id=req["telegram_id"],
+                text=(
+                    "📞 تمام، اتكلمنا معاك دلوقتي.\n\n"
+                    "تقيّم المكالمة؟"
+                ),
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton(
+                        "⭐" * n, callback_data=f"callrate:{rid}:{n}"
+                    ) for n in range(1, 6)
+                ]]),
+            )
+        except Exception as e:
+            print("Call Rating Request Failed:", repr(e), flush=True)
+
+        text, kb = call_queue_view(is_owner(update))
+        await q.edit_message_text(text, reply_markup=kb)
+        return
+
+    if c.startswith("callrate:"):
+        _, rid_s, rating_s = c.split(":")
+        rid = int(rid_s)
+        rating = int(rating_s)
+
+        req = get_call_request(rid)
+        if not req or req["telegram_id"] != update.effective_user.id:
+            await q.answer("الطلب ده مش موجود.", show_alert=True)
+            return
+
+        set_call_rating(rid, rating)
+        await q.edit_message_text(
+            "🙏 شكرًا لتقييمك! " + ("⭐" * rating)
+        )
+        return
+
+    # ---- هدف توفير للذهب ----
+
+    if c == "savegoal":
+        track_user(update)
+        existing = get_savings_goal(update.effective_user.id)
+        if existing:
+            p21 = latest()
+            monthly_line = ""
+            if p21:
+                p24, _, _ = calc(p21)
+                now_price = p24 * (existing["karat"] / 24)
+                current_target = float(existing["weight"]) * now_price
+                monthly_now = current_target / existing["months"]
+                monthly_line = (
+                    f"\n\nبسعر النهاردة، محتاج توفر تقريبًا "
+                    f"{round(monthly_now)} ج/شهر عشان توصل للهدف في "
+                    f"{existing['months']} شهر."
+                )
+
+            await q.edit_message_text(
+                "💰 هدفك الحالي:\n\n"
+                f"{float(existing['weight'])} جرام عيار {existing['karat']} "
+                f"خلال {existing['months']} شهر"
+                f"{monthly_line}",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(
+                        "✏️ تغيير الهدف", callback_data="savegoalchange"
+                    )],
+                    [InlineKeyboardButton(
+                        "🗑 إلغاء الهدف", callback_data="savegoaldelete"
+                    )],
+                    [InlineKeyboardButton("⬅️ الرئيسية", callback_data="home")],
+                ]),
+            )
+            return
+
+        context.user_data.clear()
+        context.user_data["state"] = "save_weight_input"
+        await q.edit_message_text(
+            "💰 هدف توفير للذهب\n\n"
+            "اكتب الوزن والعيار اللي عايز توفر عشانه، مفصولين بمسافة.\n"
+            "مثال: 10 21"
+        )
+        return
+
+    if c == "savegoalchange":
+        context.user_data.clear()
+        context.user_data["state"] = "save_weight_input"
+        await q.edit_message_text(
+            "✏️ اكتب الوزن والعيار الجديد مفصولين بمسافة.\nمثال: 10 21"
+        )
+        return
+
+    if c == "savegoaldelete":
+        await q.edit_message_text(
+            "⚠️ متأكد عايز تلغي هدف التوفير؟",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "🗑 اه، الغيه", callback_data="savegoaldeleteconfirm"
+                )],
+                [InlineKeyboardButton(
+                    "❌ لأ، رجعني", callback_data="savegoal"
+                )],
+            ]),
+        )
+        return
+
+    if c == "savegoaldeleteconfirm":
+        delete_savings_goal(update.effective_user.id)
+        await q.edit_message_text(
+            "✅ اتلغى هدف التوفير.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ الرئيسية", callback_data="home")],
+            ]),
+        )
+        return
+
+    # ---- ادعُ صديق ----
+
+    if c == "referral":
+        track_user(update)
+        u = update.effective_user
+        link = f"{BOT_LINK}?start=ref_{u.id}"
+        count_row = one(
+            "SELECT COUNT(*) AS n FROM Users WHERE referred_by=%s",
+            (u.id,),
+        )
+        count = count_row["n"] if count_row else 0
+
+        await q.edit_message_text(
+            "🔗 ادعُ صديق\n\n"
+            "ابعت الرابط ده لأصحابك، وكل واحد يدخل من خلاله يتسجل "
+            "تلقائي إنه جاله منك:\n\n"
+            f"{link}\n\n"
+            f"👥 عدد اللي دخلوا من رابطك: {count}",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("⬅️ الرئيسية", callback_data="home")],
             ]),
@@ -8876,6 +9572,17 @@ def main():
         )
         app.job_queue.run_repeating(
             birthday_tick, interval=60, first=25, name="birthday_tick",
+        )
+        app.job_queue.run_repeating(
+            tip_tick, interval=60, first=30, name="tip_tick",
+        )
+        app.job_queue.run_repeating(
+            savings_goal_tick, interval=60, first=35,
+            name="savings_goal_tick",
+        )
+        app.job_queue.run_repeating(
+            weekly_summary_tick, interval=60, first=40,
+            name="weekly_summary_tick",
         )
         print("Auto-posting scheduler started (checks every 60s).", flush=True)
     else:
