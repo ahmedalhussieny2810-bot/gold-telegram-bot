@@ -105,6 +105,24 @@ def db():
     )
 
 
+def _safe_alter(x, q):
+    """Runs a schema-migration ALTER TABLE statement (e.g. ADD COLUMN)
+    on startup. These run on every restart, so once a column already
+    exists, MySQL raises error 1060 (Duplicate column name) — that's
+    expected and gets ignored silently. Any OTHER error (bad
+    connection, typo, wrong type, etc.) is a real problem, so it gets
+    printed to the logs instead of vanishing silently like before —
+    a startup that "succeeds" while quietly missing a column is
+    worse than one that logs a clear warning about it.
+    """
+    try:
+        x.execute(q)
+    except Exception as e:
+        code = e.args[0] if getattr(e, "args", None) else None
+        if code != 1060:
+            print(f"DB Migration Warning: {q[:60]}... -> {repr(e)}", flush=True)
+
+
 def init_db():
     c = db()
     try:
@@ -201,10 +219,7 @@ def init_db():
                 "ALTER TABLE Users ADD COLUMN referred_by "
                 "BIGINT NULL",
             ):
-                try:
-                    x.execute(q)
-                except Exception:
-                    pass
+                _safe_alter(x, q)
 
             x.execute("""
                 CREATE TABLE IF NOT EXISTS GoldPriceHistory(
@@ -366,10 +381,7 @@ def init_db():
                 "ALTER TABLE CallRequests ADD COLUMN rating "
                 "TINYINT UNSIGNED NULL",
             ):
-                try:
-                    x.execute(q)
-                except Exception:
-                    pass
+                _safe_alter(x, q)
 
             x.execute("""
                 CREATE TABLE IF NOT EXISTS SavingsGoals(
@@ -1285,6 +1297,10 @@ def set_setting(key, value):
             """, (key, value, value))
     finally:
         c.close()
+
+
+def maintenance_mode_on():
+    return get_setting("maintenance_mode", "0") == "1"
 
 
 def gold_alert_threshold():
@@ -2409,6 +2425,15 @@ def admin_menu(owner=False):
         [InlineKeyboardButton("⏰ النشر التلقائي", callback_data="schedmenu")],
         [InlineKeyboardButton("📊 الإحصائيات", callback_data="stats")],
         [InlineKeyboardButton(
+            "🔥 تحليل المنتجات", callback_data="prodanalytics"
+        )],
+        [InlineKeyboardButton(
+            "🔥 منتج اليوم", callback_data="potdmenu"
+        )],
+        [InlineKeyboardButton(
+            "🔧 وضع الصيانة", callback_data="maintmenu"
+        )],
+        [InlineKeyboardButton(
             "📞 طلبات المكالمات", callback_data="callqueue"
         )],
     ]
@@ -3141,6 +3166,34 @@ async def weekly_summary_tick(context):
         print("Weekly Summary Tick Error:", repr(e), flush=True)
 
 
+async def potd_tick(context):
+    """Runs every minute via JobQueue but only acts once at 10:30
+    daily. If the admin hasn't already picked today's "منتج اليوم"
+    manually, auto-selects the product with the most combined
+    engagement (views + inquiries) and publishes it."""
+    try:
+        now = datetime.now(TZ)
+        if now.strftime("%H:%M") != "10:30":
+            return
+
+        today_str = now.strftime("%Y-%m-%d")
+        if get_setting("potd_date") == today_str:
+            return  # already set (manually or by an earlier tick) today
+
+        row = one("""
+            SELECT id FROM Products
+            WHERE status='available' AND Photo_id IS NOT NULL
+            ORDER BY (views_count + inquiries_count) DESC, id DESC
+            LIMIT 1
+        """)
+        if not row:
+            return
+
+        await publish_product_of_day(context, row["id"])
+    except Exception as e:
+        print("POTD Tick Error:", repr(e), flush=True)
+
+
 async def broadcast_gold_update(context, new_price):
     """
     Sends the new gold price to every customer subscribed to
@@ -3217,6 +3270,86 @@ async def broadcast_new_product(context, photo_id, name, code, price, desc):
     )
 
 
+async def publish_product_of_day(context, pid):
+    """
+    Publishes a product as "🔥 منتج اليوم": posts to the Telegram
+    channel, DMs every notification subscriber, and publishes to
+    Facebook + Instagram (best-effort — a failure on one platform
+    never blocks the others). Marks it in Settings so it only fires
+    once per calendar day. Returns a dict summarizing what worked.
+    """
+    p = product(pid)
+    if not p:
+        return {"ok": False, "message": "المنتج غير موجود."}
+
+    parts = ["🔥 منتج اليوم", ""]
+    if p["name"]:
+        parts.append(f"💍 {p['name']}")
+    if p["code"]:
+        parts.append(f"🔖 الكود: {p['code']}")
+    parts.append(
+        f"💰 السعر: {round(float(p['price']))} جنيه"
+        if p["price"] not in (None, "") else "💰 السعر: للاستعلام"
+    )
+    if p["description"]:
+        parts.append(f"\n{p['description']}")
+    caption = "\n".join(parts)
+
+    today_str = datetime.now(TZ).strftime("%Y-%m-%d")
+    set_setting("potd_product_id", str(pid))
+    set_setting("potd_date", today_str)
+
+    tg_ok = False
+    dm_sent, dm_failed = 0, 0
+    fb_result, ig_result = None, None
+
+    if p["Photo_id"]:
+        tg_ok = await tg_post(context, caption, p["Photo_id"])
+
+        ids = gold_subscriber_ids()
+        for uid in ids:
+            try:
+                await context.bot.send_photo(
+                    chat_id=uid, photo=p["Photo_id"], caption=caption
+                )
+                dm_sent += 1
+            except Exception as e:
+                dm_failed += 1
+                print(f"POTD DM Failed for {uid}:", repr(e), flush=True)
+            await asyncio.sleep(0.05)
+
+        try:
+            f = await context.bot.get_file(p["Photo_id"])
+            photo_url = (
+                f.file_path if f.file_path.startswith("http")
+                else f"https://api.telegram.org/file/bot"
+                     f"{BOT_TOKEN}/{f.file_path}"
+            )
+            fb_result = await facebook_photo(caption, photo_url)
+            ig_result = await instagram_photo(caption, photo_url)
+        except Exception as e:
+            print("POTD FB/IG Publish Error:", repr(e), flush=True)
+
+    log_action(
+        ADMIN_ID, "PRODUCT_OF_THE_DAY",
+        object_type="product", object_id=pid,
+        new_value=(
+            f"tg={tg_ok} dm_sent={dm_sent} "
+            f"fb={bool(fb_result and fb_result.get('ok'))} "
+            f"ig={bool(ig_result and ig_result.get('ok'))}"
+        ),
+    )
+
+    return {
+        "ok": True,
+        "product": p,
+        "tg_ok": tg_ok,
+        "dm_sent": dm_sent,
+        "fb_ok": bool(fb_result and fb_result.get("ok")),
+        "ig_ok": bool(ig_result and ig_result.get("ok")),
+    }
+
+
 async def broadcast_custom_notification(context, admin_id, text, photo_id=None):
     """
     Sends a free-form, admin-written announcement to every customer
@@ -3247,7 +3380,7 @@ async def broadcast_custom_notification(context, admin_id, text, photo_id=None):
     return sent, failed
 
 
-def whatsapp_send_template(phone_number, p24, p21, p18):
+async def whatsapp_send_template(phone_number, p24, p21, p18):
     """
     Sends the approved 'gold_price_update' WhatsApp template to a
     single phone number via the WhatsApp Cloud API. WhatsApp only
@@ -3302,7 +3435,8 @@ def whatsapp_send_template(phone_number, p24, p21, p18):
     }
 
     try:
-        r = requests.post(
+        r = await http_request_with_retry(
+            requests.post,
             url,
             headers={
                 "Authorization": f"Bearer {FACEBOOK_PAGE_ACCESS_TOKEN}",
@@ -3396,7 +3530,7 @@ async def broadcast_gold_update_whatsapp(context, new_price):
     details = []
 
     for number in numbers:
-        result = whatsapp_send_template(number, p24, p21, p18)
+        result = await whatsapp_send_template(number, p24, p21, p18)
         if result.get("ok"):
             sent += 1
         else:
@@ -3462,6 +3596,13 @@ async def maybe_send_gold_alert(context, prev_price, new_price):
 
 
 async def start(update, context):
+    if maintenance_mode_on() and not is_admin(update):
+        await update.message.reply_text(
+            "🔧 البوت تحت التحديث دلوقتي، هيرجع يشتغل قريب. "
+            "حاول تاني بعد شوية 🙏"
+        )
+        return
+
     context.user_data.clear()
 
     referred_by = None
@@ -3526,6 +3667,44 @@ async def update_price_shortcut(update, context):
 # FACEBOOK - PUBLIC PUBLISH V12
 # =========================================================
 
+async def http_request_with_retry(
+    func, *args, max_retries=3, base_delay=2, **kwargs
+):
+    """
+    Runs a blocking `requests` call (get/post/...) in a separate
+    thread via asyncio.to_thread, so it never blocks the bot's event
+    loop for other users while waiting on Meta's servers.
+
+    Also retries with exponential backoff (2s, 4s, 8s...) on
+    timeouts, connection errors, HTTP 429 (rate limit), and 5xx
+    (Meta-side server errors) — these are almost always transient.
+    Any other status code (4xx auth/validation errors) is returned
+    immediately without retrying, since retrying won't fix them.
+    """
+    last_exc = None
+    r = None
+
+    for attempt in range(max_retries):
+        try:
+            r = await asyncio.to_thread(func, *args, **kwargs)
+        except requests.RequestException as e:
+            last_exc = e
+            if attempt < max_retries - 1:
+                await asyncio.sleep(base_delay * (2 ** attempt))
+                continue
+            raise
+
+        if r.status_code == 429 or r.status_code >= 500:
+            if attempt < max_retries - 1:
+                await asyncio.sleep(base_delay * (2 ** attempt))
+                continue
+        return r
+
+    if last_exc:
+        raise last_exc
+    return r
+
+
 def fb_error_text(data, fallback="Unknown Facebook error"):
     if isinstance(data, dict):
         e = data.get("error")
@@ -3539,11 +3718,15 @@ def fb_error_text(data, fallback="Unknown Facebook error"):
     return fallback
 
 
-def fb_request(method, url, *, params=None, data=None, timeout=30):
+async def fb_request(method, url, *, params=None, data=None, timeout=30):
     if method == "GET":
-        r = requests.get(url, params=params, timeout=timeout)
+        r = await http_request_with_retry(
+            requests.get, url, params=params, timeout=timeout
+        )
     else:
-        r = requests.post(url, data=data, timeout=timeout)
+        r = await http_request_with_retry(
+            requests.post, url, data=data, timeout=timeout
+        )
 
     try:
         payload = r.json()
@@ -3564,7 +3747,8 @@ async def facebook_story(image_bytes, base, graph_version):
     story_url = f"{base}/{FACEBOOK_PAGE_ID}/photo_stories"
 
     try:
-        r = requests.post(
+        r = await http_request_with_retry(
+            requests.post,
             photos_url,
             data={
                 "published": "false",
@@ -3584,7 +3768,8 @@ async def facebook_story(image_bytes, base, graph_version):
         if r.status_code >= 300 or not uploaded.get("id"):
             return {"ok": False, "message": fb_error_text(uploaded)}
 
-        r2 = requests.post(
+        r2 = await http_request_with_retry(
+            requests.post,
             story_url,
             data={
                 "photo_id": uploaded["id"],
@@ -3642,7 +3827,7 @@ async def facebook_photo(text, photo_url):
     photos_url = f"{base}/{FACEBOOK_PAGE_ID}/photos"
 
     try:
-        img = requests.get(photo_url, timeout=30)
+        img = await asyncio.to_thread(requests.get, photo_url, timeout=30)
         img.raise_for_status()
     except requests.RequestException as e:
         return {
@@ -3651,7 +3836,8 @@ async def facebook_photo(text, photo_url):
         }
 
     try:
-        r = requests.post(
+        r = await http_request_with_retry(
+            requests.post,
             photos_url,
             data={
                 "caption": text or "",
@@ -3716,7 +3902,7 @@ async def _ig_container_publish(base, data, timeout_polls=10):
     media_url = f"{base}/{INSTAGRAM_BUSINESS_ID}/media"
     publish_url = f"{base}/{INSTAGRAM_BUSINESS_ID}/media_publish"
 
-    r, created = fb_request("POST", media_url, data=data)
+    r, created = await fb_request("POST", media_url, data=data)
 
     print(f"IG MEDIA STATUS: {r.status_code}", flush=True)
     print(f"IG MEDIA RESPONSE: {r.text}", flush=True)
@@ -3731,7 +3917,7 @@ async def _ig_container_publish(base, data, timeout_polls=10):
     last_status = None
     for _ in range(timeout_polls):
         try:
-            sr, sdata = fb_request(
+            sr, sdata = await fb_request(
                 "GET",
                 status_url,
                 params={
@@ -3757,7 +3943,7 @@ async def _ig_container_publish(base, data, timeout_polls=10):
             "message": f"الحالة: {last_status or 'غير معروفة'}"
         }
 
-    r2, published = fb_request(
+    r2, published = await fb_request(
         "POST",
         publish_url,
         data={
@@ -3911,7 +4097,7 @@ async def facebook(text):
     # 1. VERIFY PAGE + TOKEN
     # -----------------------------------------------------
     try:
-        r, page = fb_request(
+        r, page = await fb_request(
             "GET",
             page_url,
             params={
@@ -3970,7 +4156,7 @@ async def facebook(text):
     # 2. CREATE PUBLIC PAGE FEED POST
     # -----------------------------------------------------
     try:
-        r, created = fb_request(
+        r, created = await fb_request(
             "POST",
             feed_url,
             data={
@@ -4034,7 +4220,7 @@ async def facebook(text):
         the post is public.
         """
         try:
-            r, data = fb_request(
+            r, data = await fb_request(
                 "GET",
                 verify_url,
                 params={
@@ -4110,7 +4296,7 @@ async def facebook(text):
 
     async def read_exact_post():
         try:
-            r, data = fb_request(
+            r, data = await fb_request(
                 "GET",
                 verify_url,
                 params={
@@ -4197,7 +4383,7 @@ async def facebook(text):
             payload = dict(kwargs)
             payload["access_token"] = token
 
-            r, data = fb_request(
+            r, data = await fb_request(
                 "POST",
                 verify_url,
                 data=payload,
@@ -4652,6 +4838,13 @@ async def photo(update, context):
 
 async def text(update, context):
     if not update.message:
+        return
+
+    if maintenance_mode_on() and not is_admin(update):
+        await update.message.reply_text(
+            "🔧 البوت تحت التحديث دلوقتي، هيرجع يشتغل قريب. "
+            "حاول تاني بعد شوية 🙏"
+        )
         return
 
     t = (update.message.text or "").strip()
@@ -5939,8 +6132,16 @@ async def text(update, context):
 
 async def buttons(update, context):
     q = update.callback_query
-    await q.answer()
     c = q.data
+
+    if maintenance_mode_on() and not is_admin(update):
+        await q.answer(
+            "🔧 البوت تحت التحديث دلوقتي، حاول تاني بعد شوية 🙏",
+            show_alert=True,
+        )
+        return
+
+    await q.answer()
     track_user(update)
 
     if c == "home":
@@ -6694,7 +6895,9 @@ async def buttons(update, context):
                 )])
 
             buttons_rows.append([
-                InlineKeyboardButton("💬 واتساب", url=WHATSAPP),
+                InlineKeyboardButton(
+                    "💬 واتساب", callback_data=f"prodwa:{p['id']}"
+                ),
                 InlineKeyboardButton("📍 الموقع", url=MAPS),
             ])
             buttons_rows.append([
@@ -6774,7 +6977,7 @@ async def buttons(update, context):
         lines = []
 
         for number in numbers:
-            result = whatsapp_send_template(number, p24, p21c, p18)
+            result = await whatsapp_send_template(number, p24, p21c, p18)
             if result.get("ok"):
                 lines.append(f"✅ {number} — نجح (id: {result.get('post_id')})")
             else:
@@ -8217,6 +8420,225 @@ async def buttons(update, context):
         )
         return
 
+    if c.startswith("prodwa:"):
+        pid = int(c.split(":")[1])
+        inc_product_counter(pid, "whatsapp_clicks")
+        await context.bot.send_message(
+            chat_id=q.message.chat_id,
+            text="💬 تواصل معانا على واتساب بخصوص المنتج ده:",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("فتح واتساب", url=WHATSAPP)],
+            ]),
+        )
+        return
+
+    # ---- تحليل المنتجات (Leads + Conversion) ----
+
+    if c == "prodanalytics":
+        if not is_admin(update):
+            return
+
+        today_leads = many("""
+            SELECT object_id AS pid, COUNT(*) AS cnt,
+                   MAX(created_at) AS last_at
+            FROM AdminLogs
+            WHERE action='USER_INQUIRY'
+              AND created_at >= CURDATE()
+            GROUP BY object_id
+            ORDER BY cnt DESC
+            LIMIT 5
+        """)
+
+        lines = ["🔥 أكتر المنتجات عليها استفسارات النهاردة\n"]
+        if today_leads:
+            for r in today_leads:
+                p = product(r["pid"])
+                name = p["name"] if p and p["name"] else f"#{r['pid']}"
+                last_time = (
+                    r["last_at"].strftime("%H:%M")
+                    if hasattr(r["last_at"], "strftime") else r["last_at"]
+                )
+                lines.append(
+                    f"• {name} — {r['cnt']} استفسار (آخرهم {last_time})"
+                )
+        else:
+            lines.append("لا يوجد استفسارات النهاردة لسه.")
+
+        top_funnel = many("""
+            SELECT id, name, views_count, inquiries_count, whatsapp_clicks
+            FROM Products
+            WHERE views_count > 0
+            ORDER BY views_count DESC
+            LIMIT 5
+        """)
+
+        lines.append("\n📊 قمع التحويل (Conversion) — الأكتر مشاهدة\n")
+        if top_funnel:
+            for p in top_funnel:
+                name = p["name"] or f"#{p['id']}"
+                v = p["views_count"]
+                i = p["inquiries_count"]
+                w = p["whatsapp_clicks"]
+                i_pct = f"{(i / v * 100):.0f}%" if v else "0%"
+                w_pct = f"{(w / v * 100):.0f}%" if v else "0%"
+                lines.append(
+                    f"• {name}\n"
+                    f"  👁 {v} → 📩 {i} ({i_pct}) → 💬 {w} ({w_pct})"
+                )
+        else:
+            lines.append("لا توجد بيانات مشاهدات كافية لسه.")
+
+        await q.edit_message_text(
+            "\n".join(lines),
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ رجوع", callback_data="admin")],
+            ]),
+        )
+        return
+
+    # ---- منتج اليوم ----
+
+    if c == "potdmenu":
+        if not is_admin(update):
+            return
+
+        today_str = datetime.now(TZ).strftime("%Y-%m-%d")
+        current_text = "مفيش منتج متحدد النهاردة لسه."
+        if get_setting("potd_date") == today_str:
+            pid = get_setting("potd_product_id")
+            p = product(int(pid)) if pid else None
+            if p:
+                pname = p["name"] or f"#{p['id']}"
+                current_text = f"منتج اليوم الحالي: {pname}"
+
+        await q.edit_message_text(
+            f"🔥 منتج اليوم\n\n{current_text}\n\n"
+            "كل يوم الساعة 10:30 الصبح، البوت بيختار تلقائي المنتج "
+            "الأكتر تفاعلًا وينشره على تليجرام وفيسبوك وإنستجرام "
+            "(لو مفيش حد مختار يدوي قبلها).",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "✏️ اختار منتج يدوي دلوقتي", callback_data="potdpick"
+                )],
+                [InlineKeyboardButton("⬅️ رجوع", callback_data="admin")],
+            ]),
+        )
+        return
+
+    if c == "potdpick":
+        if not is_admin(update):
+            return
+
+        ps = [p for p in all_products() if p.get("Photo_id")]
+        if not ps:
+            await q.edit_message_text(
+                "💍 لا توجد منتجات بصور لاختيارها.",
+                reply_markup=admin_menu(owner=is_owner(update)),
+            )
+            return
+
+        await q.edit_message_text(
+            "✏️ اختار منتج اليوم:",
+            reply_markup=product_pick_kb(ps, 0, "potdset", "potdmenu"),
+        )
+        return
+
+    if c.startswith("potdsetp:"):
+        if not is_admin(update):
+            return
+
+        page = int(c.split(":")[1])
+        ps = [p for p in all_products() if p.get("Photo_id")]
+
+        await q.edit_message_text(
+            "✏️ اختار منتج اليوم:",
+            reply_markup=product_pick_kb(ps, page, "potdset", "potdmenu"),
+        )
+        return
+
+    if c.startswith("potdset:"):
+        if not is_admin(update):
+            return
+
+        pid = int(c.split(":")[1])
+        await q.edit_message_text("⏳ جاري نشر منتج اليوم...")
+
+        result = await publish_product_of_day(context, pid)
+        if not result.get("ok"):
+            await q.edit_message_text(
+                f"❌ {result.get('message', 'حصل خطأ.')}",
+                reply_markup=admin_menu(owner=is_owner(update)),
+            )
+            return
+
+        await q.edit_message_text(
+            "✅ اتنشر منتج اليوم:\n\n"
+            f"📢 تليجرام (قناة): {'✅' if result['tg_ok'] else '❌'}\n"
+            f"📩 رسائل مباشرة: {result['dm_sent']} مشترك\n"
+            f"📘 فيسبوك: {'✅' if result['fb_ok'] else '❌'}\n"
+            f"📸 إنستجرام: {'✅' if result['ig_ok'] else '❌'}",
+            reply_markup=admin_menu(owner=is_owner(update)),
+        )
+        return
+
+    # ---- وضع الصيانة ----
+
+    if c == "maintmenu":
+        if not is_admin(update):
+            return
+
+        on = maintenance_mode_on()
+        status_line = (
+            "🔴 البوت تحت الصيانة دلوقتي — العملاء بيشوفوا رسالة "
+            "تحديث بس."
+            if on else
+            "🟢 البوت شغال عادي دلوقتي."
+        )
+
+        await q.edit_message_text(
+            f"🔧 وضع الصيانة\n\n{status_line}\n\n"
+            "لما تفعّل وضع الصيانة، أي عميل (غيرك انت) هيشوف رسالة "
+            "\"البوت تحت التحديث\" بدل أي حاجة تانية، لحد ما توقفه.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "🟢 رجّع البوت يشتغل" if on else "🔴 وقف البوت مؤقتًا",
+                    callback_data="mainttoggle",
+                )],
+                [InlineKeyboardButton("⬅️ رجوع", callback_data="admin")],
+            ]),
+        )
+        return
+
+    if c == "mainttoggle":
+        if not is_admin(update):
+            return
+
+        on = maintenance_mode_on()
+        set_setting("maintenance_mode", "0" if on else "1")
+        log_action(
+            update.effective_user.id, "ADMIN_TOGGLE_MAINTENANCE",
+            new_value="off" if on else "on",
+        )
+
+        status_line = (
+            "🟢 البوت شغال عادي دلوقتي."
+            if on else
+            "🔴 البوت تحت الصيانة دلوقتي — العملاء بيشوفوا رسالة "
+            "تحديث بس."
+        )
+
+        await q.edit_message_text(
+            f"🔧 وضع الصيانة\n\n{status_line}",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "🟢 رجّع البوت يشتغل" if not on else "🔴 وقف البوت مؤقتًا",
+                    callback_data="mainttoggle",
+                )],
+                [InlineKeyboardButton("⬅️ رجوع", callback_data="admin")],
+            ]),
+        )
+        return
+
     if c == "phone":
         await q.edit_message_text(
             f"📞 {SHOP_NAME}\n\n{PHONE}\n\nللتواصل المباشر:",
@@ -9170,7 +9592,6 @@ async def buttons(update, context):
             reply_markup=gold_screen_kb(update.effective_user.id),
         )
         return
-        return
 
     # =====================================================
     # PUBLISH
@@ -9583,6 +10004,9 @@ def main():
         app.job_queue.run_repeating(
             weekly_summary_tick, interval=60, first=40,
             name="weekly_summary_tick",
+        )
+        app.job_queue.run_repeating(
+            potd_tick, interval=60, first=45, name="potd_tick",
         )
         print("Auto-posting scheduler started (checks every 60s).", flush=True)
     else:
