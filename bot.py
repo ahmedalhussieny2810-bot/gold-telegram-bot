@@ -2495,27 +2495,36 @@ async def send_karat_conversion_result(
 
 def home(admin=False, subscribed=False):
     k = [
+        # تصفح
         [InlineKeyboardButton("💎 أسعار الذهب", callback_data="gold")],
         [InlineKeyboardButton("💍 المنتجات", callback_data="products")],
         [InlineKeyboardButton("⭐ المفضلة", callback_data="favlist")],
+
+        # أدوات شخصية
         [InlineKeyboardButton(
-            "🕐 المحل مفتوح دلوقتي؟", callback_data="shopstatus"
+            "💰 هدف توفير للذهب", callback_data="savegoal"
         )],
         [InlineKeyboardButton(
             "🎂 سجّل تاريخ ميلادك", callback_data="birthdaymenu"
         )],
         [InlineKeyboardButton(
-            "✍️ ابعت رسالة للإدارة", callback_data="contactadmin"
-        )],
-        [InlineKeyboardButton(
-            "📞 اطلب مكالمة", callback_data="callrequest"
-        )],
-        [InlineKeyboardButton(
-            "💰 هدف توفير للذهب", callback_data="savegoal"
-        )],
-        [InlineKeyboardButton(
             "🔗 ادعُ صديق", callback_data="referral"
         )],
+
+        # تواصل واستفسار
+        [InlineKeyboardButton(
+            "🕐 المحل مفتوح دلوقتي؟", callback_data="shopstatus"
+        )],
+        [
+            InlineKeyboardButton(
+                "📞 اطلب مكالمة", callback_data="callrequest"
+            ),
+            InlineKeyboardButton(
+                "✍️ ابعت رسالة", callback_data="contactadmin"
+            ),
+        ],
+
+        # إشعارات
         [InlineKeyboardButton(
             "🟢 الإشعارات: شغالة (دوس للإيقاف)"
             if subscribed else
@@ -2527,7 +2536,14 @@ def home(admin=False, subscribed=False):
     if admin:
         k.append([InlineKeyboardButton("👑 لوحة التحكم", callback_data="admin")])
 
-    k += [
+    k.append([InlineKeyboardButton(
+        "📇 بيانات المحل", callback_data="shopinfo"
+    )])
+    return InlineKeyboardMarkup(k)
+
+
+def shop_info_kb():
+    return InlineKeyboardMarkup([
         [InlineKeyboardButton("📢 قناة التليجرام", url=TG_CHANNEL)],
         [
             InlineKeyboardButton("📍 موقع المحل", url=MAPS),
@@ -2541,8 +2557,8 @@ def home(admin=False, subscribed=False):
             InlineKeyboardButton("📘 فيسبوك", url=FACEBOOK),
             InlineKeyboardButton("📸 إنستجرام", url=INSTAGRAM),
         ],
-    ]
-    return InlineKeyboardMarkup(k)
+        [InlineKeyboardButton("⬅️ الرئيسية", callback_data="home")],
+    ])
 
 
 def admin_menu(owner=False):
@@ -6351,6 +6367,13 @@ async def buttons(update, context):
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("⬅️ الرئيسية", callback_data="home")],
             ]),
+        )
+        return
+
+    if c == "shopinfo":
+        await q.edit_message_text(
+            f"📇 {SHOP_NAME}\n\nكل طرق التواصل والروابط:",
+            reply_markup=shop_info_kb(),
         )
         return
 
