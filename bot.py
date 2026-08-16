@@ -547,6 +547,15 @@ GOLD_COINS = [
 
 GOLD_PURITY_DISCLAIMER = "⚠️ السعر ذهب صافي، مش شامل المصنعية."
 
+ZAKAT_NISAB_GRAMS_24K = 85  # nisab threshold, in 24k-equivalent grams
+ZAKAT_RATE = 0.025  # 2.5%
+ZAKAT_DISCLAIMER = (
+    "⚠️ الحساب ده تقديري بسعر النهاردة، وبيفترض إن الذهب فاضل عندك "
+    "حول (سنة هجرية) كامل وإنه فايض عن حاجتك الأساسية. فيه خلاف "
+    "فقهي حول زكاة الذهب المستخدم كحلي شخصي (زينة)، فالأحوط الرجوع "
+    "لجهة دينية موثوقة زي دار الإفتاء لتفصيل حالتك بالظبط."
+)
+
 
 def rename_cat(cid, name):
     c = db()
@@ -1448,6 +1457,39 @@ def mark_occasion_reminded(rid, year):
         c.close()
 
 
+def get_occasion_reminder(rid):
+    return one("SELECT * FROM OccasionReminders WHERE id=%s", (rid,))
+
+
+def update_occasion_reminder_date(rid, month, day):
+    """Changes when a reminder next fires (used when the customer
+    picks a new date after the first reminder went off), and clears
+    last_reminded_year so the tick logic re-evaluates it fresh
+    against the new date instead of thinking it already fired."""
+    c = db()
+    try:
+        with c.cursor() as x:
+            x.execute(
+                "UPDATE OccasionReminders "
+                "SET month=%s, day=%s, last_reminded_year=NULL "
+                "WHERE id=%s",
+                (month, day, rid),
+            )
+    finally:
+        c.close()
+
+
+def delete_occasion_reminder(rid):
+    c = db()
+    try:
+        with c.cursor() as x:
+            x.execute("DELETE FROM OccasionReminders WHERE id=%s", (rid,))
+            return bool(x.rowcount)
+    finally:
+        c.close()
+
+
+
 # =========================================================
 # SAVED (REUSABLE) NOTIFICATIONS
 # =========================================================
@@ -1805,6 +1847,12 @@ def gold_screen_kb(telegram_id):
             ),
         ],
         [InlineKeyboardButton(
+            "🕌 حاسبة الزكاة", callback_data="zakatcalc"
+        )],
+        [InlineKeyboardButton(
+            "⚖️ تحويل عيار", callback_data="karatconvert"
+        )],
+        [InlineKeyboardButton(
             "🔕 إلغاء الاشتراك (واتساب)"
             if wa_subscribed else
             "📱 اشترك في تحديثات السعر (واتساب)",
@@ -1824,6 +1872,61 @@ def calc_result_kb(telegram_id):
         [InlineKeyboardButton("📤 شارك النتيجة", callback_data="calcshare")]
     ] + list(base.inline_keyboard)
     return InlineKeyboardMarkup(rows)
+
+
+def karat_target_kb():
+    karats = [24, 22, 21, 18, 14, 12, 9]
+    rows = []
+    row = []
+    for k in karats:
+        row.append(InlineKeyboardButton(str(k), callback_data=f"kctarget:{k}"))
+        if len(row) == 4:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton(
+        "✍️ عيار تاني", callback_data="kctarget:custom"
+    )])
+    rows.append([InlineKeyboardButton("⬅️ الرئيسية", callback_data="home")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def send_karat_conversion_result(
+    update, context, weight, source_karat, target_karat, edit=False
+):
+    if not (1 <= target_karat <= 24):
+        msg = "❌ العيار لازم يكون رقم من 1 لـ 24."
+        if edit:
+            await update.callback_query.answer(msg, show_alert=True)
+        else:
+            await update.message.reply_text(msg)
+        return
+
+    target_weight = weight * source_karat / target_karat
+
+    text = (
+        "⚖️ تحويل عيار\n\n"
+        f"{weight} جرام عيار {source_karat}\n"
+        "= يعادل نفس كمية الدهب الخالص في:\n"
+        f"👉 {target_weight:.2f} جرام عيار {target_karat}"
+    )
+
+    context.user_data["kc_weight"] = weight
+    context.user_data["kc_karat"] = source_karat
+    context.user_data["calc_share_text"] = build_share_text(text)
+
+    kb_rows = [
+        [InlineKeyboardButton(
+            "🔁 حوّل لعيار تاني", callback_data="karatconvert_again"
+        )]
+    ] + list(calc_result_kb(update.effective_user.id).inline_keyboard)
+    kb = InlineKeyboardMarkup(kb_rows)
+
+    if edit:
+        await update.callback_query.edit_message_text(text, reply_markup=kb)
+    else:
+        await update.message.reply_text(text, reply_markup=kb)
 
 
 def home(admin=False, subscribed=False):
@@ -2385,8 +2488,23 @@ async def occasion_tick(context):
                         "🎁 تذكير!\n\n"
                         f"باقي أسبوع على \"{r['label']}\" "
                         f"({target.strftime('%d-%m')}).\n"
-                        "تقدر تزورنا بدري وتجهز الهدية 💛"
+                        "تقدر تزورنا بدري وتجهز الهدية 💛\n\n"
+                        "تحب نفكّرك تاني امتى؟"
                     ),
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton(
+                            "🔁 نفس الميعاد السنة الجاية",
+                            callback_data=f"occsame:{r['id']}",
+                        )],
+                        [InlineKeyboardButton(
+                            "📅 حدد ميعاد تاني",
+                            callback_data=f"occrenew:{r['id']}",
+                        )],
+                        [InlineKeyboardButton(
+                            "🗑 إلغاء التذكير",
+                            callback_data=f"occcancel:{r['id']}",
+                        )],
+                    ]),
                 )
             except Exception as e:
                 print(
@@ -3995,6 +4113,97 @@ async def text(update, context):
         )
         return
 
+    if s == "karat_convert_input":
+        m = re.match(r"^(\d+(?:\.\d+)?)\s+(\d{1,2})$", t.strip())
+        if not m:
+            await update.message.reply_text(
+                "❌ اكتب الوزن والعيار مفصولين بمسافة.\nمثال: 50 21"
+            )
+            return
+
+        weight = float(m.group(1))
+        karat = int(m.group(2))
+
+        if weight <= 0:
+            await update.message.reply_text("❌ اكتب وزن أكبر من صفر.")
+            return
+        if not (1 <= karat <= 24):
+            await update.message.reply_text(
+                "❌ العيار لازم يكون رقم من 1 لـ 24."
+            )
+            return
+
+        context.user_data["kc_weight"] = weight
+        context.user_data["kc_karat"] = karat
+        context.user_data["state"] = None
+
+        await update.message.reply_text(
+            f"القطعة: {weight} جرام عيار {karat}\n\nعايز تحولها لعيار كام؟",
+            reply_markup=karat_target_kb(),
+        )
+        return
+
+    if s == "karat_convert_target_input":
+        t_clean = t.strip()
+        if not t_clean.isdigit():
+            await update.message.reply_text("❌ اكتب رقم العيار بس (1-24).")
+            return
+
+        target_karat = int(t_clean)
+        weight = context.user_data.get("kc_weight")
+        karat = context.user_data.get("kc_karat")
+
+        if weight is None or karat is None:
+            await update.message.reply_text("ابدأ التحويل من الأول من قائمة أسعار الذهب.")
+            return
+
+        context.user_data["state"] = None
+        await send_karat_conversion_result(
+            update, context, weight, karat, target_karat, edit=False
+        )
+        return
+
+    if s == "zakat_piece_input":
+        m = re.match(r"^(\d+(?:\.\d+)?)\s+(\d{1,2})$", t.strip())
+        if not m:
+            await update.message.reply_text(
+                "❌ اكتب الوزن والعيار مفصولين بمسافة.\nمثال: 50 21"
+            )
+            return
+
+        weight = float(m.group(1))
+        karat = int(m.group(2))
+
+        if weight <= 0:
+            await update.message.reply_text("❌ اكتب وزن أكبر من صفر.")
+            return
+        if not (1 <= karat <= 24):
+            await update.message.reply_text(
+                "❌ العيار لازم يكون رقم من 1 لـ 24."
+            )
+            return
+
+        pieces = context.user_data.get("zakat_pieces", [])
+        pieces.append((weight, karat))
+        context.user_data["zakat_pieces"] = pieces
+        context.user_data["state"] = None
+
+        running_total = sum(w * (k / 24) for w, k in pieces)
+        await update.message.reply_text(
+            f"✅ سجلت: {weight} جرام عيار {karat}.\n\n"
+            f"إجمالي الوزن المكافئ لحد دلوقتي: {running_total:.2f} "
+            "جرام عيار 24.\n\nعندك قطعة تانية؟",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "➕ أضف قطعة تانية", callback_data="zakatmore"
+                )],
+                [InlineKeyboardButton(
+                    "✅ خلصت، احسب الزكاة", callback_data="zakatfinish"
+                )],
+            ]),
+        )
+        return
+
     if s == "trade_weight_input":
         try:
             weight = float(t.replace(",", "."))
@@ -4149,6 +4358,39 @@ async def text(update, context):
 
         await update.message.reply_text(
             f"🎉 تمام! هنفكّرك بـ\"{label}\" ({t.strip()}) قبلها بأسبوع.",
+            reply_markup=gold_screen_kb(update.effective_user.id),
+        )
+        return
+
+    if s == "occasion_renew_date_input":
+        m = re.match(r"^([0-3]?\d)-(0?\d|1[0-2])$", t.strip())
+        if not m:
+            await update.message.reply_text(
+                "❌ الصيغة غلط. اكتب التاريخ بصيغة يوم-شهر.\nمثال: 20-11"
+            )
+            return
+
+        day, month = int(m.group(1)), int(m.group(2))
+        try:
+            date(2024, month, day)
+        except ValueError:
+            await update.message.reply_text(
+                "❌ التاريخ ده مش موجود. اكتبه تاني.\nمثال: 20-11"
+            )
+            return
+
+        rid = context.user_data.get("occasion_renew_id")
+        context.user_data.clear()
+
+        r = get_occasion_reminder(rid) if rid else None
+        if not r or r["telegram_id"] != update.effective_user.id:
+            await update.message.reply_text("❌ حصل خطأ، جرب تاني.")
+            return
+
+        update_occasion_reminder_date(rid, month, day)
+
+        await update.message.reply_text(
+            f"✅ تم تحديث ميعاد تذكير \"{r['label']}\" لـ {t.strip()}.",
             reply_markup=gold_screen_kb(update.effective_user.id),
         )
         return
@@ -7023,6 +7265,179 @@ async def buttons(update, context):
         await q.edit_message_text(
             "🎁 اكتب اسم المناسبة اللي عايز نفكّرك بيها.\n\n"
             "مثال: عيد ميلاد ماما، خطوبة أختي"
+        )
+        return
+
+    if c.startswith("occsame:"):
+        rid = int(c.split(":")[1])
+        r = get_occasion_reminder(rid)
+
+        if not r or r["telegram_id"] != update.effective_user.id:
+            await q.answer("التذكير ده مش موجود.", show_alert=True)
+            return
+
+        await q.edit_message_text(
+            f"👍 تمام، هفكّرك بـ\"{r['label']}\" تاني السنة الجاية "
+            f"({r['month']:02d}-{r['day']:02d})."
+        )
+        return
+
+    if c.startswith("occrenew:"):
+        rid = int(c.split(":")[1])
+        r = get_occasion_reminder(rid)
+
+        if not r or r["telegram_id"] != update.effective_user.id:
+            await q.answer("التذكير ده مش موجود.", show_alert=True)
+            return
+
+        context.user_data.clear()
+        context.user_data.update(
+            state="occasion_renew_date_input", occasion_renew_id=rid,
+        )
+        await q.edit_message_text(
+            f"📅 اكتب الميعاد الجديد لتذكير \"{r['label']}\" "
+            "بصيغة يوم-شهر (DD-MM).\nمثال: 20-11"
+        )
+        return
+
+    if c.startswith("occcancel:"):
+        rid = int(c.split(":")[1])
+        r = get_occasion_reminder(rid)
+
+        if not r or r["telegram_id"] != update.effective_user.id:
+            await q.answer("التذكير ده مش موجود.", show_alert=True)
+            return
+
+        delete_occasion_reminder(rid)
+        await q.edit_message_text(
+            f"🗑 تم إلغاء تذكير \"{r['label']}\"."
+        )
+        return
+
+    # ---- حاسبة الزكاة ----
+
+    if c == "zakatcalc":
+        track_user(update)
+        context.user_data.clear()
+        context.user_data.update(state="zakat_piece_input", zakat_pieces=[])
+
+        await q.edit_message_text(
+            "🕌 حاسبة الزكاة\n\n"
+            "اكتب وزن أول قطعة وعيارها مفصولين بمسافة.\n"
+            "مثال: 50 21\n\n"
+            "(لو عندك قطع بأعيرة مختلفة، تقدر تضيفهم كلهم واحدة "
+            "واحدة وهنجمعهم)"
+        )
+        return
+
+    if c == "zakatmore":
+        if "zakat_pieces" not in context.user_data:
+            await q.answer("ابدأ حساب الزكاة من الأول.", show_alert=True)
+            return
+
+        context.user_data["state"] = "zakat_piece_input"
+        await q.edit_message_text(
+            "➕ اكتب وزن القطعة التانية وعيارها مفصولين بمسافة.\n"
+            "مثال: 20 18"
+        )
+        return
+
+    if c == "zakatfinish":
+        pieces = context.user_data.get("zakat_pieces")
+        if not pieces:
+            await q.answer("ابدأ حساب الزكاة من الأول.", show_alert=True)
+            return
+
+        context.user_data.clear()
+
+        p21 = latest()
+        if not p21:
+            await q.edit_message_text(
+                "💎 لم يتم تحديث أسعار الذهب حتى الآن."
+            )
+            return
+
+        p24, _, _ = calc(p21)
+        total_equiv = sum(w * (k / 24) for w, k in pieces)
+        lines = "\n".join(
+            f"- {w} جرام عيار {k} → {w * (k / 24):.2f} جرام عيار 24"
+            for w, k in pieces
+        )
+
+        if total_equiv >= ZAKAT_NISAB_GRAMS_24K:
+            value = round(total_equiv * p24)
+            zakat = round(value * ZAKAT_RATE)
+            result = (
+                f"✅ وصلت للنصاب ({ZAKAT_NISAB_GRAMS_24K} جرام عيار 24)\n\n"
+                f"قيمة الذهب (بسعر عيار 24: {p24} ج/جرام): "
+                f"{value} جنيه\n\n"
+                f"🕌 الزكاة المستحقة (2.5%): {zakat} جنيه"
+            )
+        else:
+            result = (
+                f"❌ إجمالي وزنك المكافئ أقل من النصاب "
+                f"({ZAKAT_NISAB_GRAMS_24K} جرام عيار 24)، "
+                "فمفيش زكاة واجبة عليك حاليًا."
+            )
+
+        zakat_text = (
+            "🕌 حاسبة الزكاة\n\n"
+            f"القطع:\n{lines}\n\n"
+            f"إجمالي الوزن المكافئ (عيار 24): {total_equiv:.2f} جرام\n\n"
+            f"{result}\n\n{ZAKAT_DISCLAIMER}"
+        )
+        context.user_data["calc_share_text"] = build_share_text(zakat_text)
+        await q.edit_message_text(
+            zakat_text,
+            reply_markup=calc_result_kb(update.effective_user.id),
+        )
+        return
+
+    # ---- تحويل عيار ----
+
+    if c == "karatconvert":
+        track_user(update)
+        context.user_data.clear()
+        context.user_data["state"] = "karat_convert_input"
+
+        await q.edit_message_text(
+            "⚖️ تحويل عيار\n\n"
+            "اكتب الوزن والعيار الحالي مفصولين بمسافة.\n"
+            "مثال: 50 21"
+        )
+        return
+
+    if c.startswith("kctarget:"):
+        target_raw = c.split(":")[1]
+        weight = context.user_data.get("kc_weight")
+        karat = context.user_data.get("kc_karat")
+
+        if weight is None or karat is None:
+            await q.answer("ابدأ التحويل من الأول.", show_alert=True)
+            return
+
+        if target_raw == "custom":
+            context.user_data["state"] = "karat_convert_target_input"
+            await q.edit_message_text("✍️ اكتب رقم العيار اللي عايز تحول له (1-24):")
+            return
+
+        target_karat = int(target_raw)
+        await send_karat_conversion_result(
+            update, context, weight, karat, target_karat, edit=True
+        )
+        return
+
+    if c == "karatconvert_again":
+        weight = context.user_data.get("kc_weight")
+        karat = context.user_data.get("kc_karat")
+
+        if weight is None or karat is None:
+            await q.answer("ابدأ التحويل من الأول.", show_alert=True)
+            return
+
+        await q.edit_message_text(
+            f"القطعة: {weight} جرام عيار {karat}\n\nعايز تحولها لعيار كام؟",
+            reply_markup=karat_target_kb(),
         )
         return
 
