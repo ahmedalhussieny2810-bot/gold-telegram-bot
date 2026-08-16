@@ -1036,6 +1036,33 @@ def gold_history_range(start_dt, end_dt):
     """, (start_dt, end_dt))
 
 
+def recent_gold_prices(limit=15):
+    return many("""
+        SELECT id,price_21,price_24,price_18,created_at
+        FROM GoldPriceHistory
+        ORDER BY created_at DESC
+        LIMIT %s
+    """, (limit,))
+
+
+def get_gold_price_entry(pid):
+    return one(
+        "SELECT id,price_21,price_24,price_18,created_at "
+        "FROM GoldPriceHistory WHERE id=%s",
+        (pid,),
+    )
+
+
+def delete_gold_price_entry(pid):
+    c = db()
+    try:
+        with c.cursor() as x:
+            x.execute("DELETE FROM GoldPriceHistory WHERE id=%s", (pid,))
+            return bool(x.rowcount)
+    finally:
+        c.close()
+
+
 def gold_period_stats(days_back):
     """days_back=0 -> today, 1 -> yesterday only, N -> last N days incl today."""
     now = datetime.now(TZ)
@@ -2254,6 +2281,9 @@ def gold_menu():
         [InlineKeyboardButton("✏️ تحديث السعر", callback_data="updategold")],
         [InlineKeyboardButton("📊 أسعار اليوم", callback_data="goldtoday")],
         [InlineKeyboardButton("📅 تاريخ الأسعار", callback_data="histmenu")],
+        [InlineKeyboardButton(
+            "🗑 حذف سعر غلط", callback_data="delpricelist"
+        )],
         [InlineKeyboardButton("🔔 تنبيهات السعر", callback_data="alertmenu")],
         [InlineKeyboardButton("📢 نشر السعر", callback_data="publish")],
         [InlineKeyboardButton(
@@ -2843,11 +2873,19 @@ async def start(update, context):
     await update.message.reply_text(
         "💎 " + SHOP_NAME + "\n\n"
         "أهلاً بيك في البوت الرسمي لـ" + SHOP_FULL_NAME + " ✨\n\n"
+        "من غير ما تتصل بينا أو تيجي المحل، تقدر من هنا:\n\n"
+        "💎 أسعار الذهب — سعر عيار 21 و24 والسبايك والعملات "
+        "لحظة بلحظة، وجوّاها أدوات كتير:\n"
+        "  • 🧮 احسب دهبك (هتشتري ولا هتبيع)\n"
+        "  • 🔄 استبدال قطعة قديمة بجديدة\n"
+        "  • 💵 اعرف تقدر تشتري كام جرام بميزانيتك\n"
+        "  • ⚖️ تحويل الوزن من عيار لعيار\n"
+        "  • 🕌 حاسبة الزكاة\n"
+        "  • 📊 أسعار آخر 7 أيام\n"
+        "  • 🎁 تذكير بمناسباتك (خطوبة، جواز... إلخ)\n\n"
+        "💍 المنتجات — شوف قطعنا وعروضنا أول بأول.\n\n"
         "🔔 فعّل الإشعارات تحت عشان يوصلك سعر الذهب والمنتجات "
-        "الجديدة أول بأول، من غير ما تفتح البوت كل شوية.\n\n"
-        "🧮 جديد! تقدر دلوقتي تعرف سعر السبايك والعملات لحظة "
-        "بلحظة، وتحسب سعر أي قطعة معاك (هتشتري أو هتبيع) في ثواني "
-        "من غير ما تتصل بينا، من قائمة 💎 أسعار الذهب.\n\n"
+        "الجديدة على طول من غير ما تفتح البوت كل شوية.\n\n"
         "اختار من القائمة 👇",
         reply_markup=home(is_admin(update), is_gold_subscribed(update.effective_user.id)),
     )
@@ -7439,6 +7477,104 @@ async def buttons(update, context):
             f"القطعة: {weight} جرام عيار {karat}\n\nعايز تحولها لعيار كام؟",
             reply_markup=karat_target_kb(),
         )
+        return
+
+    # ---- حذف سعر غلط ----
+
+    if c == "delpricelist":
+        if not is_admin(update):
+            return
+
+        rows = recent_gold_prices(15)
+        if not rows:
+            await q.edit_message_text(
+                "لا يوجد أي أسعار مسجلة.", reply_markup=gold_menu()
+            )
+            return
+
+        kb_rows = []
+        for r in rows:
+            dt = (
+                r["created_at"].strftime("%Y-%m-%d %H:%M")
+                if hasattr(r["created_at"], "strftime")
+                else r["created_at"]
+            )
+            label = f"{dt} — {round(float(r['price_21']))} ج"
+            kb_rows.append([InlineKeyboardButton(
+                label, callback_data=f"delprice:{r['id']}"
+            )])
+        kb_rows.append([InlineKeyboardButton("⬅️ رجوع", callback_data="agold")])
+
+        await q.edit_message_text(
+            "🗑 حذف سعر غلط\n\n"
+            "دوس على السعر اللي عايز تحذفه من آخر 15 سعر متسجلين "
+            "(الأحدث فوق):",
+            reply_markup=InlineKeyboardMarkup(kb_rows),
+        )
+        return
+
+    if c.startswith("delprice:"):
+        if not is_admin(update):
+            return
+
+        pid = int(c.split(":")[1])
+        entry = get_gold_price_entry(pid)
+        if not entry:
+            await q.answer("السعر ده مش موجود (يمكن اتحذف قبل كده).", show_alert=True)
+            return
+
+        dt = (
+            entry["created_at"].strftime("%Y-%m-%d %H:%M")
+            if hasattr(entry["created_at"], "strftime")
+            else entry["created_at"]
+        )
+
+        await q.edit_message_text(
+            "⚠️ متأكد عايز تحذف السعر ده؟\n\n"
+            f"📅 {dt}\n"
+            f"عيار 21: {round(float(entry['price_21']))} ج\n"
+            f"عيار 24: {round(float(entry['price_24']))} ج\n"
+            f"عيار 18: {round(float(entry['price_18']))} ج\n\n"
+            "الحذف ده نهائي ومش هينفع ترجعه.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "🗑 اه، احذفه", callback_data=f"delpriceconfirm:{pid}"
+                )],
+                [InlineKeyboardButton(
+                    "❌ لأ، رجعني", callback_data="delpricelist"
+                )],
+            ]),
+        )
+        return
+
+    if c.startswith("delpriceconfirm:"):
+        if not is_admin(update):
+            return
+
+        pid = int(c.split(":")[1])
+        entry = get_gold_price_entry(pid)
+        if not entry:
+            await q.answer("السعر ده مش موجود (يمكن اتحذف قبل كده).", show_alert=True)
+            return
+
+        ok = delete_gold_price_entry(pid)
+        log_action(
+            update.effective_user.id, "ADMIN_DELETE_GOLD_PRICE",
+            new_value=str(round(float(entry["price_21"]))),
+        )
+
+        if ok:
+            await q.edit_message_text(
+                "✅ اتحذف السعر الغلط.\n\n"
+                "ملحوظة: لو السعر ده كان آخر سعر متسجل، البوت هيرجع "
+                "يعتبر آخر سعر قبله هو السعر الحالي.",
+                reply_markup=gold_menu(),
+            )
+        else:
+            await q.edit_message_text(
+                "❌ حصل خطأ، السعر ده يمكن اتحذف قبل كده.",
+                reply_markup=gold_menu(),
+            )
         return
 
     if c.startswith("calcmode:"):
