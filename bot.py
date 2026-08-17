@@ -1083,6 +1083,11 @@ def gold_subscriber_ids():
     return [r["telegram_id"] for r in rows]
 
 
+def all_user_ids():
+    rows = many("SELECT telegram_id FROM Users")
+    return [r["telegram_id"] for r in rows]
+
+
 def gold_subscriber_count():
     row = one(
         "SELECT COUNT(*) c FROM Users WHERE subscribed_gold=1"
@@ -3909,13 +3914,17 @@ async def publish_product_of_day(context, pid):
     }
 
 
-async def broadcast_custom_notification(context, admin_id, text, photo_id=None):
+async def broadcast_custom_notification(
+    context, admin_id, text, photo_id=None, audience="subscribers"
+):
     """
-    Sends a free-form, admin-written announcement to every customer
-    subscribed to notifications. Separate from — and independent of
-    — the automatic gold price / new product broadcasts.
+    Sends a free-form, admin-written announcement. Separate from —
+    and independent of — the automatic gold price / new product
+    broadcasts. `audience` is "subscribers" (default: only people
+    who opted into gold-price notifications) or "all" (everyone who
+    has ever pressed /start on the bot).
     """
-    ids = gold_subscriber_ids()
+    ids = all_user_ids() if audience == "all" else gold_subscriber_ids()
     sent, failed = 0, 0
 
     for uid in ids:
@@ -5368,6 +5377,7 @@ async def photo(update, context):
             await update.message.reply_text("❌ غير مسموح.")
             return
 
+        audience = context.user_data.get("notif_audience", "subscribers")
         photo_id = update.message.photo[-1].file_id
         caption = update.message.caption or ""
         context.user_data.clear()
@@ -5375,7 +5385,8 @@ async def photo(update, context):
         await update.message.reply_text("⏳ جاري الإرسال...")
 
         sent, failed = await broadcast_custom_notification(
-            context, update.effective_user.id, caption, photo_id=photo_id
+            context, update.effective_user.id, caption,
+            photo_id=photo_id, audience=audience,
         )
 
         await update.message.reply_text(
@@ -6709,12 +6720,13 @@ async def text(update, context):
             await update.message.reply_text("❌ غير مسموح.")
             return
 
+        audience = context.user_data.get("notif_audience", "subscribers")
         context.user_data.clear()
 
         await update.message.reply_text("⏳ جاري الإرسال...")
 
         sent, failed = await broadcast_custom_notification(
-            context, update.effective_user.id, t
+            context, update.effective_user.id, t, audience=audience
         )
 
         await update.message.reply_text(
@@ -7420,13 +7432,44 @@ async def buttons(update, context):
             await q.answer("❌ غير مسموح.", show_alert=True)
             return
 
-        count = gold_subscriber_count()
-        context.user_data.clear()
-        context.user_data["state"] = "custom_notif"
+        sub_count = gold_subscriber_count()
+        all_count = one("SELECT COUNT(*) c FROM Users")
+        all_count = all_count["c"] if all_count else 0
 
         await q.edit_message_text(
-            f"✍️ اكتب الإشعار اللي عايز تبعته لكل المشتركين على "
-            f"تليجرام ({count} مشترك).\n\n"
+            "✍️ إشعار سريع\n\nتبعته لمين؟",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    f"🔔 المشتركين بس ({sub_count})",
+                    callback_data="customnotifaud:subscribers",
+                )],
+                [InlineKeyboardButton(
+                    f"👥 كل مستخدمي البوت ({all_count})",
+                    callback_data="customnotifaud:all",
+                )],
+                [InlineKeyboardButton("❌ إلغاء", callback_data="notifmenu")],
+            ]),
+        )
+        return
+
+    if c.startswith("customnotifaud:"):
+        if not is_admin(update):
+            await q.answer("❌ غير مسموح.", show_alert=True)
+            return
+
+        audience = c.split(":")[1]
+        count = (
+            one("SELECT COUNT(*) c FROM Users")["c"]
+            if audience == "all" else gold_subscriber_count()
+        )
+
+        context.user_data.clear()
+        context.user_data.update(
+            state="custom_notif", notif_audience=audience
+        )
+
+        await q.edit_message_text(
+            f"✍️ اكتب الإشعار اللي عايز تبعته ({count} شخص).\n\n"
             "- اكتب نص، أو\n"
             "- ابعت صورة (تقدر تحط تعليق عليها كنص الإشعار)\n\n"
             "⚠️ ده هيتبعت فوراً ومش هيتحفظ - منفصل تماماً عن تنبيهات "
