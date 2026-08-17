@@ -2612,6 +2612,9 @@ def admin_menu(owner=False):
         [InlineKeyboardButton(
             "📞 طلبات المكالمات", callback_data="callqueue"
         )],
+        [InlineKeyboardButton(
+            "💬 رد على عميل بالآيدي", callback_data="adminreplyid"
+        )],
     ]
     if owner:
         rows.append(
@@ -5291,6 +5294,11 @@ async def text(update, context):
                         f"🆔 {u.id}\n\n"
                         f"{t}"
                     ),
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton(
+                            "💬 رد على العميل", callback_data=f"reply:{u.id}"
+                        )
+                    ]]),
                 )
             except Exception as e:
                 print("Contact Admin Forward Failed:", repr(e), flush=True)
@@ -6030,6 +6038,27 @@ async def text(update, context):
             reply_markup=product_pick_kb(
                 ps, 0, "searchprodo", "aprod"
             ),
+        )
+        return
+
+    if s == "admin_reply_id_input":
+        if not is_admin(update):
+            context.user_data.clear()
+            await update.message.reply_text("❌ غير مسموح.")
+            return
+
+        t_clean = t.strip()
+        if not t_clean.isdigit():
+            await update.message.reply_text(
+                "❌ اكتب رقم آيدي صحيح بس (أرقام فقط)."
+            )
+            return
+
+        context.user_data.update(
+            state="admin_reply", reply_to=int(t_clean)
+        )
+        await update.message.reply_text(
+            "💬 اكتب ردك على العميل، وهيتبعت له فورًا."
         )
         return
 
@@ -9910,6 +9939,19 @@ async def buttons(update, context):
         await context.bot.send_message(
             chat_id=q.message.chat_id,
             text="💬 اكتب ردك على العميل، وهيتبعت له فورًا.",
+        )
+        return
+
+    if c == "adminreplyid":
+        if not is_admin(update):
+            return
+
+        context.user_data.clear()
+        context.user_data["state"] = "admin_reply_id_input"
+        await q.edit_message_text(
+            "💬 رد على عميل بالآيدي\n\n"
+            "اكتب آيدي التليجرام بتاع العميل (هتلاقيه في أي رسالة "
+            "وصلتك منه، رقم زي 7087485592).",
         )
         return
 
