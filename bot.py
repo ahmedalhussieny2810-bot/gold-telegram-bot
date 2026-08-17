@@ -356,6 +356,57 @@ def init_db():
                 )
             """)
 
+            x.execute("""
+                CREATE TABLE IF NOT EXISTS MonthlyBudget(
+                    telegram_id BIGINT PRIMARY KEY,
+                    salary DECIMAL(15,2) NOT NULL,
+                    month_str VARCHAR(7) NOT NULL,
+                    balance DECIMAL(15,2) NOT NULL,
+                    last_summary_month VARCHAR(7) NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
+            x.execute("""
+                CREATE TABLE IF NOT EXISTS BudgetTransactions(
+                    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                    telegram_id BIGINT NOT NULL,
+                    amount DECIMAL(15,2) NOT NULL,
+                    ttype ENUM('in','out') NOT NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    INDEX(telegram_id, created_at)
+                )
+            """)
+
+            x.execute("""
+                CREATE TABLE IF NOT EXISTS LedgerCustomers(
+                    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                    telegram_id BIGINT NOT NULL,
+                    name VARCHAR(255) NOT NULL,
+                    phone VARCHAR(30) NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    INDEX(telegram_id)
+                )
+            """)
+
+            for q in (
+                "ALTER TABLE LedgerCustomers ADD COLUMN telegram_id "
+                "BIGINT NOT NULL DEFAULT 0",
+            ):
+                _safe_alter(x, q)
+
+            x.execute("""
+                CREATE TABLE IF NOT EXISTS LedgerEntries(
+                    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                    customer_id BIGINT UNSIGNED NOT NULL,
+                    amount DECIMAL(15,2) NOT NULL,
+                    direction ENUM('lah','alaih') NOT NULL,
+                    note VARCHAR(255) NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    INDEX(customer_id, created_at)
+                )
+            """)
+
             x.execute(
                 "SELECT id FROM ScheduledNotifications WHERE label=%s",
                 ("fajr",),
@@ -675,6 +726,13 @@ GOLD_CARE_TIPS = [
     "أي استبدال أو ضمان في المستقبل.",
     "💡 نصيحة اليوم: الدهب الأصفر بيتحمل الاستخدام اليومي أكتر من "
     "الدهب الأبيض، لأن طلاء الروديوم في الأبيض ممكن يخف مع الوقت.",
+    "💡 نصيحة اليوم: لما تشتري قطعة جديدة، افحصي الدمغة (الختم) "
+    "اللي بتوضح العيار قبل ما تدفعي — كل قطعة أصلية لازم يكون "
+    "عليها.",
+    "💡 نصيحة اليوم: متلبسيش أكتر من قطعة دهب في نفس المكان (زي 3 "
+    "خواتم في إيد واحدة) عشان تقلّلي الاحتكاك اللي بيخدش السطح.",
+    "💡 نصيحة اليوم: لو الدهب بدأ يفقد لمعانه، مبتستخدميش معجون "
+    "أسنان أو مواد كاشطة — ده بيخدش السطح مش بينضفه.",
 ]
 
 # Business hours: every day except Friday 11:30 AM -> 12:30 AM (next day).
@@ -1885,6 +1943,180 @@ def list_favorites(telegram_id):
 
 
 # =========================================================
+# MONTHLY BUDGET (مصروفك الشهري)
+# =========================================================
+
+def get_budget(telegram_id):
+    return one(
+        "SELECT * FROM MonthlyBudget WHERE telegram_id=%s", (telegram_id,)
+    )
+
+
+def start_budget_month(telegram_id, salary, month_str):
+    """Sets/resets the budget cycle: new salary, new month, balance
+    reset to the salary. Used both for first-time setup and for
+    "غيّر المرتب" (which intentionally starts a fresh cycle)."""
+    c = db()
+    try:
+        with c.cursor() as x:
+            x.execute("""
+                INSERT INTO MonthlyBudget
+                (telegram_id, salary, month_str, balance,
+                 last_summary_month)
+                VALUES(%s, %s, %s, %s, NULL)
+                ON DUPLICATE KEY UPDATE
+                    salary=VALUES(salary), month_str=VALUES(month_str),
+                    balance=VALUES(balance), last_summary_month=NULL
+            """, (telegram_id, salary, month_str, salary))
+    finally:
+        c.close()
+
+
+def apply_budget_transaction(telegram_id, amount, ttype):
+    """Adjusts the running balance and logs the transaction. ttype is
+    'in' (adds to balance) or 'out' (subtracts)."""
+    c = db()
+    try:
+        with c.cursor() as x:
+            op = "+" if ttype == "in" else "-"
+            x.execute(f"""
+                UPDATE MonthlyBudget
+                SET balance = balance {op} %s
+                WHERE telegram_id=%s
+            """, (amount, telegram_id))
+            x.execute("""
+                INSERT INTO BudgetTransactions
+                (telegram_id, amount, ttype)
+                VALUES(%s, %s, %s)
+            """, (telegram_id, amount, ttype))
+    finally:
+        c.close()
+
+
+def list_budget_transactions(telegram_id, limit=10):
+    return many("""
+        SELECT amount, ttype, created_at
+        FROM BudgetTransactions
+        WHERE telegram_id=%s
+        ORDER BY created_at DESC
+        LIMIT %s
+    """, (telegram_id, limit))
+
+
+def all_active_budgets():
+    return many("SELECT * FROM MonthlyBudget")
+
+
+def mark_budget_summary_sent(telegram_id, month_str):
+    c = db()
+    try:
+        with c.cursor() as x:
+            x.execute(
+                "UPDATE MonthlyBudget SET last_summary_month=%s "
+                "WHERE telegram_id=%s AND (last_summary_month IS NULL "
+                "OR last_summary_month<>%s)",
+                (month_str, telegram_id, month_str),
+            )
+            return x.rowcount > 0
+    finally:
+        c.close()
+
+
+# =========================================================
+# CUSTOMER LEDGER (دفتر حسابات العملاء — أدمن فقط)
+# له = المحل مديون للعميل | عليه = العميل مديون للمحل
+# =========================================================
+
+def add_ledger_customer(telegram_id, name, phone=None):
+    c = db()
+    try:
+        with c.cursor() as x:
+            x.execute(
+                "INSERT INTO LedgerCustomers(telegram_id, name, phone) "
+                "VALUES(%s, %s, %s)",
+                (telegram_id, name, phone),
+            )
+            return x.lastrowid
+    finally:
+        c.close()
+
+
+def list_ledger_customers(telegram_id, search=None):
+    if search:
+        return many(
+            "SELECT * FROM LedgerCustomers WHERE telegram_id=%s "
+            "AND name LIKE %s ORDER BY name ASC",
+            (telegram_id, f"%{search}%"),
+        )
+    return many(
+        "SELECT * FROM LedgerCustomers WHERE telegram_id=%s "
+        "ORDER BY name ASC",
+        (telegram_id,),
+    )
+
+
+def get_ledger_customer(cid, telegram_id):
+    return one(
+        "SELECT * FROM LedgerCustomers WHERE id=%s AND telegram_id=%s",
+        (cid, telegram_id),
+    )
+
+
+def delete_ledger_customer(cid, telegram_id):
+    c = db()
+    try:
+        with c.cursor() as x:
+            x.execute(
+                "DELETE FROM LedgerEntries WHERE customer_id=%s AND "
+                "customer_id IN (SELECT id FROM LedgerCustomers WHERE "
+                "id=%s AND telegram_id=%s)",
+                (cid, cid, telegram_id),
+            )
+            x.execute(
+                "DELETE FROM LedgerCustomers WHERE id=%s AND telegram_id=%s",
+                (cid, telegram_id),
+            )
+            return bool(x.rowcount)
+    finally:
+        c.close()
+
+
+def add_ledger_entry(customer_id, amount, direction, note=None):
+    c = db()
+    try:
+        with c.cursor() as x:
+            x.execute("""
+                INSERT INTO LedgerEntries(customer_id, amount, direction, note)
+                VALUES(%s, %s, %s, %s)
+            """, (customer_id, amount, direction, note))
+    finally:
+        c.close()
+
+
+def ledger_customer_balance(customer_id):
+    row = one("""
+        SELECT
+            COALESCE(SUM(CASE WHEN direction='lah' THEN amount END), 0) AS lah,
+            COALESCE(SUM(CASE WHEN direction='alaih' THEN amount END), 0) AS alaih
+        FROM LedgerEntries
+        WHERE customer_id=%s
+    """, (customer_id,))
+    lah = float(row["lah"]) if row else 0.0
+    alaih = float(row["alaih"]) if row else 0.0
+    return lah, alaih, alaih - lah
+
+
+def list_ledger_entries(customer_id, limit=15):
+    return many("""
+        SELECT amount, direction, note, created_at
+        FROM LedgerEntries
+        WHERE customer_id=%s
+        ORDER BY created_at DESC
+        LIMIT %s
+    """, (customer_id, limit))
+
+
+# =========================================================
 # CALL REQUESTS (customer requests a phone call, FIFO queue)
 # =========================================================
 
@@ -2463,6 +2695,32 @@ def calc_result_kb(telegram_id):
     return InlineKeyboardMarkup(rows)
 
 
+def budget_summary_view(b):
+    balance = float(b["balance"])
+    salary = float(b["salary"])
+
+    text = (
+        "📒 مصروفك الشهري\n\n"
+        f"💰 المرتب الأساسي: {round(salary)} جنيه\n"
+        f"💵 الرصيد المتبقي دلوقتي: {round(balance)} جنيه"
+    )
+
+    kb = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("➕ دخل", callback_data="budgetin"),
+            InlineKeyboardButton("➖ مصروف", callback_data="budgetout"),
+        ],
+        [InlineKeyboardButton(
+            "📊 آخر الحركات", callback_data="budgethistory"
+        )],
+        [InlineKeyboardButton(
+            "✏️ غيّر المرتب (شهر جديد)", callback_data="budgetchangesalary"
+        )],
+        [InlineKeyboardButton("⬅️ الرئيسية", callback_data="home")],
+    ])
+    return text, kb
+
+
 def karat_target_kb():
     karats = [24, 22, 21, 18, 14, 12, 9]
     rows = []
@@ -2528,6 +2786,12 @@ def home(admin=False, subscribed=False):
         # أدوات شخصية
         [InlineKeyboardButton(
             "💰 هدف توفير للذهب", callback_data="savegoal"
+        )],
+        [InlineKeyboardButton(
+            "📒 حاسبة مصروفك الشهري", callback_data="budgetmenu"
+        )],
+        [InlineKeyboardButton(
+            "📇 حساباتي (له/عليه)", callback_data="ledgermenu"
         )],
         [InlineKeyboardButton(
             "🎂 سجّل تاريخ ميلادك", callback_data="birthdaymenu"
@@ -2854,6 +3118,80 @@ def prod_menu():
         )],
         [InlineKeyboardButton("⬅️ لوحة التحكم", callback_data="admin")],
     ])
+
+
+def ledger_customer_pick_kb(customers, page, page_size=10):
+    """Paginated keyboard for picking a ledger customer from a list."""
+    start_i = page * page_size
+    chunk = customers[start_i:start_i + page_size]
+
+    k = [
+        [InlineKeyboardButton(
+            f"👤 {c['name']}", callback_data=f"ledgerc:{c['id']}"
+        )]
+        for c in chunk
+    ]
+
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(
+            "⬅️ السابق", callback_data=f"ledgercp:{page-1}"
+        ))
+    if start_i + page_size < len(customers):
+        nav.append(InlineKeyboardButton(
+            "➡️ التالي", callback_data=f"ledgercp:{page+1}"
+        ))
+    if nav:
+        k.append(nav)
+
+    k.append([InlineKeyboardButton(
+        "➕ سجّل حساب جديد", callback_data="ledgeraddcustomer"
+    )])
+    k.append([InlineKeyboardButton("⬅️ الرئيسية", callback_data="home")])
+    return InlineKeyboardMarkup(k)
+
+
+def ledger_customer_view(cid, telegram_id):
+    cust = get_ledger_customer(cid, telegram_id)
+    if not cust:
+        return None, None
+
+    lah, alaih, net = ledger_customer_balance(cid)
+
+    if net > 0:
+        net_line = f"📌 الصافي: هو مديون لك بـ {round(net)} جنيه"
+    elif net < 0:
+        net_line = f"📌 الصافي: انت مديون له بـ {round(abs(net))} جنيه"
+    else:
+        net_line = "📌 الصافي: الحساب متزن (مفيش دين لحد)"
+
+    phone_line = f"\n📱 {cust['phone']}" if cust.get("phone") else ""
+
+    text = (
+        f"👤 {cust['name']}{phone_line}\n\n"
+        f"🟢 له (انت مديون له): {round(lah)} جنيه\n"
+        f"🔴 عليه (هو مديون لك): {round(alaih)} جنيه\n\n"
+        f"{net_line}"
+    )
+
+    kb = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "🟢 سجّل مبلغ له", callback_data=f"ledgerlah:{cid}"
+            ),
+            InlineKeyboardButton(
+                "🔴 سجّل مبلغ عليه", callback_data=f"ledgeralaih:{cid}"
+            ),
+        ],
+        [InlineKeyboardButton(
+            "📊 كل الحركات", callback_data=f"ledgerhist:{cid}"
+        )],
+        [InlineKeyboardButton(
+            "🗑 حذف العميل", callback_data=f"ledgerdel:{cid}"
+        )],
+        [InlineKeyboardButton("⬅️ رجوع", callback_data="ledgermenu")],
+    ])
+    return text, kb
 
 
 def product_pick_kb(ps, page, callback_prefix, back_cb, page_size=10):
@@ -3278,6 +3616,67 @@ async def savings_goal_tick(context):
                 )
     except Exception as e:
         print("Savings Goal Tick Error:", repr(e), flush=True)
+
+
+async def budget_month_end_tick(context):
+    """Runs every minute via JobQueue but only acts once at 21:00 on
+    the last calendar day of the month. Tells every customer with an
+    active monthly budget how much they have left, offers the gold-
+    equivalent of that amount as a savings nudge, then rolls their
+    budget into a fresh cycle for the new month (same salary,
+    balance reset)."""
+    try:
+        now = datetime.now(TZ)
+        if now.strftime("%H:%M") != "21:00":
+            return
+        if (now.date() + timedelta(days=1)).day != 1:
+            return  # not the last day of the month
+
+        month_str = now.strftime("%Y-%m")
+        next_month_str = (
+            now.date() + timedelta(days=1)
+        ).strftime("%Y-%m")
+
+        p21 = latest()
+        p24 = calc(p21)[0] if p21 else None
+
+        for b in all_active_budgets():
+            if not mark_budget_summary_sent(b["telegram_id"], month_str):
+                continue
+
+            balance = float(b["balance"])
+            salary = float(b["salary"])
+
+            gold_line = ""
+            if p24 and balance > 0:
+                grams = balance / p24
+                gold_line = (
+                    f"\n\nلو حبيت تدخر جزء منه في الذهب، الرصيد ده "
+                    f"بسعر النهاردة يعادل تقريبًا {grams:.2f} جرام "
+                    "عيار 24."
+                )
+
+            try:
+                await context.bot.send_message(
+                    chat_id=b["telegram_id"],
+                    text=(
+                        "🗓️ آخر يوم في الشهر!\n\n"
+                        f"💰 مرتبك: {round(salary)} جنيه\n"
+                        f"💵 معاك دلوقتي: {round(balance)} جنيه"
+                        f"{gold_line}\n\n"
+                        "بدأنا لك شهر جديد بنفس المرتب — لو اتغير "
+                        "المرتب، غيّره من 📒 حاسبة مصروفك الشهري."
+                    ),
+                )
+            except Exception as e:
+                print(
+                    f"Budget Summary Failed for {b['telegram_id']}:",
+                    repr(e), flush=True,
+                )
+
+            start_budget_month(b["telegram_id"], salary, next_month_str)
+    except Exception as e:
+        print("Budget Month End Tick Error:", repr(e), flush=True)
 
 
 async def weekly_summary_tick(context):
@@ -5239,6 +5638,63 @@ async def text(update, context):
         )
         return
 
+    if s == "budget_salary_input":
+        t_clean = t.strip().replace(",", "")
+        try:
+            salary = float(t_clean)
+        except ValueError:
+            await update.message.reply_text("❌ اكتب رقم بس.\nمثال: 8000")
+            return
+
+        if salary <= 0:
+            await update.message.reply_text("❌ اكتب مبلغ أكبر من صفر.")
+            return
+
+        month_str = datetime.now(TZ).strftime("%Y-%m")
+        start_budget_month(update.effective_user.id, salary, month_str)
+        context.user_data.clear()
+
+        await update.message.reply_text(
+            f"✅ تمام! سجلنا مرتبك ({round(salary)} جنيه).\n\n"
+            "دلوقتي كل ما تصرف أو يدخلك فلوس، سجلها من هنا، وآخر "
+            "كل شهر هنقولك معاك كام.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "📒 افتح حاسبة المصروف", callback_data="budgetmenu"
+                )],
+            ]),
+        )
+        return
+
+    if s == "budget_amount_input":
+        t_clean = t.strip().replace(",", "")
+        try:
+            amount = float(t_clean)
+        except ValueError:
+            await update.message.reply_text("❌ اكتب رقم بس.\nمثال: 500")
+            return
+
+        if amount <= 0:
+            await update.message.reply_text("❌ اكتب مبلغ أكبر من صفر.")
+            return
+
+        ttype = context.user_data.get("budget_type")
+        if ttype not in ("in", "out"):
+            await update.message.reply_text("ابدأ من قائمة حاسبة المصروف.")
+            return
+
+        apply_budget_transaction(update.effective_user.id, amount, ttype)
+        context.user_data.clear()
+
+        b = get_budget(update.effective_user.id)
+        text, kb = budget_summary_view(b)
+        await update.message.reply_text(
+            ("✅ اتسجل الدخل.\n\n" if ttype == "in" else "✅ اتسجل المصروف.\n\n")
+            + text,
+            reply_markup=kb,
+        )
+        return
+
     if s == "call_phone_input":
         phone = re.sub(r"[\s\-]", "", t.strip())
         if not re.match(r"^\+?\d{8,15}$", phone):
@@ -6062,6 +6518,49 @@ async def text(update, context):
         )
         return
 
+    if s == "ledger_name_input":
+        name = t.strip()
+        if not name:
+            await update.message.reply_text("❌ اكتب اسم صحيح.")
+            return
+
+        uid = update.effective_user.id
+        cid = add_ledger_customer(uid, name)
+        context.user_data.clear()
+
+        text, kb = ledger_customer_view(cid, uid)
+        await update.message.reply_text(
+            f"✅ اتسجل \"{name}\".\n\n" + text, reply_markup=kb
+        )
+        return
+
+    if s == "ledger_amount_input":
+        t_clean = t.strip().replace(",", "")
+        try:
+            amount = float(t_clean)
+        except ValueError:
+            await update.message.reply_text("❌ اكتب رقم بس.\nمثال: 500")
+            return
+
+        if amount <= 0:
+            await update.message.reply_text("❌ اكتب مبلغ أكبر من صفر.")
+            return
+
+        uid = update.effective_user.id
+        cid = context.user_data.get("ledger_customer_id")
+        direction = context.user_data.get("ledger_direction")
+        if not cid or direction not in ("lah", "alaih") \
+                or not get_ledger_customer(cid, uid):
+            await update.message.reply_text("ابدأ من قائمة حساباتي.")
+            return
+
+        add_ledger_entry(cid, amount, direction)
+        context.user_data.clear()
+
+        text, kb = ledger_customer_view(cid, uid)
+        await update.message.reply_text("✅ اتسجلت الحركة.\n\n" + text, reply_markup=kb)
+        return
+
     if s == "admin_reply":
         if not is_admin(update):
             context.user_data.clear()
@@ -6672,6 +7171,82 @@ async def buttons(update, context):
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("⬅️ الرئيسية", callback_data="home")],
             ]),
+        )
+        return
+
+    # ---- حاسبة المصروف الشهري ----
+
+    if c == "budgetmenu":
+        track_user(update)
+        b = get_budget(update.effective_user.id)
+
+        if not b:
+            context.user_data.clear()
+            context.user_data["state"] = "budget_salary_input"
+            await q.edit_message_text(
+                "📒 حاسبة مصروفك الشهري\n\n"
+                "اكتب مرتبك الشهري، وهنبدأ نتابعلك أي فلوس تدخل أو "
+                "تخرج، ونقولك آخر كل شهر معاك كام.\n\nمثال: 8000"
+            )
+            return
+
+        text, kb = budget_summary_view(b)
+        await q.edit_message_text(text, reply_markup=kb)
+        return
+
+    if c == "budgetin" or c == "budgetout":
+        b = get_budget(update.effective_user.id)
+        if not b:
+            await q.answer("سجّل مرتبك الأول.", show_alert=True)
+            return
+
+        context.user_data["state"] = "budget_amount_input"
+        context.user_data["budget_type"] = "in" if c == "budgetin" else "out"
+
+        await q.edit_message_text(
+            "اكتب المبلغ" + (" اللي دخل" if c == "budgetin" else " اللي خرج")
+            + ".\nمثال: 500"
+        )
+        return
+
+    if c == "budgethistory":
+        rows = list_budget_transactions(update.effective_user.id, 10)
+        if not rows:
+            await q.edit_message_text(
+                "📊 مفيش أي حركات متسجلة لسه.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(
+                        "⬅️ رجوع", callback_data="budgetmenu"
+                    )],
+                ]),
+            )
+            return
+
+        lines = ["📊 آخر 10 حركات:\n"]
+        for r in rows:
+            dt = (
+                r["created_at"].strftime("%d/%m %H:%M")
+                if hasattr(r["created_at"], "strftime")
+                else r["created_at"]
+            )
+            arrow = "🟢 +" if r["ttype"] == "in" else "🔴 -"
+            lines.append(f"{arrow}{round(float(r['amount']))} ج — {dt}")
+
+        await q.edit_message_text(
+            "\n".join(lines),
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ رجوع", callback_data="budgetmenu")],
+            ]),
+        )
+        return
+
+    if c == "budgetchangesalary":
+        context.user_data.clear()
+        context.user_data["state"] = "budget_salary_input"
+        await q.edit_message_text(
+            "✏️ اكتب مرتبك الشهري الجديد.\n\n"
+            "⚠️ ده هيبدأ دورة شهر جديدة من الأول (الرصيد هيترجع "
+            "لقيمة المرتب الجديد).\n\nمثال: 8000"
         )
         return
 
@@ -9955,6 +10530,159 @@ async def buttons(update, context):
         )
         return
 
+    # ---- حساباتي الشخصية (له/عليه) — لأي مستخدم للبوت ----
+
+    if c == "ledgermenu":
+        track_user(update)
+        uid = update.effective_user.id
+        customers = list_ledger_customers(uid)
+
+        if not customers:
+            await q.edit_message_text(
+                "📇 حساباتي\n\n"
+                "سجّل هنا أي حد بتتعامل معاه (شغل، ديون، أي حاجة)، "
+                "وتابع له كام وعليه كام بسهولة.\n\n"
+                "مفيش حسابات متسجلة لسه.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(
+                        "➕ سجّل حساب جديد", callback_data="ledgeraddcustomer"
+                    )],
+                    [InlineKeyboardButton("⬅️ الرئيسية", callback_data="home")],
+                ]),
+            )
+            return
+
+        await q.edit_message_text(
+            "📇 حساباتي\n\nاختار حساب:",
+            reply_markup=ledger_customer_pick_kb(customers, 0),
+        )
+        return
+
+    if c.startswith("ledgercp:"):
+        uid = update.effective_user.id
+        page = int(c.split(":")[1])
+        customers = list_ledger_customers(uid)
+        await q.edit_message_text(
+            "📇 حساباتي\n\nاختار حساب:",
+            reply_markup=ledger_customer_pick_kb(customers, page),
+        )
+        return
+
+    if c == "ledgeraddcustomer":
+        context.user_data.clear()
+        context.user_data["state"] = "ledger_name_input"
+        await q.edit_message_text("✏️ اكتب اسم الشخص أو الجهة:")
+        return
+
+    if c.startswith("ledgerc:"):
+        uid = update.effective_user.id
+        cid = int(c.split(":")[1])
+        text, kb = ledger_customer_view(cid, uid)
+        if not text:
+            await q.answer("الحساب ده مش موجود.", show_alert=True)
+            return
+        await q.edit_message_text(text, reply_markup=kb)
+        return
+
+    if c.startswith("ledgerlah:") or c.startswith("ledgeralaih:"):
+        uid = update.effective_user.id
+        direction = "lah" if c.startswith("ledgerlah:") else "alaih"
+        cid = int(c.split(":")[1])
+
+        if not get_ledger_customer(cid, uid):
+            await q.answer("الحساب ده مش موجود.", show_alert=True)
+            return
+
+        context.user_data.clear()
+        context.user_data.update(
+            state="ledger_amount_input",
+            ledger_customer_id=cid,
+            ledger_direction=direction,
+        )
+
+        label = "له (انت مديون له)" if direction == "lah" \
+            else "عليه (هو مديون لك)"
+        await q.edit_message_text(f"💰 اكتب المبلغ {label}.\nمثال: 500")
+        return
+
+    if c.startswith("ledgerhist:"):
+        uid = update.effective_user.id
+        cid = int(c.split(":")[1])
+
+        if not get_ledger_customer(cid, uid):
+            await q.answer("الحساب ده مش موجود.", show_alert=True)
+            return
+
+        rows = list_ledger_entries(cid, 15)
+
+        if not rows:
+            await q.edit_message_text(
+                "📊 مفيش أي حركات متسجلة لسه.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(
+                        "⬅️ رجوع", callback_data=f"ledgerc:{cid}"
+                    )],
+                ]),
+            )
+            return
+
+        lines = ["📊 آخر الحركات:\n"]
+        for r in rows:
+            dt = (
+                r["created_at"].strftime("%d/%m/%y %H:%M")
+                if hasattr(r["created_at"], "strftime")
+                else r["created_at"]
+            )
+            arrow = "🟢 له" if r["direction"] == "lah" else "🔴 عليه"
+            note = f" — {r['note']}" if r.get("note") else ""
+            lines.append(f"{arrow} {round(float(r['amount']))} ج{note} ({dt})")
+
+        await q.edit_message_text(
+            "\n".join(lines),
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "⬅️ رجوع", callback_data=f"ledgerc:{cid}"
+                )],
+            ]),
+        )
+        return
+
+    if c.startswith("ledgerdel:"):
+        uid = update.effective_user.id
+        cid = int(c.split(":")[1])
+        cust = get_ledger_customer(cid, uid)
+        if not cust:
+            await q.answer("الحساب ده مش موجود.", show_alert=True)
+            return
+
+        await q.edit_message_text(
+            f"⚠️ متأكد عايز تحذف \"{cust['name']}\" وكل حركاته؟\n\n"
+            "الحذف نهائي ومش هينفع ترجعه.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "🗑 اه، احذفه", callback_data=f"ledgerdelconfirm:{cid}"
+                )],
+                [InlineKeyboardButton(
+                    "❌ لأ، رجعني", callback_data=f"ledgerc:{cid}"
+                )],
+            ]),
+        )
+        return
+
+    if c.startswith("ledgerdelconfirm:"):
+        uid = update.effective_user.id
+        cid = int(c.split(":")[1])
+        delete_ledger_customer(cid, uid)
+        await q.edit_message_text(
+            "✅ اتحذف الحساب وكل حركاته.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "📇 حساباتي", callback_data="ledgermenu"
+                )],
+            ]),
+        )
+        return
+
     if c == "goldwsub":
         track_user(update)
         context.user_data.clear()
@@ -10390,6 +11118,10 @@ def main():
         app.job_queue.run_repeating(
             savings_goal_tick, interval=60, first=35,
             name="savings_goal_tick",
+        )
+        app.job_queue.run_repeating(
+            budget_month_end_tick, interval=60, first=37,
+            name="budget_month_end_tick",
         )
         app.job_queue.run_repeating(
             weekly_summary_tick, interval=60, first=40,
