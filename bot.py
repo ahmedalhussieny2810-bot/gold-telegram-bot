@@ -218,6 +218,11 @@ def init_db():
                 "DECIMAL(10,2) NULL",
                 "ALTER TABLE Users ADD COLUMN referred_by "
                 "BIGINT NULL",
+                "ALTER TABLE Users ADD COLUMN first_seen "
+                "TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP",
+                "ALTER TABLE Users ADD COLUMN last_seen "
+                "TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP "
+                "ON UPDATE CURRENT_TIMESTAMP",
             ):
                 _safe_alter(x, q)
 
