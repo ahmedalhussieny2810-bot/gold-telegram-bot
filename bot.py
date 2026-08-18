@@ -2411,6 +2411,20 @@ def user_totals():
     return row or {}
 
 
+def all_users_paginated(page, page_size=20):
+    total_row = one("SELECT COUNT(*) c FROM Users")
+    total = (total_row or {}).get("c", 0)
+
+    rows = many("""
+        SELECT telegram_id, first_name, username, first_seen
+        FROM Users
+        ORDER BY first_seen DESC
+        LIMIT %s OFFSET %s
+    """, (page_size, page * page_size))
+
+    return rows, total
+
+
 def top_inquiring_users(limit=10):
     return many("""
         SELECT telegram_id,first_name,username,inquiries_count
@@ -3080,6 +3094,9 @@ def stats_menu():
         )],
         [InlineKeyboardButton(
             "👥 أكثر العملاء استعلامات", callback_data="statsusers"
+        )],
+        [InlineKeyboardButton(
+            "📋 كل المستخدمين", callback_data="statsallusers:0"
         )],
         [InlineKeyboardButton("📋 سجل العمليات", callback_data="logsp:0")],
         [InlineKeyboardButton("👑 لوحة التحكم", callback_data="admin")],
@@ -8574,6 +8591,52 @@ async def buttons(update, context):
             lines.append("لا توجد بيانات حتى الآن.")
 
         await q.edit_message_text("\n".join(lines), reply_markup=stats_menu())
+        return
+
+    if c.startswith("statsallusers:"):
+        if not is_admin(update):
+            return
+
+        page = int(c.split(":")[1])
+        page_size = 20
+        rows, total = all_users_paginated(page, page_size)
+
+        if not rows:
+            await q.edit_message_text(
+                "📋 كل المستخدمين\n\nمفيش أي مستخدمين متسجلين لسه.",
+                reply_markup=stats_menu(),
+            )
+            return
+
+        start_i = page * page_size
+        lines = [f"📋 كل المستخدمين ({total})\n"]
+        for i, r in enumerate(rows, start=start_i + 1):
+            uname = f"@{r['username']}" if r["username"] else "بدون يوزر"
+            joined = (
+                r["first_seen"].strftime("%d/%m/%y")
+                if hasattr(r["first_seen"], "strftime")
+                else r["first_seen"]
+            )
+            lines.append(f"{i}. {r['first_name'] or '-'} ({uname}) — {joined}")
+
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton(
+                "⬅️ السابق", callback_data=f"statsallusers:{page-1}"
+            ))
+        if start_i + page_size < total:
+            nav.append(InlineKeyboardButton(
+                "➡️ التالي", callback_data=f"statsallusers:{page+1}"
+            ))
+
+        kb_rows = [nav] if nav else []
+        kb_rows.append([InlineKeyboardButton(
+            "⬅️ رجوع", callback_data="stats"
+        )])
+
+        await q.edit_message_text(
+            "\n".join(lines), reply_markup=InlineKeyboardMarkup(kb_rows)
+        )
         return
 
     if c.startswith("logsp:"):
