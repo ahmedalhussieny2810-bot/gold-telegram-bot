@@ -234,6 +234,17 @@ def init_db():
             """)
 
             x.execute("""
+                CREATE TABLE IF NOT EXISTS GoldBroadcastMessages(
+                    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                    price_id BIGINT UNSIGNED NOT NULL,
+                    telegram_id BIGINT NOT NULL,
+                    message_id BIGINT NOT NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    INDEX(price_id)
+                )
+            """)
+
+            x.execute("""
                 CREATE TABLE IF NOT EXISTS AdminLogs(
                     id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
                     admin_id BIGINT NULL,
@@ -1095,6 +1106,18 @@ def gold_subscriber_count():
     return (row or {}).get("c", 0)
 
 
+def referral_leaderboard(limit=20):
+    return many("""
+        SELECT u.telegram_id, u.first_name, u.username,
+               COUNT(r.telegram_id) AS cnt
+        FROM Users u
+        JOIN Users r ON r.referred_by = u.telegram_id
+        GROUP BY u.telegram_id, u.first_name, u.username
+        ORDER BY cnt DESC
+        LIMIT %s
+    """, (limit,))
+
+
 def set_whatsapp_subscription(telegram_id, phone_number, subscribed):
     c = db()
     try:
@@ -1263,10 +1286,12 @@ def record_gold_price(p21, p24, p18, admin_id=None):
                     (price_21,price_24,price_18,admin_id)
                     VALUES(%s,%s,%s,%s)
                 """, (p21, p24, p18, admin_id))
+                return x.lastrowid
         finally:
             c.close()
     except Exception as e:
         print("Gold History Log Error:", repr(e), flush=True)
+        return None
 
 
 def gold_history_range(start_dt, end_dt):
@@ -2549,7 +2574,7 @@ def latest():
 
 def save_latest(p, admin_id=None):
     p24, p21, p18 = calc(p)
-    record_gold_price(p21, p24, p18, admin_id)
+    return record_gold_price(p21, p24, p18, admin_id)
 
 
 def comparison(p):
@@ -2883,6 +2908,9 @@ def admin_menu(owner=False):
         )],
         [InlineKeyboardButton(
             "💬 رد على عميل بالآيدي", callback_data="adminreplyid"
+        )],
+        [InlineKeyboardButton(
+            "🏆 قائمة المتصدرين (الدعوات)", callback_data="referralleaderboard"
         )],
     ]
     if owner:
@@ -3698,6 +3726,22 @@ async def weekly_summary_tick(context):
         if not try_claim_daily_task("last_weekly_summary", week_str):
             return
 
+        # Housekeeping: broadcast-message tracking rows older than 48h
+        # are useless anyway (Telegram refuses to delete messages past
+        # that age), so purge them here to keep the table bounded.
+        try:
+            c = db()
+            try:
+                with c.cursor() as x:
+                    x.execute(
+                        "DELETE FROM GoldBroadcastMessages WHERE "
+                        "created_at < DATE_SUB(NOW(), INTERVAL 2 DAY)"
+                    )
+            finally:
+                c.close()
+        except Exception as e:
+            print("Broadcast Messages Cleanup Error:", repr(e), flush=True)
+
         new_users = one(
             "SELECT COUNT(*) AS n FROM Users WHERE first_seen >= "
             "DATE_SUB(NOW(), INTERVAL 7 DAY)"
@@ -3758,14 +3802,50 @@ async def potd_tick(context):
         print("POTD Tick Error:", repr(e), flush=True)
 
 
-async def broadcast_gold_update(context, new_price):
+def record_gold_broadcast_message(price_id, telegram_id, message_id):
+    c = db()
+    try:
+        with c.cursor() as x:
+            x.execute("""
+                INSERT INTO GoldBroadcastMessages
+                (price_id, telegram_id, message_id)
+                VALUES(%s, %s, %s)
+            """, (price_id, telegram_id, message_id))
+    finally:
+        c.close()
+
+
+def get_gold_broadcast_messages(price_id):
+    return many(
+        "SELECT telegram_id, message_id FROM GoldBroadcastMessages "
+        "WHERE price_id=%s",
+        (price_id,),
+    )
+
+
+def delete_gold_broadcast_messages(price_id):
+    c = db()
+    try:
+        with c.cursor() as x:
+            x.execute(
+                "DELETE FROM GoldBroadcastMessages WHERE price_id=%s",
+                (price_id,),
+            )
+    finally:
+        c.close()
+
+
+async def broadcast_gold_update(context, new_price, price_id=None):
     """
     Sends the new gold price to every customer subscribed to
     notifications (🔔 تفعيل الإشعارات on the main menu). Best-effort
     per user — a blocked bot or deactivated account for one
     subscriber never stops the broadcast to the rest. A small delay
     between sends avoids hitting Telegram's flood limits on large
-    lists.
+    lists. When price_id is given (the GoldPriceHistory row this
+    broadcast is for), every sent message's ID is logged so it can
+    later be deleted from customers' chats if the price gets
+    corrected/removed (see "🗑 حذف سعر غلط").
     """
     ids = gold_subscriber_ids()
     if not ids:
@@ -3776,8 +3856,10 @@ async def broadcast_gold_update(context, new_price):
 
     for uid in ids:
         try:
-            await context.bot.send_message(chat_id=uid, text=txt)
+            msg = await context.bot.send_message(chat_id=uid, text=txt)
             sent += 1
+            if price_id is not None:
+                record_gold_broadcast_message(price_id, uid, msg.message_id)
         except Exception as e:
             failed += 1
             print(f"Gold Broadcast Failed for {uid}:", repr(e), flush=True)
@@ -6272,7 +6354,7 @@ async def text(update, context):
 
         prev_p = latest()
 
-        save_latest(p, admin_id=update.effective_user.id)
+        new_price_id = save_latest(p, admin_id=update.effective_user.id)
         log_action(
             update.effective_user.id, "ADMIN_CHANGED_GOLD_PRICE",
             old_value=prev_p, new_value=f"price_21={round(p)}",
@@ -6288,7 +6370,7 @@ async def text(update, context):
             reply_markup=gold_menu(),
         )
         await maybe_send_gold_alert(context, prev_p, p)
-        await broadcast_gold_update(context, p)
+        await broadcast_gold_update(context, p, price_id=new_price_id)
 
         wa_result = await broadcast_gold_update_whatsapp(context, p)
         wa_status_map = {
@@ -10246,16 +10328,50 @@ async def buttons(update, context):
             await q.answer("السعر ده مش موجود (يمكن اتحذف قبل كده).", show_alert=True)
             return
 
+        broadcast_msgs = get_gold_broadcast_messages(pid)
+
         ok = delete_gold_price_entry(pid)
         log_action(
             update.effective_user.id, "ADMIN_DELETE_GOLD_PRICE",
             new_value=str(round(float(entry["price_21"]))),
         )
 
+        deleted_count, delete_failed = 0, 0
+        for m in broadcast_msgs:
+            try:
+                await context.bot.delete_message(
+                    chat_id=m["telegram_id"], message_id=m["message_id"]
+                )
+                deleted_count += 1
+            except Exception as e:
+                delete_failed += 1
+                print(
+                    f"Broadcast Message Delete Failed for {m['telegram_id']}:",
+                    repr(e), flush=True,
+                )
+            await asyncio.sleep(0.05)
+
+        delete_gold_broadcast_messages(pid)
+
         if ok:
+            msg_line = ""
+            if broadcast_msgs:
+                msg_line = (
+                    f"\n📨 اتشال الإشعار من {deleted_count} شات"
+                    + (f" (فشل مع {delete_failed})" if delete_failed else "")
+                    + "."
+                )
+                if delete_failed:
+                    msg_line += (
+                        "\n(الفشل بيحصل عادة لو العميل حذف الشات أو "
+                        "الرسالة قديمة أكتر من 48 ساعة — تليجرام بيمنع "
+                        "حذف رسائل قديمة أوي.)"
+                    )
+
             await q.edit_message_text(
-                "✅ اتحذف السعر الغلط.\n\n"
-                "ملحوظة: لو السعر ده كان آخر سعر متسجل، البوت هيرجع "
+                "✅ اتحذف السعر الغلط."
+                + msg_line
+                + "\n\nملحوظة: لو السعر ده كان آخر سعر متسجل، البوت هيرجع "
                 "يعتبر آخر سعر قبله هو السعر الحالي.",
                 reply_markup=gold_menu(),
             )
@@ -10573,6 +10689,37 @@ async def buttons(update, context):
         )
         return
 
+    if c == "referralleaderboard":
+        if not is_admin(update):
+            return
+
+        rows = referral_leaderboard(20)
+        if not rows:
+            await q.edit_message_text(
+                "🏆 قائمة المتصدرين\n\n"
+                "مفيش أي دعوات ناجحة متسجلة لسه.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("⬅️ رجوع", callback_data="admin")],
+                ]),
+            )
+            return
+
+        medals = {1: "🥇", 2: "🥈", 3: "🥉"}
+        lines = ["🏆 قائمة المتصدرين (الأكتر دعوات)\n"]
+        for i, r in enumerate(rows, start=1):
+            medal = medals.get(i, f"{i}.")
+            name = r.get("first_name") or "بدون اسم"
+            uname = f" (@{r['username']})" if r.get("username") else ""
+            lines.append(f"{medal} {name}{uname} — {r['cnt']} دعوة")
+
+        await q.edit_message_text(
+            "\n".join(lines),
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ رجوع", callback_data="admin")],
+            ]),
+        )
+        return
+
     # ---- حساباتي الشخصية (له/عليه) — لأي مستخدم للبوت ----
 
     if c == "ledgermenu":
@@ -10779,13 +10926,13 @@ async def buttons(update, context):
 
         if tg_ok or fb_ok:
             prev_p = latest()
-            save_latest(p, admin_id=update.effective_user.id)
+            new_price_id = save_latest(p, admin_id=update.effective_user.id)
 
             if context.user_data.get("first"):
                 save_first(p)
 
             await maybe_send_gold_alert(context, prev_p, p)
-            await broadcast_gold_update(context, p)
+            await broadcast_gold_update(context, p, price_id=new_price_id)
             await broadcast_gold_update_whatsapp(context, p)
 
         log_publish(
