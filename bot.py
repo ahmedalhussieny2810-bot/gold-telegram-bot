@@ -1407,6 +1407,10 @@ def maintenance_mode_on():
     return get_setting("maintenance_mode", "0") == "1"
 
 
+def isagha_autosuggest_on():
+    return get_setting("isagha_autosuggest", "0") == "1"
+
+
 def try_claim_daily_task(key, value):
     """Atomically claims a one-per-day (or one-per-period) scheduled
     task stored as a Settings flag. Only the first caller to write a
@@ -2580,6 +2584,46 @@ def save_first(p):
     return False
 
 
+def fetch_isagha_price_21():
+    """
+    Best-effort scrape of iSagha's public prices page for the 21k
+    "بيع" (sell-to-customer) price. This is NOT an official API —
+    iSagha doesn't offer one — so this is fragile by nature: if they
+    redesign their page, this can start returning None or (rarely) a
+    wrong number. That's exactly why this is only ever used to build
+    a SUGGESTION the admin reviews and approves — it must never
+    auto-publish on its own. Returns a float, or None on any failure
+    (network error, page structure changed, price not found).
+    """
+    try:
+        r = requests.get(
+            "https://market.isagha.com/prices",
+            headers={"User-Agent": "Mozilla/5.0 (compatible; AlhussienyBot/1.0)"},
+            timeout=15,
+        )
+        r.raise_for_status()
+        html = r.text
+
+        # Scope the search to the gold-prices table only, so we don't
+        # accidentally match "عيار 21" text elsewhere on the page
+        # (silver/currency tables, articles, etc.).
+        start = html.find("أسعار الذهب في مصر اليوم")
+        end = html.find("أسعار الفضة في مصر اليوم")
+        section = html[start:end] if start != -1 and end != -1 else html
+
+        m = re.search(
+            r"عيار\s*21(?:(?!عيار).){1,400}?([\d,]+(?:\.\d+)?)\s*ج\.?م",
+            section, re.DOTALL,
+        )
+        if not m:
+            return None
+
+        return float(m.group(1).replace(",", ""))
+    except Exception as e:
+        print("iSagha Price Fetch Error:", repr(e), flush=True)
+        return None
+
+
 def latest():
     """Most recently recorded gold price (عيار 21). Derived from
     GoldPriceHistory in MySQL — see first_today() docstring for why
@@ -2921,6 +2965,9 @@ def admin_menu(owner=False):
         )],
         [InlineKeyboardButton(
             "🔧 وضع الصيانة", callback_data="maintmenu"
+        )],
+        [InlineKeyboardButton(
+            "🔄 اقتراح سعر تلقائي (iSagha)", callback_data="isaghamenu"
         )],
         [InlineKeyboardButton(
             "📞 طلبات المكالمات", callback_data="callqueue"
@@ -3824,6 +3871,30 @@ async def potd_tick(context):
         print("POTD Tick Error:", repr(e), flush=True)
 
 
+async def isagha_suggestion_tick(context):
+    """Runs every minute via JobQueue but only acts once per hour
+    (on the hour, between 09:00-23:00), and only if the admin has
+    turned "🔄 اقتراح سعر تلقائي" on. Scrapes iSagha for a suggested
+    21k price and sends it to the admin for review — never
+    auto-publishes (see fetch_isagha_price_21's docstring)."""
+    try:
+        if not ADMIN_ID or not isagha_autosuggest_on():
+            return
+
+        now = datetime.now(TZ)
+        if now.minute != 0 or not (9 <= now.hour <= 23):
+            return
+
+        hour_key = now.strftime("%Y-%m-%d-%H")
+        if not try_claim_daily_task("last_isagha_suggestion_hour", hour_key):
+            return
+
+        suggested = await asyncio.to_thread(fetch_isagha_price_21)
+        await send_isagha_suggestion(context, ADMIN_ID, suggested)
+    except Exception as e:
+        print("iSagha Suggestion Tick Error:", repr(e), flush=True)
+
+
 def record_gold_broadcast_message(price_id, telegram_id, message_id):
     c = db()
     try:
@@ -4230,6 +4301,65 @@ async def broadcast_gold_update_whatsapp(context, new_price):
         "status": "sent", "slot": slot,
         "sent": sent, "failed": failed, "details": details,
     }
+
+
+async def send_isagha_suggestion(context, admin_id, suggested):
+    """
+    Sends the admin the iSagha-scraped suggested 21k price (or a
+    failure notice) with approve/edit/ignore buttons. Never
+    publishes anything on its own — see fetch_isagha_price_21's
+    docstring for why.
+    """
+    if suggested is None:
+        try:
+            await context.bot.send_message(
+                chat_id=admin_id,
+                text=(
+                    "⚠️ مقدرتش أجيب سعر مقترح من iSagha دلوقتي "
+                    "(ممكن الموقع غيّر شكله أو فيه مشكلة اتصال). "
+                    "حدّث السعر يدوي زي العادة."
+                ),
+            )
+        except Exception as e:
+            print("iSagha Suggestion Send Failed:", repr(e), flush=True)
+        return
+
+    current = latest()
+    diff_line = ""
+    suspicious = False
+    if current:
+        diff = round(suggested - current)
+        pct = abs(diff) / current * 100 if current else 0
+        if pct > 15:
+            suspicious = True
+            diff_line = (
+                f"\n\n⚠️ الفرق كبير جدًا عن سعرك الحالي ({round(current)} ج) "
+                f"— {diff:+d} ج ({pct:.0f}%). راجعه كويس قبل النشر، "
+                "ممكن يكون خطأ في القراءة من الموقع."
+            )
+        else:
+            diff_line = f"\n\nمقارنة بسعرك الحالي: {diff:+d} ج"
+
+    text = (
+        "🔄 اقتراح سعر من iSagha\n\n"
+        f"عيار 21 (بيع): {round(suggested)} جنيه"
+        f"{diff_line}\n\n"
+        "⚠️ مصدر غير رسمي — راجع السعر قبل ما تنشره."
+    )
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            "✅ انشر بالسعر ده" if not suspicious else "⚠️ انشر برضه",
+            callback_data=f"isaghapub:{suggested}",
+        )],
+        [InlineKeyboardButton("✏️ عدّل السعر", callback_data="isaghaedit")],
+        [InlineKeyboardButton("❌ تجاهل", callback_data="isaghaignore")],
+    ])
+
+    try:
+        await context.bot.send_message(chat_id=admin_id, text=text, reply_markup=kb)
+    except Exception as e:
+        print("iSagha Suggestion Send Failed:", repr(e), flush=True)
 
 
 async def maybe_send_gold_alert(context, prev_price, new_price):
@@ -9779,6 +9909,108 @@ async def buttons(update, context):
         )
         return
 
+    # ---- اقتراح سعر تلقائي من iSagha ----
+
+    if c == "isaghamenu":
+        if not is_admin(update):
+            return
+
+        on = isagha_autosuggest_on()
+        status_line = (
+            "🟢 مفعّل — هبعتلك اقتراح سعر كل ساعة (من 9 الصبح لـ 11 بالليل)."
+            if on else
+            "🔴 متوقف دلوقتي."
+        )
+
+        await q.edit_message_text(
+            "🔄 اقتراح سعر تلقائي (iSagha)\n\n"
+            f"{status_line}\n\n"
+            "البوت بيجيب سعر عيار 21 من موقع iSagha كل ساعة "
+            "ويبعتهولك كـ**اقتراح بس** — إنت اللي بتقرر تنشره، "
+            "تعدّله، أو تتجاهله. مفيش نشر تلقائي خالص.\n\n"
+            "⚠️ مصدر مش رسمي (موقع خارجي)، ممكن يفشل يجيب السعر "
+            "أحيانًا أو يختلف عن مصادر تانية — استخدمه كمرجع سريع "
+            "مش كمصدر وحيد.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "🔴 إيقاف" if on else "🟢 تفعيل",
+                    callback_data="isaghatoggle",
+                )],
+                [InlineKeyboardButton(
+                    "📥 اجيب اقتراح دلوقتي", callback_data="isaghafetchnow"
+                )],
+                [InlineKeyboardButton("⬅️ رجوع", callback_data="admin")],
+            ]),
+        )
+        return
+
+    if c == "isaghatoggle":
+        if not is_admin(update):
+            return
+
+        on = isagha_autosuggest_on()
+        set_setting("isagha_autosuggest", "0" if on else "1")
+        log_action(
+            update.effective_user.id, "ADMIN_TOGGLE_ISAGHA_AUTOSUGGEST",
+            new_value="off" if on else "on",
+        )
+
+        await q.edit_message_text(
+            "✅ اتفعّل الاقتراح التلقائي." if not on else "✅ اتوقف الاقتراح التلقائي.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ رجوع", callback_data="admin")],
+            ]),
+        )
+        return
+
+    if c == "isaghafetchnow":
+        if not is_admin(update):
+            return
+
+        await q.edit_message_text("⏳ بجيب السعر من iSagha...")
+        suggested = await asyncio.to_thread(fetch_isagha_price_21)
+        await send_isagha_suggestion(context, update.effective_user.id, suggested)
+        return
+
+    if c.startswith("isaghapub:"):
+        if not is_admin(update):
+            return
+
+        suggested = float(c.split(":")[1])
+        prev_p = latest()
+        new_price_id = save_latest(suggested, admin_id=update.effective_user.id)
+        log_action(
+            update.effective_user.id, "ADMIN_CHANGED_GOLD_PRICE",
+            old_value=prev_p, new_value=f"price_21={round(suggested)} (iSagha)",
+        )
+        if first_today() is None:
+            save_first(suggested)
+
+        await q.edit_message_text(
+            "✅ تم نشر السعر المقترح.\n\n" + price_text(suggested),
+        )
+        await maybe_send_gold_alert(context, prev_p, suggested)
+        await broadcast_gold_update(context, suggested, price_id=new_price_id)
+        return
+
+    if c == "isaghaignore":
+        if not is_admin(update):
+            return
+
+        await q.edit_message_text("👍 تمام، اتجاهل الاقتراح.")
+        return
+
+    if c == "isaghaedit":
+        if not is_admin(update):
+            return
+
+        context.user_data.clear()
+        context.user_data["state"] = "gold"
+        await q.edit_message_text(
+            "✏️ اكتب سعر عيار 21 الصحيح.\nمثال: 6250"
+        )
+        return
+
     if c == "phone":
         await q.edit_message_text(
             f"📞 {SHOP_NAME}\n\n{PHONE}\n\nللتواصل المباشر:",
@@ -11387,6 +11619,10 @@ def main():
         )
         app.job_queue.run_repeating(
             potd_tick, interval=60, first=45, name="potd_tick",
+        )
+        app.job_queue.run_repeating(
+            isagha_suggestion_tick, interval=60, first=50,
+            name="isagha_suggestion_tick",
         )
         print("Auto-posting scheduler started (checks every 60s).", flush=True)
     else:
