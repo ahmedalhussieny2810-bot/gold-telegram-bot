@@ -4608,6 +4608,11 @@ async def fb_request(method, url, *, params=None, data=None, timeout=30):
 
 
 STORY_FONT_CANDIDATES = [
+    # Bundled with the repo itself — this is the reliable one, since
+    # it doesn't depend on the server having any particular system
+    # package installed. Add fonts/FreeSerifBold.ttf next to bot.py
+    # on GitHub for this to work.
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts", "FreeSerifBold.ttf"),
     "/usr/share/fonts/truetype/freefont/FreeSerifBold.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf",
     "/usr/share/fonts/truetype/liberation/LiberationSerif-Bold.ttf",
