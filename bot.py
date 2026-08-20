@@ -1405,6 +1405,14 @@ def set_setting(key, value):
         c.close()
 
 
+def get_story_bg():
+    return get_setting("story_bg_photo_id")
+
+
+def set_story_bg(photo_id):
+    set_setting("story_bg_photo_id", photo_id)
+
+
 def maintenance_mode_on():
     return get_setting("maintenance_mode", "0") == "1"
 
@@ -6051,13 +6059,34 @@ async def photo(update, context):
         return
 
     if state == "story_photo_input":
-        context.user_data["story_photo"] = update.message.photo[-1].file_id
-        context.user_data["state"] = "story_text_input"
+        photo_id = update.message.photo[-1].file_id
+
+        if context.user_data.get("story_will_save"):
+            set_story_bg(photo_id)
+            context.user_data.clear()
+            context.user_data["story_photo"] = photo_id
+            context.user_data["state"] = "story_text_input"
+
+            await update.message.reply_text(
+                "✅ اتحفظت كخلفية افتراضية جديدة.\n\n"
+                "✏️ اكتب النص اللي عايز يتحط على الصورة.\n\n"
+                "لو عايز سطر تاني أصغر تحته، اكتبه في سطر جديد."
+            )
+            return
+
+        context.user_data["story_photo"] = photo_id
+        context.user_data["state"] = None
 
         await update.message.reply_text(
-            "✏️ اكتب النص اللي عايز يتحط على الصورة.\n\n"
-            "لو عايز سطر تاني أصغر تحته (زي \"تقدر تحجزه دلوقتي\")، "
-            "اكتبه في سطر جديد."
+            "تحب تحفظها كخلفية دائمة، عشان مانبعتهاش تاني كل مرة؟",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "✅ احفظها كخلفية دائمة", callback_data="storysavebg"
+                )],
+                [InlineKeyboardButton(
+                    "❌ لأ، مرة واحدة بس", callback_data="storyskipsave"
+                )],
+            ]),
         )
         return
 
@@ -8123,8 +8152,30 @@ async def buttons(update, context):
             return
 
         context.user_data.clear()
-        context.user_data["state"] = "story_photo_input"
+        saved_bg = get_story_bg()
 
+        if saved_bg:
+            await q.edit_message_text(
+                "📸 نشر ستوري\n\nعندك خلفية محفوظة، تستخدمها؟",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(
+                        "✅ استخدم الخلفية المحفوظة",
+                        callback_data="storyusedefault",
+                    )],
+                    [InlineKeyboardButton(
+                        "📤 ابعت صورة تانية (مرة واحدة بس)",
+                        callback_data="storynewphoto",
+                    )],
+                    [InlineKeyboardButton(
+                        "🖼️ غيّر الخلفية المحفوظة",
+                        callback_data="storychangebg",
+                    )],
+                    [InlineKeyboardButton("❌ إلغاء", callback_data="admin")],
+                ]),
+            )
+            return
+
+        context.user_data["state"] = "story_photo_input"
         await q.edit_message_text(
             "📸 نشر ستوري\n\n"
             "ابعت الصورة اللي عايز تنشرها ستوري (على فيسبوك وإنستجرام "
@@ -8132,6 +8183,67 @@ async def buttons(update, context):
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("❌ إلغاء", callback_data="admin")]
             ]),
+        )
+        return
+
+    if c == "storyusedefault":
+        if not is_admin(update):
+            await q.answer("❌ غير مسموح.", show_alert=True)
+            return
+
+        saved_bg = get_story_bg()
+        if not saved_bg:
+            await q.answer("مفيش خلفية محفوظة.", show_alert=True)
+            return
+
+        context.user_data.clear()
+        context.user_data["story_photo"] = saved_bg
+        context.user_data["state"] = "story_text_input"
+
+        await q.edit_message_text(
+            "✏️ اكتب النص اللي عايز يتحط على الصورة.\n\n"
+            "لو عايز سطر تاني أصغر تحته (زي \"تقدر تحجزه دلوقتي\")، "
+            "اكتبه في سطر جديد."
+        )
+        return
+
+    if c == "storynewphoto" or c == "storychangebg":
+        if not is_admin(update):
+            await q.answer("❌ غير مسموح.", show_alert=True)
+            return
+
+        context.user_data.clear()
+        context.user_data["state"] = "story_photo_input"
+        if c == "storychangebg":
+            context.user_data["story_will_save"] = True
+
+        await q.edit_message_text(
+            "ابعت الصورة الجديدة:",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ إلغاء", callback_data="admin")]
+            ]),
+        )
+        return
+
+    if c == "storysavebg" or c == "storyskipsave":
+        if not is_admin(update):
+            await q.answer("❌ غير مسموح.", show_alert=True)
+            return
+
+        photo_id = context.user_data.get("story_photo")
+        if not photo_id:
+            await q.answer("ابدأ نشر الستوري من الأول.", show_alert=True)
+            return
+
+        if c == "storysavebg":
+            set_story_bg(photo_id)
+
+        context.user_data["state"] = "story_text_input"
+
+        await q.edit_message_text(
+            ("✅ اتحفظت كخلفية افتراضية.\n\n" if c == "storysavebg" else "")
+            + "✏️ اكتب النص اللي عايز يتحط على الصورة.\n\n"
+            "لو عايز سطر تاني أصغر تحته، اكتبه في سطر جديد."
         )
         return
 
