@@ -7,6 +7,8 @@ from zoneinfo import ZoneInfo
 from urllib.parse import urlparse, quote
 
 import requests
+from PIL import Image, ImageDraw, ImageFont
+import io
 import pymysql
 from dotenv import load_dotenv
 from telegram import (
@@ -2946,6 +2948,7 @@ def shop_info_kb():
 def admin_menu(owner=False):
     rows = [
         [InlineKeyboardButton("📝 منشور جديد", callback_data="newpost")],
+        [InlineKeyboardButton("📸 نشر ستوري", callback_data="storypost")],
         [InlineKeyboardButton(
             "📢 الإشعارات للمشتركين", callback_data="notifmenu"
         )],
@@ -4596,6 +4599,181 @@ async def fb_request(method, url, *, params=None, data=None, timeout=30):
     return r, payload
 
 
+STORY_FONT_CANDIDATES = [
+    "/usr/share/fonts/truetype/freefont/FreeSerifBold.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSerif-Bold.ttf",
+]
+
+
+def _load_story_font(size):
+    for path in STORY_FONT_CANDIDATES:
+        try:
+            return ImageFont.truetype(path, size)
+        except Exception:
+            continue
+    raise RuntimeError(
+        "مفيش خط عربي متاح على السيرفر لرسم نص الستوري. "
+        "أضف حزمة الخطوط دي لملف Dockerfile: fonts-freefont-ttf "
+        "(سطر: RUN apt-get update && apt-get install -y "
+        "fonts-freefont-ttf)"
+    )
+
+
+def compose_story_image(image_bytes, main_text, sub_text=None):
+    """
+    Draws main_text (and an optional smaller sub_text under it) in
+    the vertical center of the given image, in the classic gold/
+    white style — used by the "📸 نشر ستوري" flow. Returns JPEG
+    bytes ready to send/publish. Never modifies the source image
+    file, only an in-memory copy.
+
+    Tries proper Arabic shaping (arabic_reshaper + python-bidi) if
+    those packages are installed; if they're not, falls back to
+    drawing the raw text. Most current Pillow builds already shape
+    Arabic correctly on their own (via bundled libraqm), so the
+    fallback path still looks right in practice — the reshaping
+    libraries are a safety net, not a hard requirement.
+    """
+    def shape(t):
+        # Strip emoji before shaping/drawing — the story font (a
+        # plain serif TTF) has no color-emoji glyphs, so any emoji
+        # would render as a broken box instead of the actual symbol.
+        t = re.sub(
+            "["
+            "\U0001F300-\U0001FAFF"
+            "\U00002600-\U000027BF"
+            "\U0001F1E6-\U0001F1FF"
+            "\U00002190-\U000021FF"
+            "\U00002B00-\U00002BFF"
+            "\uFE0F"
+            "]+",
+            "", t,
+        ).strip()
+        try:
+            import arabic_reshaper
+            from bidi.algorithm import get_display
+            return get_display(arabic_reshaper.reshape(t))
+        except Exception:
+            return t
+
+    im = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    w, h = im.size
+    draw = ImageDraw.Draw(im, "RGBA")
+
+    main_size = max(20, int(w * 0.068))
+    main_font = _load_story_font(main_size)
+    shaped_main = shape(main_text)
+    main_bbox = draw.textbbox((0, 0), shaped_main, font=main_font)
+    main_w = main_bbox[2] - main_bbox[0]
+    main_h = main_bbox[3] - main_bbox[1]
+
+    shaped_sub, sub_font, sub_bbox = None, None, None
+    sub_h = 0
+    gap = int(h * 0.02)
+    if sub_text:
+        sub_size = max(14, int(w * 0.036))
+        sub_font = _load_story_font(sub_size)
+        shaped_sub = shape(sub_text)
+        sub_bbox = draw.textbbox((0, 0), shaped_sub, font=sub_font)
+        sub_h = sub_bbox[3] - sub_bbox[1]
+
+    total_h = main_h + (sub_h + gap if shaped_sub else 0)
+    start_y = (h - total_h) // 2
+    shadow = max(1, main_size // 24)
+
+    main_x = (w - main_w) // 2
+    draw.text(
+        (main_x + shadow, start_y + shadow - main_bbox[1]),
+        shaped_main, font=main_font, fill=(0, 0, 0, 160),
+    )
+    draw.text(
+        (main_x, start_y - main_bbox[1]),
+        shaped_main, font=main_font, fill=(244, 228, 184, 255),
+    )
+
+    if shaped_sub:
+        sub_w = sub_bbox[2] - sub_bbox[0]
+        sub_y = start_y + main_h + gap
+        sub_x = (w - sub_w) // 2
+        draw.text(
+            (sub_x + shadow, sub_y + shadow - sub_bbox[1]),
+            shaped_sub, font=sub_font, fill=(0, 0, 0, 160),
+        )
+        draw.text(
+            (sub_x, sub_y - sub_bbox[1]),
+            shaped_sub, font=sub_font, fill=(255, 255, 255, 255),
+        )
+
+    out = io.BytesIO()
+    im.save(out, format="JPEG", quality=92)
+    out.seek(0)
+    return out.getvalue()
+
+
+async def facebook_story_only(image_bytes):
+    """Publishes an image straight to the Facebook Page Story (not
+    the feed) — a standalone wrapper around facebook_story() for the
+    "📸 نشر ستوري" flow, which never touches the main feed."""
+    if not FACEBOOK_PAGE_ID:
+        return {
+            "ok": False,
+            "message": "❌ FACEBOOK_PAGE_ID غير موجود في Railway Variables.",
+        }
+    if not FACEBOOK_PAGE_ACCESS_TOKEN:
+        return {
+            "ok": False,
+            "message": "❌ FACEBOOK_PAGE_TOKEN غير موجود في Railway Variables.",
+        }
+
+    graph_version = os.getenv("FACEBOOK_GRAPH_VERSION", "v26.0").strip()
+    if not graph_version.startswith("v"):
+        graph_version = "v" + graph_version
+    base = f"https://graph.facebook.com/{graph_version}"
+
+    result = await facebook_story(image_bytes, base, graph_version)
+    if result.get("ok"):
+        return {"ok": True, "message": "✅ تم نشر الستوري على Facebook."}
+    return {
+        "ok": False,
+        "message": "❌ فشل نشر الستوري على Facebook.\n\n" + result.get("message", ""),
+    }
+
+
+async def instagram_story_only(image_url):
+    """Publishes an image straight to the Instagram Story (not the
+    feed) — a standalone counterpart to facebook_story_only()."""
+    if not INSTAGRAM_BUSINESS_ID:
+        return {
+            "ok": False,
+            "message": "❌ INSTAGRAM_BUSINESS_ID غير موجود في Railway Variables.",
+        }
+    if not FACEBOOK_PAGE_ACCESS_TOKEN:
+        return {
+            "ok": False,
+            "message": "❌ FACEBOOK_PAGE_TOKEN غير موجود في Railway Variables.",
+        }
+
+    graph_version = os.getenv("FACEBOOK_GRAPH_VERSION", "v26.0").strip()
+    if not graph_version.startswith("v"):
+        graph_version = "v" + graph_version
+    base = f"https://graph.facebook.com/{graph_version}"
+
+    ok, result = await _ig_container_publish(base, {
+        "image_url": image_url,
+        "media_type": "STORIES",
+        "access_token": FACEBOOK_PAGE_ACCESS_TOKEN,
+    })
+    if ok:
+        return {"ok": True, "message": "✅ تم نشر الستوري على Instagram."}
+    return {
+        "ok": False,
+        "message": (
+            "❌ فشل نشر الستوري على Instagram.\n\n" + result.get("message", "")
+        ),
+    }
+
+
 async def facebook_story(image_bytes, base, graph_version):
     """
     Publishes the given image bytes to the Facebook Page Story.
@@ -5872,6 +6050,17 @@ async def photo(update, context):
         )
         return
 
+    if state == "story_photo_input":
+        context.user_data["story_photo"] = update.message.photo[-1].file_id
+        context.user_data["state"] = "story_text_input"
+
+        await update.message.reply_text(
+            "✏️ اكتب النص اللي عايز يتحط على الصورة.\n\n"
+            "لو عايز سطر تاني أصغر تحته (زي \"تقدر تحجزه دلوقتي\")، "
+            "اكتبه في سطر جديد."
+        )
+        return
+
     if state == "new_post":
         group_id = update.message.media_group_id
         photo_id = update.message.photo[-1].file_id
@@ -6794,6 +6983,75 @@ async def text(update, context):
         context.user_data["calc_share_text"] = build_share_text(text)
         await update.message.reply_text(
             text, reply_markup=calc_result_kb(update.effective_user.id)
+        )
+        return
+
+    if s == "story_text_input":
+        if not is_admin(update):
+            context.user_data.clear()
+            await update.message.reply_text("❌ غير مسموح.")
+            return
+
+        photo_id = context.user_data.get("story_photo")
+        if not photo_id:
+            context.user_data.clear()
+            await update.message.reply_text("ابدأ نشر الستوري من الأول.")
+            return
+
+        lines = [ln.strip() for ln in t.strip().split("\n") if ln.strip()]
+        if not lines:
+            await update.message.reply_text("❌ اكتب نص للستوري.")
+            return
+
+        main_text = lines[0]
+        sub_text = lines[1] if len(lines) > 1 else None
+        context.user_data.clear()
+
+        await update.message.reply_text("⏳ بجهز الستوري...")
+
+        try:
+            f = await context.bot.get_file(photo_id)
+            src_url = (
+                f.file_path if f.file_path.startswith("http")
+                else f"https://api.telegram.org/file/bot{BOT_TOKEN}/{f.file_path}"
+            )
+            img_resp = await asyncio.to_thread(requests.get, src_url, timeout=30)
+            img_resp.raise_for_status()
+            composed = compose_story_image(img_resp.content, main_text, sub_text)
+        except Exception as e:
+            await update.message.reply_text(
+                f"❌ فشل تجهيز الصورة: {repr(e)}",
+                reply_markup=admin_menu(owner=is_owner(update)),
+            )
+            return
+
+        try:
+            preview_msg = await update.message.reply_photo(
+                photo=composed, caption="🖼️ معاينة الستوري"
+            )
+            f2 = await context.bot.get_file(preview_msg.photo[-1].file_id)
+            composed_url = (
+                f2.file_path if f2.file_path.startswith("http")
+                else f"https://api.telegram.org/file/bot{BOT_TOKEN}/{f2.file_path}"
+            )
+        except Exception as e:
+            await update.message.reply_text(
+                f"❌ فشل رفع معاينة الستوري: {repr(e)}",
+                reply_markup=admin_menu(owner=is_owner(update)),
+            )
+            return
+
+        fb_result = await facebook_story_only(composed)
+        ig_result = await instagram_story_only(composed_url)
+
+        lines_out = [
+            fb_result.get("message", "❌ فشل النشر على Facebook."),
+            ig_result.get("message", "❌ فشل النشر على Instagram."),
+        ]
+
+        await update.message.reply_text(
+            "\n".join(lines_out),
+            reply_markup=admin_menu(owner=is_owner(update)),
         )
         return
 
@@ -7853,6 +8111,24 @@ async def buttons(update, context):
             "📝 ابعت المنشور:\n\n"
             "- اكتب نص، أو\n"
             "- ابعت صورة (تقدر تحط تعليق عليها كنص المنشور)",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ إلغاء", callback_data="admin")]
+            ]),
+        )
+        return
+
+    if c == "storypost":
+        if not is_admin(update):
+            await q.answer("❌ غير مسموح.", show_alert=True)
+            return
+
+        context.user_data.clear()
+        context.user_data["state"] = "story_photo_input"
+
+        await q.edit_message_text(
+            "📸 نشر ستوري\n\n"
+            "ابعت الصورة اللي عايز تنشرها ستوري (على فيسبوك وإنستجرام "
+            "بس، من غير القناة أو المنشور العادي).",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("❌ إلغاء", callback_data="admin")]
             ]),
