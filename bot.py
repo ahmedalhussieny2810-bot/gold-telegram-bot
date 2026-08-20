@@ -11,7 +11,7 @@ import pymysql
 from dotenv import load_dotenv
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand,
-    BotCommandScopeChat, BotCommandScopeDefault,
+    BotCommandScopeChat, BotCommandScopeDefault, InputMediaPhoto,
 )
 from telegram.ext import (
     Application,
@@ -4751,16 +4751,134 @@ async def facebook_photo(text, photo_url):
         }
 
 
-async def _ig_container_publish(base, data, timeout_polls=10):
+async def facebook_photo_album(text, photo_urls):
     """
-    Shared helper: creates an Instagram media container, waits for
-    Instagram to finish processing it (status_code == FINISHED),
-    then publishes it. Returns (ok, result_dict).
-    Used for both feed photos and Instagram Stories — they use the
-    exact same container flow, only the media_type differs.
+    Publishes a multi-photo album post (2-10 photos) to the Facebook
+    Page feed: uploads each photo as unpublished first (getting a
+    photo_id for each), then creates one feed post referencing all
+    of them together via attached_media. Falls back to the
+    single-photo path if given fewer than 2 URLs.
+    """
+    if not FACEBOOK_PAGE_ID:
+        return {
+            "ok": False,
+            "message": "❌ FACEBOOK_PAGE_ID غير موجود في Railway Variables.",
+        }
+    if not FACEBOOK_PAGE_ACCESS_TOKEN:
+        return {
+            "ok": False,
+            "message": "❌ FACEBOOK_PAGE_TOKEN غير موجود في Railway Variables.",
+        }
+
+    photo_urls = photo_urls[:10]
+    if len(photo_urls) < 2:
+        return await facebook_photo(text, photo_urls[0] if photo_urls else None)
+
+    graph_version = os.getenv("FACEBOOK_GRAPH_VERSION", "v26.0").strip()
+    if not graph_version.startswith("v"):
+        graph_version = "v" + graph_version
+    base = f"https://graph.facebook.com/{graph_version}"
+    photos_url = f"{base}/{FACEBOOK_PAGE_ID}/photos"
+
+    media_ids = []
+    first_image_bytes = None
+
+    for i, url in enumerate(photo_urls):
+        try:
+            img = await asyncio.to_thread(requests.get, url, timeout=30)
+            img.raise_for_status()
+        except requests.RequestException as e:
+            return {
+                "ok": False,
+                "message": f"❌ فشل تحميل صورة رقم {i+1} من تليجرام:\n{repr(e)}",
+            }
+
+        if i == 0:
+            first_image_bytes = img.content
+
+        try:
+            r = await http_request_with_retry(
+                requests.post,
+                photos_url,
+                data={
+                    "published": "false",
+                    "access_token": FACEBOOK_PAGE_ACCESS_TOKEN,
+                },
+                files={"source": ("photo.jpg", img.content, "image/jpeg")},
+                timeout=30,
+            )
+            created = r.json() if r.content else {}
+        except requests.RequestException as e:
+            return {
+                "ok": False,
+                "message": f"❌ خطأ شبكة أثناء رفع صورة رقم {i+1}:\n{repr(e)}",
+            }
+
+        if r.status_code >= 300 or not created.get("id"):
+            return {
+                "ok": False,
+                "message": (
+                    f"❌ فشل رفع صورة رقم {i+1} على Facebook.\n\n"
+                    + fb_error_text(created)
+                ),
+            }
+
+        media_ids.append(created["id"])
+
+    data = {"message": text or "", "access_token": FACEBOOK_PAGE_ACCESS_TOKEN}
+    for i, mid in enumerate(media_ids):
+        data[f"attached_media[{i}]"] = json.dumps({"media_fbid": mid})
+
+    try:
+        r = await http_request_with_retry(
+            requests.post, f"{base}/{FACEBOOK_PAGE_ID}/feed",
+            data=data, timeout=30,
+        )
+        created = r.json() if r.content else {}
+    except requests.RequestException as e:
+        return {
+            "ok": False,
+            "message": f"❌ خطأ شبكة أثناء نشر الألبوم على Facebook:\n{repr(e)}",
+        }
+
+    if r.status_code >= 300:
+        return {
+            "ok": False,
+            "message": (
+                "❌ فشل نشر الألبوم على Facebook.\n\n" + fb_error_text(created)
+            ),
+        }
+
+    out = {
+        "ok": True,
+        "message": f"✅ تم نشر ألبوم من {len(photo_urls)} صور على Facebook.",
+        "post_id": created.get("id"),
+    }
+
+    if first_image_bytes:
+        story_result = await facebook_story(first_image_bytes, base, graph_version)
+        out["story_ok"] = story_result.get("ok", False)
+        out["story_message"] = (
+            "✅ اتنشرت أول صورة في ستوري فيسبوك كمان."
+            if story_result.get("ok") else
+            "⚠️ الألبوم اتنشر، بس ستوري فيسبوك فشل: "
+            + story_result.get("message", "")
+        )
+
+    return out
+
+
+async def _ig_create_and_wait(base, data, timeout_polls=10):
+    """
+    Creates an Instagram media container and waits for it to finish
+    processing (status_code == FINISHED). Does NOT publish — used by
+    _ig_container_publish (single photos/stories, which publishes
+    right after) and by the carousel album flow (where each child
+    item, and then the carousel container itself, must finish
+    processing before the caller combines/publishes them). Returns
+    (ok, creation_id_or_None, error_message_or_None).
     """
     media_url = f"{base}/{INSTAGRAM_BUSINESS_ID}/media"
-    publish_url = f"{base}/{INSTAGRAM_BUSINESS_ID}/media_publish"
 
     r, created = await fb_request("POST", media_url, data=data)
 
@@ -4768,7 +4886,7 @@ async def _ig_container_publish(base, data, timeout_polls=10):
     print(f"IG MEDIA RESPONSE: {r.text}", flush=True)
 
     if r.status_code >= 300 or not created.get("id"):
-        return False, {"message": fb_error_text(created)}
+        return False, None, fb_error_text(created)
 
     creation_id = created["id"]
     status_url = f"{base}/{creation_id}"
@@ -4799,9 +4917,24 @@ async def _ig_container_publish(base, data, timeout_polls=10):
         await asyncio.sleep(2)
 
     if not ready and last_status not in (None, "IN_PROGRESS"):
-        return False, {
-            "message": f"الحالة: {last_status or 'غير معروفة'}"
-        }
+        return False, None, f"الحالة: {last_status or 'غير معروفة'}"
+
+    return True, creation_id, None
+
+
+async def _ig_container_publish(base, data, timeout_polls=10):
+    """
+    Shared helper: creates an Instagram media container, waits for
+    it to finish processing, then publishes it. Returns
+    (ok, result_dict). Used for single feed photos and Instagram
+    Stories — they use the exact same container flow, only the
+    media_type differs.
+    """
+    publish_url = f"{base}/{INSTAGRAM_BUSINESS_ID}/media_publish"
+
+    ok, creation_id, err = await _ig_create_and_wait(base, data, timeout_polls)
+    if not ok:
+        return False, {"message": err}
 
     r2, published = await fb_request(
         "POST",
@@ -4905,6 +5038,97 @@ async def instagram_photo(text, photo_url):
         return {
             "ok": False,
             "message": f"❌ خطأ شبكة أثناء النشر على Instagram:\n{repr(e)}",
+        }
+
+
+async def instagram_photo_album(text, photo_urls):
+    """
+    Publishes a multi-photo carousel post (2-10 photos) to
+    Instagram: each photo becomes a carousel child container first
+    (is_carousel_item=true), then a carousel container combines them
+    (media_type=CAROUSEL, children=...), then it's published. Falls
+    back to the single-photo path if given fewer than 2 URLs.
+    """
+    if not INSTAGRAM_BUSINESS_ID:
+        return {
+            "ok": False,
+            "message": "❌ INSTAGRAM_BUSINESS_ID غير موجود في Railway Variables.",
+        }
+    if not FACEBOOK_PAGE_ACCESS_TOKEN:
+        return {
+            "ok": False,
+            "message": "❌ FACEBOOK_PAGE_TOKEN غير موجود في Railway Variables.",
+        }
+
+    photo_urls = photo_urls[:10]
+    if len(photo_urls) < 2:
+        return await instagram_photo(text, photo_urls[0] if photo_urls else None)
+
+    graph_version = os.getenv("FACEBOOK_GRAPH_VERSION", "v26.0").strip()
+    if not graph_version.startswith("v"):
+        graph_version = "v" + graph_version
+    base = f"https://graph.facebook.com/{graph_version}"
+
+    try:
+        child_ids = []
+        for i, url in enumerate(photo_urls):
+            ok, cid, err = await _ig_create_and_wait(base, {
+                "image_url": url,
+                "is_carousel_item": "true",
+                "access_token": FACEBOOK_PAGE_ACCESS_TOKEN,
+            })
+            if not ok:
+                return {
+                    "ok": False,
+                    "message": (
+                        f"❌ فشل تجهيز صورة رقم {i+1} من ألبوم Instagram.\n\n"
+                        f"{err}"
+                    ),
+                }
+            child_ids.append(cid)
+
+        ok, carousel_id, err = await _ig_create_and_wait(base, {
+            "media_type": "CAROUSEL",
+            "children": ",".join(child_ids),
+            "caption": text or "",
+            "access_token": FACEBOOK_PAGE_ACCESS_TOKEN,
+        })
+        if not ok:
+            return {
+                "ok": False,
+                "message": f"❌ فشل تجهيز ألبوم Instagram.\n\n{err}",
+            }
+
+        publish_url = f"{base}/{INSTAGRAM_BUSINESS_ID}/media_publish"
+        r2, published = await fb_request(
+            "POST", publish_url,
+            data={
+                "creation_id": carousel_id,
+                "access_token": FACEBOOK_PAGE_ACCESS_TOKEN,
+            },
+        )
+
+        print(f"IG ALBUM PUBLISH STATUS: {r2.status_code}", flush=True)
+        print(f"IG ALBUM PUBLISH RESPONSE: {r2.text}", flush=True)
+
+        if r2.status_code >= 300:
+            return {
+                "ok": False,
+                "message": (
+                    "❌ فشل نشر ألبوم Instagram.\n\n" + fb_error_text(published)
+                ),
+            }
+
+        return {
+            "ok": True,
+            "message": f"✅ تم نشر ألبوم من {len(photo_urls)} صور على Instagram.",
+            "post_id": published.get("id"),
+        }
+
+    except requests.RequestException as e:
+        return {
+            "ok": False,
+            "message": f"❌ خطأ شبكة أثناء نشر ألبوم Instagram:\n{repr(e)}",
         }
 
 
@@ -5555,9 +5779,63 @@ async def tg_post(context, text, photo_id=None):
         return False
 
 
+async def tg_post_album(context, text, photo_ids):
+    """Posts several photos together as one Telegram album (the
+    caption/text shows under the first photo only — that's a
+    Telegram limitation, not a bug here)."""
+    if not CHANNEL_ID:
+        return False
+    if not photo_ids:
+        return False
+    if len(photo_ids) == 1:
+        return await tg_post(context, text, photo_ids[0])
+
+    try:
+        media = [
+            InputMediaPhoto(pid, caption=text or None if i == 0 else None)
+            for i, pid in enumerate(photo_ids[:10])  # Telegram caps albums at 10
+        ]
+        await context.bot.send_media_group(chat_id=CHANNEL_ID, media=media)
+        return True
+    except Exception as e:
+        print("Telegram Album Post Error:", repr(e), flush=True)
+        return False
+
+
 # =========================================================
 # PHOTO
 # =========================================================
+
+async def _finalize_new_post_album(context):
+    """Fires ~1.5s after the last photo of an album lands (see the
+    debounce logic in photo()'s "new_post" branch), once no more
+    photos are expected. Tells the admin the post is ready and shows
+    the publish options, with a count if it's a multi-photo album."""
+    job = context.job
+    chat_id = job.data["chat_id"]
+    user_id = job.data["user_id"]
+    ud = context.application.user_data.get(user_id)
+    if ud is None:
+        return
+
+    photos = ud.get("post_photos") or []
+    if not photos:
+        return
+
+    ud["post_photo"] = photos[0]
+    ud["state"] = None
+    ud["post_album_jobs"] = []
+
+    count_line = f" ({len(photos)} صور)" if len(photos) > 1 else ""
+    try:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"📝 المنشور جاهز{count_line}.\nاختار مكان النشر:",
+            reply_markup=newpost_menu(has_photo=True),
+        )
+    except Exception as e:
+        print("Finalize New Post Album Error:", repr(e), flush=True)
+
 
 async def photo(update, context):
     if not is_admin(update):
@@ -5595,8 +5873,39 @@ async def photo(update, context):
         return
 
     if state == "new_post":
-        context.user_data["post_text"] = update.message.caption or ""
-        context.user_data["post_photo"] = update.message.photo[-1].file_id
+        group_id = update.message.media_group_id
+        photo_id = update.message.photo[-1].file_id
+        caption = update.message.caption
+
+        if group_id:
+            # Part of a multi-photo album — Telegram sends each photo
+            # as a separate message, so we collect them and wait a
+            # short debounce period before treating the album as
+            # complete (see _finalize_new_post_album).
+            if context.user_data.get("post_media_group_id") != group_id:
+                context.user_data["post_media_group_id"] = group_id
+                context.user_data["post_photos"] = []
+
+            context.user_data["post_photos"].append(photo_id)
+            if caption is not None:
+                context.user_data["post_text"] = caption
+
+            for j in context.user_data.get("post_album_jobs") or []:
+                j.schedule_removal()
+
+            job = context.job_queue.run_once(
+                _finalize_new_post_album, when=1.5,
+                data={
+                    "chat_id": update.effective_chat.id,
+                    "user_id": update.effective_user.id,
+                },
+            )
+            context.user_data["post_album_jobs"] = [job]
+            return
+
+        context.user_data["post_text"] = caption or ""
+        context.user_data["post_photo"] = photo_id
+        context.user_data["post_photos"] = [photo_id]
         context.user_data["state"] = None
 
         await update.message.reply_text(
@@ -11320,6 +11629,9 @@ async def buttons(update, context):
 
         txt = context.user_data.get("post_text") or ""
         photo_id = context.user_data.get("post_photo")
+        photo_ids = context.user_data.get("post_photos") or (
+            [photo_id] if photo_id else []
+        )
 
         if not txt and not photo_id:
             await q.edit_message_text(
@@ -11337,22 +11649,28 @@ async def buttons(update, context):
         ig_result = None
 
         photo_url = None
-        if photo_id and (want_fb or want_ig):
-            try:
-                f = await context.bot.get_file(photo_id)
-                photo_url = (
-                    f.file_path if f.file_path.startswith("http")
-                    else f"https://api.telegram.org/file/bot"
-                         f"{BOT_TOKEN}/{f.file_path}"
-                )
-            except Exception as e:
-                print("Get File Error:", repr(e), flush=True)
+        photo_urls = []
+        if photo_ids and (want_fb or want_ig):
+            for pid in photo_ids:
+                try:
+                    f = await context.bot.get_file(pid)
+                    u = (
+                        f.file_path if f.file_path.startswith("http")
+                        else f"https://api.telegram.org/file/bot"
+                             f"{BOT_TOKEN}/{f.file_path}"
+                    )
+                    photo_urls.append(u)
+                except Exception as e:
+                    print("Get File Error:", repr(e), flush=True)
+            photo_url = photo_urls[0] if photo_urls else None
 
         if want_tg:
-            tg_ok = await tg_post(context, txt, photo_id)
+            tg_ok = await tg_post_album(context, txt, photo_ids)
 
         if want_fb:
-            if photo_id:
+            if len(photo_urls) > 1:
+                fb_result = await facebook_photo_album(txt, photo_urls)
+            elif photo_id:
                 fb_result = (
                     await facebook_photo(txt, photo_url)
                     if photo_url
@@ -11365,7 +11683,9 @@ async def buttons(update, context):
                 fb_result = await facebook(txt)
 
         if want_ig:
-            if not photo_id:
+            if len(photo_urls) > 1:
+                ig_result = await instagram_photo_album(txt, photo_urls)
+            elif not photo_id:
                 ig_result = {
                     "ok": False,
                     "message": "❌ Instagram محتاج صورة، مينفعش نص بس.",
