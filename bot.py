@@ -464,6 +464,20 @@ def init_db():
                 _safe_alter(x, q)
 
             x.execute("""
+                CREATE TABLE IF NOT EXISTS Inquiries(
+                    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                    telegram_id BIGINT NOT NULL,
+                    name VARCHAR(255) NULL,
+                    username VARCHAR(255) NULL,
+                    message TEXT NOT NULL,
+                    status ENUM('pending','done') NOT NULL DEFAULT 'pending',
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    done_at TIMESTAMP NULL,
+                    INDEX(status, created_at)
+                )
+            """)
+
+            x.execute("""
                 CREATE TABLE IF NOT EXISTS SavingsGoals(
                     telegram_id BIGINT PRIMARY KEY,
                     weight DECIMAL(10,3) NOT NULL,
@@ -2234,6 +2248,44 @@ def set_call_rating(rid, rating):
         c.close()
 
 
+def add_inquiry(telegram_id, name, username, message):
+    c = db()
+    try:
+        with c.cursor() as x:
+            x.execute("""
+                INSERT INTO Inquiries(telegram_id,name,username,message)
+                VALUES(%s,%s,%s,%s)
+            """, (telegram_id, name, username, message))
+            return x.lastrowid
+    finally:
+        c.close()
+
+
+def pending_inquiries():
+    return many(
+        "SELECT * FROM Inquiries WHERE status='pending' "
+        "ORDER BY created_at ASC"
+    )
+
+
+def get_inquiry(iid):
+    return one("SELECT * FROM Inquiries WHERE id=%s", (iid,))
+
+
+def mark_inquiry_done(iid):
+    c = db()
+    try:
+        with c.cursor() as x:
+            x.execute(
+                "UPDATE Inquiries SET status='done', "
+                "done_at=CURRENT_TIMESTAMP WHERE id=%s",
+                (iid,),
+            )
+            return bool(x.rowcount)
+    finally:
+        c.close()
+
+
 def call_requests_this_week():
     return many(
         "SELECT * FROM CallRequests WHERE created_at >= "
@@ -2988,6 +3040,9 @@ def admin_menu(owner=False):
             "📞 طلبات المكالمات", callback_data="callqueue"
         )],
         [InlineKeyboardButton(
+            "📨 الاستفسارات", callback_data="inquiriesqueue"
+        )],
+        [InlineKeyboardButton(
             "💬 رد على عميل بالآيدي", callback_data="adminreplyid"
         )],
         [InlineKeyboardButton(
@@ -3023,6 +3078,43 @@ def call_queue_view(owner):
             f"✅ تم: {name} ({r['phone']})",
             callback_data=f"calldone:{r['id']}",
         )])
+    kb_rows.append([InlineKeyboardButton("⬅️ رجوع", callback_data="admin")])
+    return text, InlineKeyboardMarkup(kb_rows)
+
+
+def inquiries_queue_view(owner):
+    """Returns (text, keyboard) for the pending inquiries queue —
+    all "استفسار" messages customers sent, in one place instead of
+    scattered in the admin's regular chat among price-update
+    confirmations and other notifications."""
+    rows = pending_inquiries()
+    if not rows:
+        return (
+            "📨 مفيش استفسارات لسه محتاجة رد.",
+            admin_menu(owner=owner),
+        )
+
+    text = "📨 الاستفسارات المعلّقة (الأقدم فوق)\n\n"
+    kb_rows = []
+    for i, r in enumerate(rows, start=1):
+        ct = r["created_at"]
+        ct_str = ct.strftime("%d/%m %H:%M") if hasattr(ct, "strftime") else ct
+        name = r.get("name") or "بدون اسم"
+        username = r.get("username")
+        who = f"{name} (@{username})" if username else name
+        msg = r["message"]
+        if len(msg) > 120:
+            msg = msg[:120] + "..."
+        text += f"{i}. {who} — {ct_str}\n   {msg}\n\n"
+        kb_rows.append([
+            InlineKeyboardButton(
+                f"💬 رد على #{i}",
+                callback_data=f"reply:{r['telegram_id']}",
+            ),
+            InlineKeyboardButton(
+                f"✅ تم #{i}", callback_data=f"inquirydone:{r['id']}",
+            ),
+        ])
     kb_rows.append([InlineKeyboardButton("⬅️ رجوع", callback_data="admin")])
     return text, InlineKeyboardMarkup(kb_rows)
 
@@ -6574,6 +6666,8 @@ async def text(update, context):
         sender = f"{u.first_name or ''} {u.last_name or ''}".strip() or "بدون اسم"
         username_line = f"@{u.username}" if u.username else "بدون يوزر"
 
+        add_inquiry(u.id, sender, u.username, t)
+
         if ADMIN_ID:
             try:
                 await context.bot.send_message(
@@ -7949,6 +8043,31 @@ async def buttons(update, context):
             return
 
         text, kb = call_queue_view(is_owner(update))
+        await q.edit_message_text(text, reply_markup=kb)
+        return
+
+    if c == "inquiriesqueue":
+        if not is_admin(update):
+            return
+
+        text, kb = inquiries_queue_view(is_owner(update))
+        await q.edit_message_text(text, reply_markup=kb)
+        return
+
+    if c.startswith("inquirydone:"):
+        if not is_admin(update):
+            return
+
+        iid = int(c.split(":")[1])
+        inq = get_inquiry(iid)
+        if not inq:
+            await q.answer("الاستفسار ده مش موجود.", show_alert=True)
+            return
+
+        mark_inquiry_done(iid)
+        await q.answer("✅ تمام، اتشال من القائمة.")
+
+        text, kb = inquiries_queue_view(is_owner(update))
         await q.edit_message_text(text, reply_markup=kb)
         return
 
