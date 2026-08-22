@@ -1421,6 +1421,10 @@ def isagha_autosuggest_on():
     return get_setting("isagha_autosuggest", "0") == "1"
 
 
+def isagha_autopublish_on():
+    return get_setting("isagha_autopublish", "0") == "1"
+
+
 def try_claim_daily_task(key, value):
     """Atomically claims a one-per-day (or one-per-period) scheduled
     task stored as a Settings flag. Only the first caller to write a
@@ -3904,6 +3908,59 @@ async def isagha_suggestion_tick(context):
         await send_isagha_suggestion(context, ADMIN_ID, suggested)
     except Exception as e:
         print("iSagha Suggestion Tick Error:", repr(e), flush=True)
+
+
+async def isagha_autopublish_tick(context):
+    """Runs every minute via JobQueue but only acts on the hour and
+    half-hour, between 11:00-14:00 (inclusive), and only if the
+    admin has turned "🔁 نشر تلقائي بالكامل" on. Unlike
+    isagha_suggestion_tick, this one publishes the scraped iSagha
+    21k price immediately — no admin confirmation — since the whole
+    point is covering the midday window while the admin is away
+    (e.g. asleep)."""
+    try:
+        if not ADMIN_ID or not isagha_autopublish_on():
+            return
+
+        now = datetime.now(TZ)
+        if now.minute not in (0, 30) or not (11 <= now.hour <= 14):
+            return
+        if now.hour == 14 and now.minute != 0:
+            return
+
+        slot_key = now.strftime("%Y-%m-%d-%H-%M")
+        if not try_claim_daily_task("last_isagha_autopublish_slot", slot_key):
+            return
+
+        suggested = await asyncio.to_thread(fetch_isagha_price_21)
+        if not suggested or suggested <= 0:
+            print("iSagha Autopublish: no valid price, skipped.", flush=True)
+            return
+
+        prev_p = latest()
+        new_price_id = save_latest(suggested, admin_id=ADMIN_ID)
+        log_action(
+            ADMIN_ID, "AUTO_ISAGHA_PUBLISH",
+            old_value=prev_p,
+            new_value=f"price_21={round(suggested)} (auto iSagha)",
+        )
+        if first_today() is None:
+            save_first(suggested)
+
+        await maybe_send_gold_alert(context, prev_p, suggested)
+        await broadcast_gold_update(context, suggested, price_id=new_price_id)
+
+        try:
+            await context.bot.send_message(
+                ADMIN_ID,
+                "🤖 نشر تلقائي من iSagha (" + now.strftime("%I:%M %p") + ")\n\n"
+                + price_text(suggested),
+                disable_notification=True,
+            )
+        except Exception as e:
+            print("iSagha Autopublish Admin Notify Failed:", repr(e), flush=True)
+    except Exception as e:
+        print("iSagha Autopublish Tick Error:", repr(e), flush=True)
 
 
 def record_gold_broadcast_message(price_id, telegram_id, message_id):
@@ -10624,19 +10681,36 @@ async def buttons(update, context):
             "🔴 متوقف دلوقتي."
         )
 
+        auto_on = isagha_autopublish_on()
+        auto_status_line = (
+            "🟢 مفعّل — هينشر لوحده كل نص ساعة من 11 ص لـ 2 م."
+            if auto_on else
+            "🔴 متوقف دلوقتي."
+        )
+
         await q.edit_message_text(
             "🔄 اقتراح سعر تلقائي (iSagha)\n\n"
             f"{status_line}\n\n"
             "البوت بيجيب سعر عيار 21 من موقع iSagha كل ساعة "
             "ويبعتهولك كـ**اقتراح بس** — إنت اللي بتقرر تنشره، "
-            "تعدّله، أو تتجاهله. مفيش نشر تلقائي خالص.\n\n"
+            "تعدّله، أو تتجاهله.\n\n"
+            "🔁 نشر تلقائي بالكامل (11 ص - 2 م)\n\n"
+            f"{auto_status_line}\n\n"
+            "لو مفعّل، البوت هياخد السعر من iSagha وينشره على طول "
+            "من غير ما يستنى تأكيدك — كل نص ساعة في نطاق الوقت ده "
+            "بس.\n\n"
             "⚠️ مصدر مش رسمي (موقع خارجي)، ممكن يفشل يجيب السعر "
             "أحيانًا أو يختلف عن مصادر تانية — استخدمه كمرجع سريع "
             "مش كمصدر وحيد.",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton(
-                    "🔴 إيقاف" if on else "🟢 تفعيل",
+                    "🔴 إيقاف الاقتراح" if on else "🟢 تفعيل الاقتراح",
                     callback_data="isaghatoggle",
+                )],
+                [InlineKeyboardButton(
+                    "🔴 إيقاف النشر التلقائي" if auto_on
+                    else "🟢 تفعيل النشر التلقائي",
+                    callback_data="isaghaautopubtoggle",
                 )],
                 [InlineKeyboardButton(
                     "📥 اجيب اقتراح دلوقتي", callback_data="isaghafetchnow"
@@ -10659,6 +10733,27 @@ async def buttons(update, context):
 
         await q.edit_message_text(
             "✅ اتفعّل الاقتراح التلقائي." if not on else "✅ اتوقف الاقتراح التلقائي.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ رجوع", callback_data="admin")],
+            ]),
+        )
+        return
+
+    if c == "isaghaautopubtoggle":
+        if not is_admin(update):
+            return
+
+        on = isagha_autopublish_on()
+        set_setting("isagha_autopublish", "0" if on else "1")
+        log_action(
+            update.effective_user.id, "ADMIN_TOGGLE_ISAGHA_AUTOPUBLISH",
+            new_value="off" if on else "on",
+        )
+
+        await q.edit_message_text(
+            "✅ اتفعّل النشر التلقائي (11 ص - 2 م، كل نص ساعة)."
+            if not on else
+            "✅ اتوقف النشر التلقائي.",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("⬅️ رجوع", callback_data="admin")],
             ]),
@@ -12336,6 +12431,10 @@ def main():
         app.job_queue.run_repeating(
             isagha_suggestion_tick, interval=60, first=50,
             name="isagha_suggestion_tick",
+        )
+        app.job_queue.run_repeating(
+            isagha_autopublish_tick, interval=60, first=55,
+            name="isagha_autopublish_tick",
         )
         print("Auto-posting scheduler started (checks every 60s).", flush=True)
     else:
