@@ -15,6 +15,7 @@ from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand,
     BotCommandScopeChat, BotCommandScopeDefault, InputMediaPhoto,
 )
+from telegram.error import BadRequest
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -12383,6 +12384,16 @@ async def buttons(update, context):
 # =========================================================
 
 async def error(update, context):
+    # Harmless Telegram quirk: happens when a button is tapped twice
+    # (or tapped when the screen already shows identical content) —
+    # Telegram refuses the "edit" since nothing actually changed.
+    # Nothing is broken, so skip logging/clearing state and don't
+    # alarm anyone with an error message.
+    if isinstance(context.error, BadRequest) and (
+        "message is not modified" in str(context.error).lower()
+    ):
+        return
+
     print("=" * 60, flush=True)
     print("BOT ERROR:", repr(context.error), flush=True)
     print("=" * 60, flush=True)
