@@ -9,6 +9,10 @@ from urllib.parse import urlparse, quote
 import requests
 from PIL import Image, ImageDraw, ImageFont
 import io
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 import pymysql
 from dotenv import load_dotenv
 from telegram import (
@@ -1370,6 +1374,66 @@ def delete_gold_price_entry(pid):
             return bool(x.rowcount)
     finally:
         c.close()
+
+
+def generate_gold_price_chart(days_back, period_label):
+    """Builds a line chart (PNG bytes) of price_21 over the given
+    period using GoldPriceHistory rows. Returns None if there is
+    no data or fewer than 2 points to draw a line between."""
+    now = datetime.now(TZ)
+
+    if days_back == 0:
+        start = now.strftime("%Y-%m-%d 00:00:00")
+        end = now.strftime("%Y-%m-%d 23:59:59")
+    elif days_back == 1:
+        y = now - timedelta(days=1)
+        start = y.strftime("%Y-%m-%d 00:00:00")
+        end = y.strftime("%Y-%m-%d 23:59:59")
+    else:
+        start = (now - timedelta(days=days_back - 1)).strftime(
+            "%Y-%m-%d 00:00:00"
+        )
+        end = now.strftime("%Y-%m-%d 23:59:59")
+
+    rows = gold_history_range(start, end)
+    if not rows or len(rows) < 2:
+        return None
+
+    times = [r["created_at"] for r in rows]
+    prices = [float(r["price_21"]) for r in rows]
+
+    fig, ax = plt.subplots(figsize=(8, 4.5), dpi=150)
+    line_color = "#c9a227"
+    ax.plot(times, prices, color=line_color, linewidth=2.2)
+    ax.fill_between(times, prices, min(prices), color=line_color, alpha=0.12)
+
+    ax.set_title(f"Gold Price (21k) - {period_label}", fontsize=13, pad=12)
+    ax.set_ylabel("EGP / gram")
+    ax.grid(True, linestyle="--", alpha=0.35)
+
+    if days_back in (0, 1):
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+    else:
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d"))
+    fig.autofmt_xdate()
+
+    last_p = prices[-1]
+    ax.annotate(
+        f"{round(last_p)}",
+        xy=(times[-1], last_p),
+        xytext=(6, 6),
+        textcoords="offset points",
+        fontsize=10,
+        fontweight="bold",
+        color=line_color,
+    )
+
+    fig.tight_layout()
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png")
+    plt.close(fig)
+    buf.seek(0)
+    return buf
 
 
 def gold_period_stats(days_back):
@@ -9146,8 +9210,38 @@ async def buttons(update, context):
                 )
                 lines.append(f"   {ts_str} — {round(float(r['price_21']))}")
 
+        chart_kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton(
+                "📈 عرض كرسم بياني", callback_data=f"histchart:{days}"
+            )],
+            *hist_period_menu().inline_keyboard,
+        ])
+
         await q.edit_message_text(
-            "\n".join(lines), reply_markup=hist_period_menu()
+            "\n".join(lines), reply_markup=chart_kb
+        )
+        return
+
+    if c.startswith("histchart:"):
+        if not is_admin(update):
+            return
+
+        days = int(c.split(":")[1])
+        period_names = {0: "اليوم", 1: "أمس", 7: "آخر 7 أيام", 30: "آخر 30 يوم"}
+        label = period_names.get(days, "")
+
+        chart_buf = generate_gold_price_chart(days, label)
+        if not chart_buf:
+            await q.answer(
+                "مفيش تحديثات سعر كفاية في الفترة دي لرسم بياني.",
+                show_alert=True,
+            )
+            return
+
+        await context.bot.send_photo(
+            chat_id=q.message.chat_id,
+            photo=chart_buf,
+            caption=f"📈 حركة سعر الذهب (عيار 21) — {label}",
         )
         return
 
