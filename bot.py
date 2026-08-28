@@ -764,6 +764,14 @@ GOLD_PURITY_DISCLAIMER = "⚠️ السعر ذهب صافي، مش شامل ال
 
 ZAKAT_NISAB_GRAMS_24K = 85  # nisab threshold, in 24k-equivalent grams
 ZAKAT_RATE = 0.025  # 2.5%
+
+# Loyalty points program: every LOYALTY_EGP_PER_POINT egp spent in the
+# shop earns 1 point (admin enters this manually per purchase). Each
+# point is worth LOYALTY_POINT_VALUE_EGP egp of discount, but points
+# can't be redeemed until the customer reaches LOYALTY_MIN_REDEEM_POINTS.
+LOYALTY_EGP_PER_POINT = 10000
+LOYALTY_POINT_VALUE_EGP = 50
+LOYALTY_MIN_REDEEM_POINTS = 10
 ZAKAT_DISCLAIMER = (
     "⚠️ الحساب ده تقديري بسعر النهاردة، وبيفترض إن الذهب فاضل عندك "
     "حول (سنة هجرية) كامل وإنه فايض عن حاجتك الأساسية. فيه خلاف "
@@ -8674,14 +8682,32 @@ async def buttons(update, context):
         balance = get_points_balance(u.id)
         hist = points_history(u.id, limit=5)
 
+        redeem_value = LOYALTY_MIN_REDEEM_POINTS * LOYALTY_POINT_VALUE_EGP
         lines = [
             "🎁 نقاط الولاء",
             "",
             f"⭐ رصيدك الحالي: {balance} نقطة",
             "",
-            "بتكسب نقاط مع كل عملية شراء من المحل — اسأل الكاشير "
-            "يضيفهالك، وتقدر تستبدلها بخصم على مشترياتك الجاية.",
+            f"💡 كل {LOYALTY_EGP_PER_POINT:,} جنيه مشتريات = نقطة واحدة "
+            "(بتضاف تلقائي بمعرفة الكاشير وقت الشراء).",
+            f"💰 كل نقطة = {LOYALTY_POINT_VALUE_EGP} جنيه خصم على "
+            "مشترياتك الجاية.",
+            f"🔓 الاستبدال بيبدأ لما يوصل رصيدك لـ "
+            f"{LOYALTY_MIN_REDEEM_POINTS} نقط (يعني {redeem_value:,} "
+            "جنيه خصم كحد أدنى).",
         ]
+
+        if balance < LOYALTY_MIN_REDEEM_POINTS:
+            remaining = LOYALTY_MIN_REDEEM_POINTS - balance
+            lines.append("")
+            lines.append(
+                f"⏳ باقيلك {remaining} نقطة عشان توصل لأول استبدال."
+            )
+        else:
+            lines.append("")
+            lines.append(
+                "✅ رصيدك يخولك تستبدل النهاردة! اسأل الكاشير في المحل."
+            )
 
         if hist:
             lines.append("")
