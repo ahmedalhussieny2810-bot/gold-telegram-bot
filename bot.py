@@ -230,8 +230,33 @@ def init_db():
                 "ALTER TABLE Users ADD COLUMN last_seen "
                 "TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP "
                 "ON UPDATE CURRENT_TIMESTAMP",
+                "ALTER TABLE Users ADD COLUMN loyalty_points "
+                "INT NOT NULL DEFAULT 0",
             ):
                 _safe_alter(x, q)
+
+            x.execute("""
+                CREATE TABLE IF NOT EXISTS PointsHistory(
+                    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                    telegram_id BIGINT NOT NULL,
+                    points_change INT NOT NULL,
+                    reason VARCHAR(255) NULL,
+                    admin_id BIGINT NULL,
+                    created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
+                    INDEX(telegram_id, created_at)
+                )
+            """)
+
+            x.execute("""
+                CREATE TABLE IF NOT EXISTS PurchaseRatings(
+                    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                    telegram_id BIGINT NOT NULL,
+                    rating TINYINT UNSIGNED NULL,
+                    created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
+                    rated_at TIMESTAMP NULL,
+                    INDEX(telegram_id, created_at)
+                )
+            """)
 
             x.execute("""
                 CREATE TABLE IF NOT EXISTS GoldPriceHistory(
@@ -1162,6 +1187,102 @@ def referral_leaderboard(limit=20):
         ORDER BY cnt DESC
         LIMIT %s
     """, (limit,))
+
+
+def get_points_balance(telegram_id):
+    row = one(
+        "SELECT loyalty_points FROM Users WHERE telegram_id=%s",
+        (telegram_id,),
+    )
+    return int(row["loyalty_points"]) if row else 0
+
+
+def add_points(telegram_id, delta, reason=None, admin_id=None):
+    """Adjusts a customer's points balance (delta can be negative for
+    redemptions) and logs the change to PointsHistory. Returns the
+    new balance, or None if the customer doesn't exist in Users yet."""
+    c = db()
+    try:
+        with c.cursor() as x:
+            x.execute(
+                "UPDATE Users SET loyalty_points = loyalty_points + %s "
+                "WHERE telegram_id=%s",
+                (delta, telegram_id),
+            )
+            if not x.rowcount:
+                return None
+            x.execute("""
+                INSERT INTO PointsHistory
+                (telegram_id, points_change, reason, admin_id)
+                VALUES(%s,%s,%s,%s)
+            """, (telegram_id, delta, reason, admin_id))
+    finally:
+        c.close()
+    return get_points_balance(telegram_id)
+
+
+def points_history(telegram_id, limit=10):
+    return many("""
+        SELECT points_change, reason, created_at
+        FROM PointsHistory
+        WHERE telegram_id=%s
+        ORDER BY created_at DESC
+        LIMIT %s
+    """, (telegram_id, limit))
+
+
+def points_leaderboard(limit=20):
+    return many("""
+        SELECT telegram_id, first_name, username, loyalty_points
+        FROM Users
+        WHERE loyalty_points > 0
+        ORDER BY loyalty_points DESC
+        LIMIT %s
+    """, (limit,))
+
+
+def create_purchase_rating_request(telegram_id):
+    c = db()
+    try:
+        with c.cursor() as x:
+            x.execute(
+                "INSERT INTO PurchaseRatings (telegram_id) VALUES(%s)",
+                (telegram_id,),
+            )
+            return x.lastrowid
+    finally:
+        c.close()
+
+
+def get_purchase_rating(rid):
+    return one(
+        "SELECT id, telegram_id, rating FROM PurchaseRatings WHERE id=%s",
+        (rid,),
+    )
+
+
+def set_purchase_rating(rid, rating):
+    c = db()
+    try:
+        with c.cursor() as x:
+            x.execute(
+                "UPDATE PurchaseRatings SET rating=%s, rated_at=NOW() "
+                "WHERE id=%s AND rating IS NULL",
+                (rating, rid),
+            )
+            return bool(x.rowcount)
+    finally:
+        c.close()
+
+
+def purchase_rating_stats():
+    row = one(
+        "SELECT COUNT(*) AS n, AVG(rating) AS avg_r "
+        "FROM PurchaseRatings WHERE rating IS NOT NULL"
+    )
+    if not row or not row.get("n"):
+        return None
+    return {"count": row["n"], "avg": float(row["avg_r"])}
 
 
 def set_whatsapp_subscription(telegram_id, phone_number, subscribed):
@@ -2818,9 +2939,30 @@ def latest_update_time():
     return row["created_at"] if row else None
 
 
+def price_trend_indicator():
+    """Compares the latest recorded price_21 against the one before
+    it (the previous update, regardless of date) and returns a short
+    up/down/flat line. Returns None if there's no previous point to
+    compare against yet."""
+    rows = recent_gold_prices(limit=2)
+    if not rows or len(rows) < 2:
+        return None
+
+    current = float(rows[0]["price_21"])
+    previous = float(rows[1]["price_21"])
+    diff = round(current - previous)
+
+    if diff > 0:
+        return f"⬆️ ارتفع {diff} جنيه عن آخر تحديث"
+    if diff < 0:
+        return f"⬇️ انخفض {abs(diff)} جنيه عن آخر تحديث"
+    return "➖ ثابت عن آخر تحديث"
+
+
 def price_text(p):
     p24, p21, p18 = calc(p)
     c = comparison(p)
+    trend = price_trend_indicator()
 
     updated_at = latest_update_time()
     updated_line = None
@@ -2840,6 +2982,7 @@ def price_text(p):
             f"🟡 عيار 21 : {p21}",
             f"🟡 عيار 18 : {p18}",
         ]
+        + ([trend] if trend else [])
         + ([updated_line] if updated_line else [])
         + [
             "",
@@ -3024,6 +3167,9 @@ def home(admin=False, subscribed=False):
     k = [
         # تصفح
         [InlineKeyboardButton("💎 أسعار الذهب", callback_data="gold")],
+        [InlineKeyboardButton(
+            "🧮✨ احسب دهبك دلوقتي! ✨🧮", callback_data="calcgold"
+        )],
         [InlineKeyboardButton("💍 المنتجات", callback_data="products")],
         [InlineKeyboardButton("⭐ المفضلة", callback_data="favlist")],
 
@@ -3042,6 +3188,9 @@ def home(admin=False, subscribed=False):
         )],
         [InlineKeyboardButton(
             "🔗 ادعُ صديق", callback_data="referral"
+        )],
+        [InlineKeyboardButton(
+            "🎁 نقاط الولاء", callback_data="loyaltypoints"
         )],
 
         # تواصل واستفسار
@@ -3132,6 +3281,9 @@ def admin_menu(owner=False):
         )],
         [InlineKeyboardButton(
             "🏆 قائمة المتصدرين (الدعوات)", callback_data="referralleaderboard"
+        )],
+        [InlineKeyboardButton(
+            "🎁 إدارة نقاط العملاء", callback_data="loyaltyadmin"
         )],
     ]
     if owner:
@@ -7600,6 +7752,120 @@ async def text(update, context):
         )
         return
 
+    if s == "loyalty_id_input":
+        if not is_admin(update):
+            context.user_data.clear()
+            await update.message.reply_text("❌ غير مسموح.")
+            return
+
+        t_clean = t.strip()
+        if not t_clean.isdigit():
+            await update.message.reply_text(
+                "❌ اكتب رقم آيدي صحيح بس (أرقام فقط)."
+            )
+            return
+
+        tid = int(t_clean)
+        urow = one(
+            "SELECT telegram_id, first_name, username FROM Users "
+            "WHERE telegram_id=%s", (tid,),
+        )
+        if not urow:
+            await update.message.reply_text(
+                "❌ مفيش عميل متسجل بالآيدي ده. تأكد من الرقم."
+            )
+            return
+
+        balance = get_points_balance(tid)
+        name = urow.get("first_name") or "بدون اسم"
+        uname = f" (@{urow['username']})" if urow.get("username") else ""
+        context.user_data.clear()
+
+        await update.message.reply_text(
+            f"🎁 {name}{uname}\n"
+            f"⭐ الرصيد الحالي: {balance} نقطة\n\n"
+            "اختار العملية:",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "➕ إضافة نقاط", callback_data=f"loyaltyadd:{tid}"
+                )],
+                [InlineKeyboardButton(
+                    "➖ خصم نقاط", callback_data=f"loyaltysub:{tid}"
+                )],
+                [InlineKeyboardButton("⬅️ رجوع", callback_data="admin")],
+            ]),
+        )
+        return
+
+    if s == "loyalty_amount_input":
+        if not is_admin(update):
+            context.user_data.clear()
+            await update.message.reply_text("❌ غير مسموح.")
+            return
+
+        t_clean = t.strip()
+        if not t_clean.isdigit() or int(t_clean) <= 0:
+            await update.message.reply_text(
+                "❌ اكتب رقم صحيح أكبر من صفر."
+            )
+            return
+
+        amount = int(t_clean)
+        tid = context.user_data.get("loyalty_target")
+        direction = context.user_data.get("loyalty_direction")
+        if not tid or direction not in ("add", "sub"):
+            context.user_data.clear()
+            await update.message.reply_text("ابدأ تاني من لوحة التحكم.")
+            return
+
+        delta = amount if direction == "add" else -amount
+        admin_id = update.effective_user.id
+        reason = "إضافة يدوية من الأدمن" if direction == "add" \
+            else "خصم يدوي من الأدمن"
+        new_balance = add_points(tid, delta, reason=reason, admin_id=admin_id)
+        context.user_data.clear()
+
+        if new_balance is None:
+            await update.message.reply_text("❌ حصل خطأ، حاول تاني.")
+            return
+
+        verb = "أضيفت" if direction == "add" else "اتخصمت"
+        await update.message.reply_text(
+            f"✅ {amount} نقطة {verb}.\n⭐ الرصيد الجديد: {new_balance} نقطة"
+        )
+
+        try:
+            note = "🎁 حصلت على" if direction == "add" else "🎁 اتخصم منك"
+            await context.bot.send_message(
+                chat_id=tid,
+                text=f"{note} {amount} نقطة ولاء.\n⭐ رصيدك الحالي: "
+                     f"{new_balance} نقطة",
+            )
+        except Exception as e:
+            print(f"Loyalty Notify Failed for {tid}:", repr(e), flush=True)
+
+        # Adding points means a purchase just happened in-store, so
+        # this is a good moment to ask the customer to rate their
+        # experience. Not sent on point deductions.
+        if direction == "add":
+            try:
+                rid = create_purchase_rating_request(tid)
+                await context.bot.send_message(
+                    chat_id=tid,
+                    text="🙏 تقيّم تجربة شرائك معانا النهاردة؟",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton(
+                            "⭐" * n, callback_data=f"purchaserate:{rid}:{n}"
+                        ) for n in range(1, 6)
+                    ]]),
+                )
+            except Exception as e:
+                print(
+                    f"Purchase Rating Request Failed for {tid}:",
+                    repr(e), flush=True,
+                )
+        return
+
     if s == "ledger_name_input":
         name = t.strip()
         if not name:
@@ -8205,6 +8471,26 @@ async def buttons(update, context):
         )
         return
 
+    if c.startswith("purchaserate:"):
+        _, rid_s, rating_s = c.split(":")
+        rid = int(rid_s)
+        rating = int(rating_s)
+
+        req = get_purchase_rating(rid)
+        if not req or req["telegram_id"] != update.effective_user.id:
+            await q.answer("الطلب ده مش موجود.", show_alert=True)
+            return
+
+        if req["rating"] is not None:
+            await q.answer("تم تقييم العملية دي قبل كده.", show_alert=True)
+            return
+
+        set_purchase_rating(rid, rating)
+        await q.edit_message_text(
+            "🙏 شكرًا لتقييمك! " + ("⭐" * rating)
+        )
+        return
+
     # ---- هدف توفير للذهب ----
 
     if c == "savegoal":
@@ -8376,6 +8662,41 @@ async def buttons(update, context):
             "تلقائي إنه جاله منك:\n\n"
             f"{link}\n\n"
             f"👥 عدد اللي دخلوا من رابطك: {count}",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ الرئيسية", callback_data="home")],
+            ]),
+        )
+        return
+
+    if c == "loyaltypoints":
+        track_user(update)
+        u = update.effective_user
+        balance = get_points_balance(u.id)
+        hist = points_history(u.id, limit=5)
+
+        lines = [
+            "🎁 نقاط الولاء",
+            "",
+            f"⭐ رصيدك الحالي: {balance} نقطة",
+            "",
+            "بتكسب نقاط مع كل عملية شراء من المحل — اسأل الكاشير "
+            "يضيفهالك، وتقدر تستبدلها بخصم على مشترياتك الجاية.",
+        ]
+
+        if hist:
+            lines.append("")
+            lines.append("🕐 آخر الحركات:")
+            for h in hist:
+                sign = "+" if h["points_change"] > 0 else ""
+                ts = h["created_at"]
+                ts_str = (
+                    ts.strftime("%d/%m") if hasattr(ts, "strftime") else str(ts)
+                )
+                reason = f" — {h['reason']}" if h.get("reason") else ""
+                lines.append(f"   {ts_str}: {sign}{h['points_change']}{reason}")
+
+        await q.edit_message_text(
+            "\n".join(lines),
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("⬅️ الرئيسية", callback_data="home")],
             ]),
@@ -9623,6 +9944,12 @@ async def buttons(update, context):
         pt = product_totals()
         ut = user_totals()
         pubt = publish_totals()
+        rating_stats = purchase_rating_stats()
+        rating_line = (
+            f"⭐ متوسط تقييم الشراء: {rating_stats['avg']:.1f}/5 "
+            f"({rating_stats['count']} تقييم)\n\n"
+            if rating_stats else ""
+        )
 
         txt = (
             "📊 الإحصائيات العامة\n\n"
@@ -9631,6 +9958,7 @@ async def buttons(update, context):
             f"🔔 مشتركين في الإشعارات (تليجرام): {gold_subscriber_count()}\n"
             f"📱 مشتركين في تحديث السعر (واتساب): {whatsapp_subscriber_count()}\n"
             f"📩 إجمالي الاستعلامات: {ut.get('inquiries') or 0}\n\n"
+            f"{rating_line}"
             f"💍 إجمالي المنتجات: {pt.get('total') or 0}\n"
             f"🟢 متاحة: {pt.get('available') or 0}\n"
             f"🟡 محجوزة: {pt.get('reserved') or 0}\n"
@@ -12017,6 +12345,40 @@ async def buttons(update, context):
             "💬 رد على عميل بالآيدي\n\n"
             "اكتب آيدي التليجرام بتاع العميل (هتلاقيه في أي رسالة "
             "وصلتك منه، رقم زي 7087485592).",
+        )
+        return
+
+    if c == "loyaltyadmin":
+        if not is_admin(update):
+            return
+
+        context.user_data.clear()
+        context.user_data["state"] = "loyalty_id_input"
+        await q.edit_message_text(
+            "🎁 إدارة نقاط العملاء\n\n"
+            "اكتب آيدي التليجرام بتاع العميل (هتلاقيه في أي رسالة "
+            "وصلتك منه، رقم زي 7087485592).",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ إلغاء", callback_data="admin")],
+            ]),
+        )
+        return
+
+    if c.startswith("loyaltyadd:") or c.startswith("loyaltysub:"):
+        if not is_admin(update):
+            return
+
+        direction, tid_str = c.split(":")
+        tid = int(tid_str)
+        context.user_data.clear()
+        context.user_data.update(
+            state="loyalty_amount_input",
+            loyalty_target=tid,
+            loyalty_direction="add" if direction == "loyaltyadd" else "sub",
+        )
+        verb = "إضافتها" if direction == "loyaltyadd" else "خصمها"
+        await q.edit_message_text(
+            f"🎁 اكتب عدد النقاط اللي عايز {verb} (رقم بس).",
         )
         return
 
