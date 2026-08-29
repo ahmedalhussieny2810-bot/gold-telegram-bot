@@ -3318,7 +3318,16 @@ def call_queue_view(owner):
         ct = r["created_at"]
         ct_str = ct.strftime("%H:%M") if hasattr(ct, "strftime") else ct
         name = r.get("name") or "بدون اسم"
-        text += f"{i}. {name} — {r['phone']} ({ct_str})\n"
+        tid = r["telegram_id"]
+        text += f"{i}. {name} — {r['phone']} ({ct_str})\n   🆔 {tid}\n\n"
+        kb_rows.append([
+            InlineKeyboardButton(
+                f"💬 رد #{i}", callback_data=f"reply:{tid}"
+            ),
+            InlineKeyboardButton(
+                f"⏰ اتأخرت #{i}", callback_data=f"callcheckin:{tid}"
+            ),
+        ])
         kb_rows.append([InlineKeyboardButton(
             f"✅ تم: {name} ({r['phone']})",
             callback_data=f"calldone:{r['id']}",
@@ -3354,7 +3363,7 @@ def inquiries_queue_view(owner):
         kb_rows.append([
             InlineKeyboardButton(
                 f"💬 رد على #{i}",
-                callback_data=f"reply:{r['telegram_id']}",
+                callback_data=f"reply:{r['telegram_id']}:{r['id']}",
             ),
             InlineKeyboardButton(
                 f"✅ تم #{i}", callback_data=f"inquirydone:{r['id']}",
@@ -6888,9 +6897,18 @@ async def text(update, context):
                     text=(
                         "📞 طلب مكالمة جديد\n\n"
                         f"👤 {name}\n"
-                        f"📱 {phone}\n\n"
+                        f"📱 {phone}\n"
+                        f"🆔 {u.id}\n\n"
                         "من لوحة التحكم → 📞 طلبات المكالمات."
                     ),
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton(
+                            "💬 رد على العميل", callback_data=f"reply:{u.id}"
+                        )],
+                        [InlineKeyboardButton(
+                            "⏰ اتأخرت عليك؟", callback_data=f"callcheckin:{u.id}"
+                        )],
+                    ]),
                 )
             except Exception as e:
                 print("Call Request Notify Failed:", repr(e), flush=True)
@@ -7924,6 +7942,7 @@ async def text(update, context):
             return
 
         target_id = context.user_data.get("reply_to")
+        inquiry_id = context.user_data.get("reply_inquiry_id")
         context.user_data.clear()
 
         if not target_id:
@@ -7941,6 +7960,8 @@ async def text(update, context):
                 update.effective_user.id, "ADMIN_REPLIED_TO_CUSTOMER",
                 object_type="user", object_id=target_id, new_value=t,
             )
+            if inquiry_id:
+                mark_inquiry_done(inquiry_id)
             await update.message.reply_text("✅ اتبعت الرد للعميل.")
         except Exception as e:
             print("Admin Reply Error:", repr(e), flush=True)
@@ -8461,6 +8482,29 @@ async def buttons(update, context):
 
         text, kb = call_queue_view(is_owner(update))
         await q.edit_message_text(text, reply_markup=kb)
+        return
+
+    if c.startswith("callcheckin:"):
+        if not is_admin(update):
+            return
+
+        target_id = int(c.split(":")[1])
+        try:
+            await context.bot.send_message(
+                chat_id=target_id,
+                text=(
+                    f"📞 معاك {SHOP_NAME}\n\n"
+                    "عذرًا على تأخرنا في الرد على طلب المكالمة بتاعك 🙏\n"
+                    "لسه محتاج نكلمك، ولا الاستفسار اتحل؟"
+                ),
+            )
+            await q.answer("✅ اتبعتت الرسالة للعميل.", show_alert=True)
+        except Exception as e:
+            print("Call Check-in Failed:", repr(e), flush=True)
+            await q.answer(
+                "❌ مقدرتش أبعت الرسالة (يمكن العميل عمل Block).",
+                show_alert=True,
+            )
         return
 
     if c.startswith("callrate:"):
@@ -12351,9 +12395,13 @@ async def buttons(update, context):
         if not is_admin(update):
             return
 
-        target_id = int(c.split(":")[1])
+        parts = c.split(":")
+        target_id = int(parts[1])
+        inquiry_id = int(parts[2]) if len(parts) > 2 else None
         context.user_data.clear()
-        context.user_data.update(state="admin_reply", reply_to=target_id)
+        context.user_data.update(
+            state="admin_reply", reply_to=target_id, reply_inquiry_id=inquiry_id
+        )
 
         await context.bot.send_message(
             chat_id=q.message.chat_id,
