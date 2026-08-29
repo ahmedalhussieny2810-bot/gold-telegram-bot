@@ -8498,12 +8498,15 @@ async def buttons(update, context):
                     "لسه محتاج نكلمك، ولا الاستفسار اتحل؟"
                 ),
             )
-            await q.answer("✅ اتبعتت الرسالة للعميل.", show_alert=True)
+            await context.bot.send_message(
+                chat_id=q.message.chat_id,
+                text="✅ اتبعتت الرسالة للعميل.",
+            )
         except Exception as e:
             print("Call Check-in Failed:", repr(e), flush=True)
-            await q.answer(
-                "❌ مقدرتش أبعت الرسالة (يمكن العميل عمل Block).",
-                show_alert=True,
+            await context.bot.send_message(
+                chat_id=q.message.chat_id,
+                text="❌ مقدرتش أبعت الرسالة (يمكن العميل عمل Block).",
             )
         return
 
