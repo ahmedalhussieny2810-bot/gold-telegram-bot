@@ -259,6 +259,17 @@ def init_db():
             """)
 
             x.execute("""
+                CREATE TABLE IF NOT EXISTS Conversations(
+                    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                    telegram_id BIGINT NOT NULL,
+                    sender ENUM('customer','admin') NOT NULL,
+                    message TEXT NOT NULL,
+                    created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
+                    INDEX(telegram_id, created_at)
+                )
+            """)
+
+            x.execute("""
                 CREATE TABLE IF NOT EXISTS GoldPriceHistory(
                     id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
                     price_21 DECIMAL(15,2) NOT NULL,
@@ -1291,6 +1302,45 @@ def purchase_rating_stats():
     if not row or not row.get("n"):
         return None
     return {"count": row["n"], "avg": float(row["avg_r"])}
+
+
+def log_conversation(telegram_id, sender, message):
+    c = db()
+    try:
+        with c.cursor() as x:
+            x.execute("""
+                INSERT INTO Conversations (telegram_id, sender, message)
+                VALUES(%s,%s,%s)
+            """, (telegram_id, sender, message))
+    finally:
+        c.close()
+
+
+def conversation_threads(limit=30):
+    return many("""
+        SELECT co.telegram_id,
+               u.first_name, u.username,
+               MAX(co.created_at) AS last_at,
+               (SELECT message FROM Conversations c2
+                WHERE c2.telegram_id = co.telegram_id
+                ORDER BY c2.created_at DESC LIMIT 1) AS last_message
+        FROM Conversations co
+        LEFT JOIN Users u ON u.telegram_id = co.telegram_id
+        GROUP BY co.telegram_id, u.first_name, u.username
+        ORDER BY last_at DESC
+        LIMIT %s
+    """, (limit,))
+
+
+def conversation_messages(telegram_id, limit=40):
+    rows = many("""
+        SELECT sender, message, created_at
+        FROM Conversations
+        WHERE telegram_id=%s
+        ORDER BY created_at ASC
+        LIMIT %s
+    """, (telegram_id, limit))
+    return rows
 
 
 def set_whatsapp_subscription(telegram_id, phone_number, subscribed):
@@ -3283,6 +3333,9 @@ def admin_menu(owner=False):
         )],
         [InlineKeyboardButton(
             "📨 الاستفسارات", callback_data="inquiriesqueue"
+        )],
+        [InlineKeyboardButton(
+            "💬 المحادثات", callback_data="conversations"
         )],
         [InlineKeyboardButton(
             "💬 رد على عميل بالآيدي", callback_data="adminreplyid"
@@ -6930,6 +6983,7 @@ async def text(update, context):
         username_line = f"@{u.username}" if u.username else "بدون يوزر"
 
         add_inquiry(u.id, sender, u.username, t)
+        log_conversation(u.id, "customer", t)
 
         if ADMIN_ID:
             try:
@@ -7960,6 +8014,7 @@ async def text(update, context):
                 update.effective_user.id, "ADMIN_REPLIED_TO_CUSTOMER",
                 object_type="user", object_id=target_id, new_value=t,
             )
+            log_conversation(target_id, "admin", t)
             if inquiry_id:
                 mark_inquiry_done(inquiry_id)
             await update.message.reply_text("✅ اتبعت الرد للعميل.")
@@ -8434,6 +8489,78 @@ async def buttons(update, context):
         await q.edit_message_text(text, reply_markup=kb)
         return
 
+    if c == "conversations":
+        if not is_admin(update):
+            return
+
+        threads = conversation_threads(30)
+        if not threads:
+            await q.edit_message_text(
+                "💬 مفيش محادثات مسجلة لسه.",
+                reply_markup=admin_menu(owner=is_owner(update)),
+            )
+            return
+
+        text = "💬 المحادثات (الأحدث فوق)\n\n"
+        kb_rows = []
+        for th in threads:
+            name = th.get("first_name") or "بدون اسم"
+            uname = f" (@{th['username']})" if th.get("username") else ""
+            snippet = (th.get("last_message") or "")[:40]
+            kb_rows.append([InlineKeyboardButton(
+                f"👁 {name}{uname} — {snippet}",
+                callback_data=f"convopen:{th['telegram_id']}",
+            )])
+        kb_rows.append([InlineKeyboardButton("⬅️ رجوع", callback_data="admin")])
+
+        await q.edit_message_text(
+            text, reply_markup=InlineKeyboardMarkup(kb_rows)
+        )
+        return
+
+    if c.startswith("convopen:"):
+        if not is_admin(update):
+            return
+
+        tid = int(c.split(":")[1])
+        msgs = conversation_messages(tid, limit=40)
+        urow = one(
+            "SELECT first_name, username FROM Users WHERE telegram_id=%s",
+            (tid,),
+        )
+        name = (urow.get("first_name") if urow else None) or "بدون اسم"
+        uname = f" (@{urow['username']})" if urow and urow.get("username") else ""
+
+        lines = [f"💬 المحادثة مع {name}{uname}", f"🆔 {tid}", ""]
+        if not msgs:
+            lines.append("مفيش رسايل مسجلة.")
+        else:
+            for m in msgs:
+                who = "🧑 العميل" if m["sender"] == "customer" else "🏪 أنت"
+                ts = m["created_at"]
+                ts_str = (
+                    ts.strftime("%d/%m %H:%M")
+                    if hasattr(ts, "strftime") else str(ts)
+                )
+                lines.append(f"{who} ({ts_str}):\n{m['message']}\n")
+
+        text = "\n".join(lines)
+        if len(text) > 3800:
+            text = "...\n" + text[-3800:]
+
+        await q.edit_message_text(
+            text,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "💬 رد", callback_data=f"reply:{tid}"
+                )],
+                [InlineKeyboardButton(
+                    "⬅️ رجوع", callback_data="conversations"
+                )],
+            ]),
+        )
+        return
+
     if c.startswith("inquirydone:"):
         if not is_admin(update):
             return
@@ -8489,15 +8616,16 @@ async def buttons(update, context):
             return
 
         target_id = int(c.split(":")[1])
+        checkin_msg = (
+            "عذرًا على تأخرنا في الرد على طلب المكالمة بتاعك 🙏\n"
+            "لسه محتاج نكلمك، ولا الاستفسار اتحل؟"
+        )
         try:
             await context.bot.send_message(
                 chat_id=target_id,
-                text=(
-                    f"📞 معاك {SHOP_NAME}\n\n"
-                    "عذرًا على تأخرنا في الرد على طلب المكالمة بتاعك 🙏\n"
-                    "لسه محتاج نكلمك، ولا الاستفسار اتحل؟"
-                ),
+                text=f"📞 معاك {SHOP_NAME}\n\n{checkin_msg}",
             )
+            log_conversation(target_id, "admin", checkin_msg)
             await context.bot.send_message(
                 chat_id=q.message.chat_id,
                 text="✅ اتبعتت الرسالة للعميل.",
