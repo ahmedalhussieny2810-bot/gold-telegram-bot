@@ -217,6 +217,8 @@ def init_db():
                 "VARCHAR(20) NULL",
                 "ALTER TABLE Users ADD COLUMN subscribed_gold_whatsapp "
                 "TINYINT(1) NOT NULL DEFAULT 0",
+                "ALTER TABLE Users ADD COLUMN whatsapp_subscribed_at "
+                "TIMESTAMP NULL",
                 "ALTER TABLE Users ADD COLUMN last_calc_mode "
                 "VARCHAR(20) NULL",
                 "ALTER TABLE Users ADD COLUMN last_calc_karat "
@@ -1347,11 +1349,19 @@ def set_whatsapp_subscription(telegram_id, phone_number, subscribed):
     c = db()
     try:
         with c.cursor() as x:
-            x.execute("""
-                UPDATE Users
-                SET whatsapp_number=%s, subscribed_gold_whatsapp=%s
-                WHERE telegram_id=%s
-            """, (phone_number, 1 if subscribed else 0, telegram_id))
+            if subscribed:
+                x.execute("""
+                    UPDATE Users
+                    SET whatsapp_number=%s, subscribed_gold_whatsapp=1,
+                        whatsapp_subscribed_at=NOW()
+                    WHERE telegram_id=%s
+                """, (phone_number, telegram_id))
+            else:
+                x.execute("""
+                    UPDATE Users
+                    SET whatsapp_number=%s, subscribed_gold_whatsapp=0
+                    WHERE telegram_id=%s
+                """, (phone_number, telegram_id))
             return bool(x.rowcount)
     finally:
         c.close()
@@ -1407,11 +1417,21 @@ def is_whatsapp_subscribed(telegram_id):
     return bool(row and row.get("subscribed_gold_whatsapp"))
 
 
-def whatsapp_subscriber_numbers():
-    rows = many(
-        "SELECT whatsapp_number FROM Users "
-        "WHERE subscribed_gold_whatsapp=1 AND whatsapp_number IS NOT NULL"
-    )
+def whatsapp_subscriber_numbers(since=None):
+    """All subscribed WhatsApp numbers, or only those subscribed after
+    `since` (a datetime) when exporting just the newly-added ones."""
+    if since:
+        rows = many(
+            "SELECT whatsapp_number FROM Users "
+            "WHERE subscribed_gold_whatsapp=1 AND whatsapp_number IS NOT NULL "
+            "AND whatsapp_subscribed_at > %s",
+            (since,),
+        )
+    else:
+        rows = many(
+            "SELECT whatsapp_number FROM Users "
+            "WHERE subscribed_gold_whatsapp=1 AND whatsapp_number IS NOT NULL"
+        )
     return [r["whatsapp_number"] for r in rows]
 
 
@@ -1701,6 +1721,10 @@ def isagha_autosuggest_on():
 
 def isagha_autopublish_on():
     return get_setting("isagha_autopublish", "0") == "1"
+
+
+def isagha_autopublish_after2_on():
+    return get_setting("isagha_autopublish_after2", "0") == "1"
 
 
 def try_claim_daily_task(key, value):
@@ -2954,6 +2978,46 @@ def fetch_isagha_price_21():
         return None
 
 
+def fetch_goldpricelive_price_21():
+    """
+    Best-effort scrape of gold-price-live.com for the 21k sell price,
+    used purely as a SECOND independent source to sanity-check the
+    iSagha suggestion (the admin always reviews before publishing —
+    see fetch_isagha_price_21's docstring for why this is fragile by
+    nature). Returns a float, or None on any failure.
+    """
+    try:
+        r = requests.get(
+            "https://gold-price-live.com/",
+            headers={"User-Agent": "Mozilla/5.0 (compatible; AlhussienyBot/1.0)"},
+            timeout=15,
+        )
+        r.raise_for_status()
+        html = r.text
+
+        # The FAQ answer on the homepage states the 21k price in a
+        # clean, stable sentence — prefer that over the price table
+        # (which mixes buy/sell columns and is easier to mis-parse).
+        m = re.search(
+            r"عيار\s*21\s*هو\s*([\d,]+(?:\.\d+)?)\s*جنيه",
+            html,
+        )
+        if not m:
+            # Fallback: the "عيار 21" row in the price table, taking
+            # the first (buy) figure.
+            m = re.search(
+                r"عيار\s*21[^\d]{0,40}([\d,]+(?:\.\d+)?)\s*جنيه",
+                html,
+            )
+        if not m:
+            return None
+
+        return float(m.group(1).replace(",", ""))
+    except Exception as e:
+        print("GoldPriceLive Fetch Error:", repr(e), flush=True)
+        return None
+
+
 def latest():
     """Most recently recorded gold price (عيار 21). Derived from
     GoldPriceHistory in MySQL — see first_today() docstring for why
@@ -3784,6 +3848,9 @@ def gold_menu():
             "🧪 اختبار إشعار واتساب", callback_data="testwa"
         )],
         [InlineKeyboardButton(
+            "📋 قايمة أرقام واتساب", callback_data="walistnumbers"
+        )],
+        [InlineKeyboardButton(
             "🔄 إعادة ضبط جدول واتساب", callback_data="resetwa"
         )],
         [InlineKeyboardButton(
@@ -4311,20 +4378,30 @@ async def isagha_suggestion_tick(context):
 
 async def isagha_autopublish_tick(context):
     """Runs every minute via JobQueue but only acts on the hour and
-    half-hour, between 11:00-14:00 (inclusive), and only if the
-    admin has turned "🔁 نشر تلقائي بالكامل" on. Unlike
-    isagha_suggestion_tick, this one publishes the scraped iSagha
-    21k price immediately — no admin confirmation — since the whole
-    point is covering the midday window while the admin is away
-    (e.g. asleep)."""
+    half-hour. Two independently-toggleable windows:
+      - 11:00-14:00 (inclusive), controlled by "🔁 نشر تلقائي بالكامل"
+      - 14:30-23:00, controlled by "🔁 نشر تلقائي بعد الـ2" (a
+        separate toggle, so the admin can extend auto-publish into
+        the afternoon/evening without it running all day by default)
+    Unlike isagha_suggestion_tick, this one publishes the scraped
+    iSagha 21k price immediately — no admin confirmation."""
     try:
-        if not ADMIN_ID or not isagha_autopublish_on():
+        if not ADMIN_ID:
             return
 
         now = datetime.now(TZ)
-        if now.minute not in (0, 30) or not (11 <= now.hour <= 14):
+        if now.minute not in (0, 30):
             return
-        if now.hour == 14 and now.minute != 0:
+
+        hour = now.hour
+        in_window1 = (11 <= hour <= 14) and not (hour == 14 and now.minute != 0)
+        in_window2 = (14 <= hour <= 23) and not (hour == 14 and now.minute == 0)
+
+        if in_window1 and isagha_autopublish_on():
+            pass
+        elif in_window2 and isagha_autopublish_after2_on():
+            pass
+        else:
             return
 
         slot_key = now.strftime("%Y-%m-%d-%H-%M")
@@ -4827,6 +4904,64 @@ async def send_isagha_suggestion(context, admin_id, suggested):
         await context.bot.send_message(chat_id=admin_id, text=text, reply_markup=kb)
     except Exception as e:
         print("iSagha Suggestion Send Failed:", repr(e), flush=True)
+
+
+async def send_alt_suggestion(context, admin_id, suggested):
+    """
+    Same idea as send_isagha_suggestion, but for the second
+    independent source (gold-price-live.com) — useful to cross-check
+    iSagha before publishing. Never publishes on its own.
+    """
+    if suggested is None:
+        try:
+            await context.bot.send_message(
+                chat_id=admin_id,
+                text=(
+                    "⚠️ مقدرتش أجيب سعر من gold-price-live.com دلوقتي "
+                    "(ممكن الموقع غيّر شكله أو فيه مشكلة اتصال). "
+                    "حدّث السعر يدوي زي العادة."
+                ),
+            )
+        except Exception as e:
+            print("Alt Suggestion Send Failed:", repr(e), flush=True)
+        return
+
+    current = latest()
+    diff_line = ""
+    suspicious = False
+    if current:
+        diff = round(suggested - current)
+        pct = abs(diff) / current * 100 if current else 0
+        if pct > 15:
+            suspicious = True
+            diff_line = (
+                f"\n\n⚠️ الفرق كبير جدًا عن سعرك الحالي ({round(current)} ج) "
+                f"— {diff:+d} ج ({pct:.0f}%). راجعه كويس قبل النشر، "
+                "ممكن يكون خطأ في القراءة من الموقع."
+            )
+        else:
+            diff_line = f"\n\nمقارنة بسعرك الحالي: {diff:+d} ج"
+
+    text = (
+        "📊 اقتراح سعر من gold-price-live.com\n\n"
+        f"عيار 21: {round(suggested)} جنيه"
+        f"{diff_line}\n\n"
+        "⚠️ مصدر غير رسمي — راجع السعر قبل ما تنشره."
+    )
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            "✅ انشر بالسعر ده" if not suspicious else "⚠️ انشر برضه",
+            callback_data=f"altpub:{suggested}",
+        )],
+        [InlineKeyboardButton("✏️ عدّل السعر", callback_data="isaghaedit")],
+        [InlineKeyboardButton("❌ تجاهل", callback_data="altignore")],
+    ])
+
+    try:
+        await context.bot.send_message(chat_id=admin_id, text=text, reply_markup=kb)
+    except Exception as e:
+        print("Alt Suggestion Send Failed:", repr(e), flush=True)
 
 
 async def maybe_send_gold_alert(context, prev_price, new_price):
@@ -9513,6 +9648,71 @@ async def buttons(update, context):
         )
         return
 
+    if c == "walistnumbers":
+        if not is_admin(update):
+            return
+
+        total = whatsapp_subscriber_count()
+        last_export = get_setting("wa_last_export_at")
+        new_note = (
+            f"\n\nآخر تصدير: {last_export}" if last_export else
+            "\n\nمفيش تصدير سابق."
+        )
+
+        await q.edit_message_text(
+            f"📋 مشتركين واتساب: {total}\n"
+            "اختار تصدّر إيه:" + new_note,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "📥 كل الأرقام (CSV)", callback_data="waexport:all"
+                )],
+                [InlineKeyboardButton(
+                    "🆕 الجديد بس (CSV)", callback_data="waexport:new"
+                )],
+                [InlineKeyboardButton("⬅️ رجوع", callback_data="gold")],
+            ]),
+        )
+        return
+
+    if c.startswith("waexport:"):
+        if not is_admin(update):
+            return
+
+        mode = c.split(":")[1]
+        since = get_setting("wa_last_export_at") if mode == "new" else None
+        numbers = whatsapp_subscriber_numbers(since=since)
+
+        if not numbers:
+            msg = (
+                "📋 مفيش أرقام جديدة من بعد آخر تصدير."
+                if mode == "new" else
+                "📋 مفيش حد مشترك في تحديثات واتساب لسه."
+            )
+            await q.answer(msg, show_alert=True)
+            return
+
+        csv_lines = ["Name,Phone"]
+        for i, n in enumerate(numbers, start=1):
+            csv_lines.append(f"عميل واتساب {i},{n}")
+        csv_content = "\n".join(csv_lines)
+
+        buf = io.BytesIO(csv_content.encode("utf-8-sig"))
+        buf.name = f"whatsapp_numbers_{mode}.csv"
+
+        await context.bot.send_document(
+            chat_id=q.message.chat_id,
+            document=buf,
+            filename=buf.name,
+            caption=f"📋 {len(numbers)} رقم — {'الكل' if mode == 'all' else 'جديد بس'}",
+        )
+
+        if mode == "new":
+            set_setting(
+                "wa_last_export_at",
+                datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S"),
+            )
+        return
+
     if c == "testwa":
         if not is_admin(update):
             return
@@ -11451,6 +11651,13 @@ async def buttons(update, context):
             "🔴 متوقف دلوقتي."
         )
 
+        auto2_on = isagha_autopublish_after2_on()
+        auto2_status_line = (
+            "🟢 مفعّل — هينشر لوحده كل نص ساعة من بعد 2 م لحد 11 م."
+            if auto2_on else
+            "🔴 متوقف دلوقتي."
+        )
+
         await q.edit_message_text(
             "🔄 اقتراح سعر تلقائي (iSagha)\n\n"
             f"{status_line}\n\n"
@@ -11462,6 +11669,10 @@ async def buttons(update, context):
             "لو مفعّل، البوت هياخد السعر من iSagha وينشره على طول "
             "من غير ما يستنى تأكيدك — كل نص ساعة في نطاق الوقت ده "
             "بس.\n\n"
+            "🔁 نشر تلقائي بعد الـ2 (2:30 م - 11 م)\n\n"
+            f"{auto2_status_line}\n\n"
+            "تحكم منفصل — تقدر تفعّله لوحده عشان النشر يكمل تلقائي "
+            "بعد الـ2 من غير ما يأثر على فترة 11-2.\n\n"
             "⚠️ مصدر مش رسمي (موقع خارجي)، ممكن يفشل يجيب السعر "
             "أحيانًا أو يختلف عن مصادر تانية — استخدمه كمرجع سريع "
             "مش كمصدر وحيد.",
@@ -11471,16 +11682,62 @@ async def buttons(update, context):
                     callback_data="isaghatoggle",
                 )],
                 [InlineKeyboardButton(
-                    "🔴 إيقاف النشر التلقائي" if auto_on
-                    else "🟢 تفعيل النشر التلقائي",
+                    "🔴 إيقاف النشر (11-2)" if auto_on
+                    else "🟢 تفعيل النشر (11-2)",
                     callback_data="isaghaautopubtoggle",
+                )],
+                [InlineKeyboardButton(
+                    "🔴 إيقاف النشر بعد الـ2" if auto2_on
+                    else "🟢 تفعيل النشر بعد الـ2",
+                    callback_data="isaghaautopubafter2toggle",
                 )],
                 [InlineKeyboardButton(
                     "📥 اجيب اقتراح دلوقتي", callback_data="isaghafetchnow"
                 )],
+                [InlineKeyboardButton(
+                    "📊 اقتراح من مصدر تاني", callback_data="altfetchnow"
+                )],
                 [InlineKeyboardButton("⬅️ رجوع", callback_data="admin")],
             ]),
         )
+        return
+
+    if c == "altfetchnow":
+        if not is_admin(update):
+            return
+
+        await q.edit_message_text("⏳ بجيب السعر من gold-price-live.com...")
+        suggested = await asyncio.to_thread(fetch_goldpricelive_price_21)
+        await send_alt_suggestion(context, update.effective_user.id, suggested)
+        return
+
+    if c.startswith("altpub:"):
+        if not is_admin(update):
+            return
+
+        suggested = float(c.split(":")[1])
+        prev_p = latest()
+        new_price_id = save_latest(suggested, admin_id=update.effective_user.id)
+        log_action(
+            update.effective_user.id, "ADMIN_CHANGED_GOLD_PRICE",
+            old_value=prev_p,
+            new_value=f"price_21={round(suggested)} (gold-price-live)",
+        )
+        if first_today() is None:
+            save_first(suggested)
+
+        await q.edit_message_text(
+            "✅ تم نشر السعر المقترح.\n\n" + price_text(suggested),
+        )
+        await maybe_send_gold_alert(context, prev_p, suggested)
+        await broadcast_gold_update(context, suggested, price_id=new_price_id)
+        return
+
+    if c == "altignore":
+        if not is_admin(update):
+            return
+
+        await q.edit_message_text("👍 تمام، اتجاهل الاقتراح.")
         return
 
     if c == "isaghatoggle":
@@ -11517,6 +11774,27 @@ async def buttons(update, context):
             "✅ اتفعّل النشر التلقائي (11 ص - 2 م، كل نص ساعة)."
             if not on else
             "✅ اتوقف النشر التلقائي.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ رجوع", callback_data="admin")],
+            ]),
+        )
+        return
+
+    if c == "isaghaautopubafter2toggle":
+        if not is_admin(update):
+            return
+
+        on = isagha_autopublish_after2_on()
+        set_setting("isagha_autopublish_after2", "0" if on else "1")
+        log_action(
+            update.effective_user.id, "ADMIN_TOGGLE_ISAGHA_AUTOPUBLISH_AFTER2",
+            new_value="off" if on else "on",
+        )
+
+        await q.edit_message_text(
+            "✅ اتفعّل النشر التلقائي بعد الـ2 (2:30 م - 11 م، كل نص ساعة)."
+            if not on else
+            "✅ اتوقف النشر التلقائي بعد الـ2.",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("⬅️ رجوع", callback_data="admin")],
             ]),
