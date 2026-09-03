@@ -172,6 +172,16 @@ def init_db():
                 "ALTER TABLE Products ADD COLUMN updated_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP",
                 "ALTER TABLE Products ADD INDEX(status)",
                 "ALTER TABLE Products ADD INDEX(code)",
+                "ALTER TABLE Products ADD COLUMN is_dynamic_price "
+                "TINYINT(1) NOT NULL DEFAULT 0",
+                "ALTER TABLE Products ADD COLUMN karat "
+                "TINYINT UNSIGNED NULL",
+                "ALTER TABLE Products ADD COLUMN weight_grams "
+                "DECIMAL(10,3) NULL",
+                "ALTER TABLE Products ADD COLUMN making_charge_type "
+                "VARCHAR(10) NULL",
+                "ALTER TABLE Products ADD COLUMN making_charge "
+                "DECIMAL(15,2) NULL",
             ]
 
             for q in upgrades:
@@ -929,27 +939,64 @@ def del_cat(cid):
 # PRODUCTS
 # =========================================================
 
-def add_product(cid, photo, name, code, price, desc):
+def add_product(cid, photo, name, code, price, desc, is_dynamic=False,
+                 karat=None, weight_grams=None, making_charge_type=None,
+                 making_charge=None):
     c = db()
     try:
         with c.cursor() as x:
             parent = cat(cid)
             x.execute("""
                 INSERT INTO Products
-                (category,Photo_id,category_id,name,code,price,description)
-                VALUES(%s,%s,%s,%s,%s,%s,%s)
+                (category,Photo_id,category_id,name,code,price,description,
+                 is_dynamic_price,karat,weight_grams,making_charge_type,
+                 making_charge)
+                VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             """, (
                 parent["name"] if parent else "",
                 photo, cid, name, code, price, desc,
+                1 if is_dynamic else 0, karat, weight_grams,
+                making_charge_type, making_charge,
             ))
             return x.lastrowid
     finally:
         c.close()
 
 
+def product_price_value(p):
+    """The price to actually show for a product: computed live from
+    the current gold price for products using dynamic pricing (so it
+    always tracks price changes automatically), otherwise the fixed
+    stored price. Returns None if unavailable (no price set / no
+    gold price recorded yet). Weight and making-charge are internal
+    admin-only inputs and are never shown to customers."""
+    if p.get("is_dynamic_price"):
+        base = latest()
+        karat = p.get("karat")
+        weight = p.get("weight_grams")
+        if not base or not karat or not weight:
+            return None
+        p24, p21, p18 = calc(base)
+        per_gram = {24: p24, 21: p21, 18: p18}.get(int(karat))
+        if per_gram is None:
+            return None
+        weight = float(weight)
+        mc = float(p.get("making_charge") or 0)
+        if p.get("making_charge_type") == "piece":
+            total = weight * per_gram + mc
+        else:
+            total = weight * (per_gram + mc)
+        return round(total)
+
+    price = p.get("price")
+    return round(float(price)) if price not in (None, "") else None
+
+
 def products(cid):
     return many("""
-        SELECT id,Photo_id,name,code,price,description
+        SELECT id,Photo_id,name,code,price,description,
+               is_dynamic_price,karat,weight_grams,making_charge_type,
+               making_charge
         FROM Products
         WHERE category_id=%s
         ORDER BY id DESC
@@ -980,7 +1027,8 @@ def product(pid):
     return one("""
         SELECT id,Photo_id,name,code,price,description,
                status,views_count,inquiries_count,whatsapp_clicks,
-               category_id
+               category_id,is_dynamic_price,karat,weight_grams,
+               making_charge_type,making_charge
         FROM Products
         WHERE id=%s
     """, (pid,))
@@ -4571,8 +4619,8 @@ async def publish_product_of_day(context, pid):
     if p["code"]:
         parts.append(f"🔖 الكود: {p['code']}")
     parts.append(
-        f"💰 السعر: {round(float(p['price']))} جنيه"
-        if p["price"] not in (None, "") else "💰 السعر: للاستعلام"
+        f"💰 السعر: {product_price_value(p)} جنيه"
+        if product_price_value(p) is not None else "💰 السعر: للاستعلام"
     )
     if p["description"]:
         parts.append(f"\n{p['description']}")
@@ -5085,8 +5133,8 @@ async def favorites_command(update, context):
         if p["code"]:
             parts.append(f"🔖 الكود: {p['code']}")
         parts.append(
-            f"💰 السعر: {round(float(p['price']))} جنيه"
-            if p.get("price") not in (None, "")
+            f"💰 السعر: {product_price_value(p)} جنيه"
+            if product_price_value(p) is not None
             else "💰 السعر: للاستعلام"
         )
         status = p.get("status") or "available"
@@ -6788,8 +6836,18 @@ async def photo(update, context):
     desc = context.user_data.get("desc")
     photo_id = update.message.photo[-1].file_id
 
+    is_dynamic = bool(context.user_data.get("is_dynamic_price"))
+    karat = context.user_data.get("karat")
+    weight_grams = context.user_data.get("weight_grams")
+    making_charge_type = context.user_data.get("making_charge_type")
+    making_charge = context.user_data.get("making_charge")
+
     try:
-        pid = add_product(cid, photo_id, name, code, price, desc)
+        pid = add_product(
+            cid, photo_id, name, code, price, desc,
+            is_dynamic=is_dynamic, karat=karat, weight_grams=weight_grams,
+            making_charge_type=making_charge_type, making_charge=making_charge,
+        )
 
         context.user_data.clear()
 
@@ -6803,7 +6861,8 @@ async def photo(update, context):
             reply_markup=prod_menu(),
         )
 
-        await broadcast_new_product(context, photo_id, name, code, price, desc)
+        display_price = product_price_value(product(pid))
+        await broadcast_new_product(context, photo_id, name, code, display_price, desc)
     except Exception as e:
         print("Product error:", repr(e), flush=True)
         log_action(
@@ -7826,10 +7885,25 @@ async def text(update, context):
 
     if s == "prod_code":
         context.user_data["code"] = None if t.lower() == "بدون" else t
-        context.user_data["state"] = "prod_price"
+        context.user_data["state"] = "prod_price_mode"
 
         await update.message.reply_text(
-            "💰 اكتب سعر المنتج، أو اكتب: بدون"
+            "💰 السعر بيتحدد إزاي؟",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "🔒 سعر ثابت", callback_data="prodpricemode:fixed"
+                )],
+                [InlineKeyboardButton(
+                    "⚖️ متغير مع سعر الدهب", callback_data="prodpricemode:dynamic"
+                )],
+            ]),
+        )
+        return
+
+    if s == "prod_price_mode":
+        # Waiting on the inline-buttons choice above; ignore stray text.
+        await update.message.reply_text(
+            "دوس على أحد الزرارين اللي فوق 👆"
         )
         return
 
@@ -7848,6 +7922,58 @@ async def text(update, context):
                 return
 
         context.user_data["price"] = v
+        context.user_data["state"] = "prod_desc"
+
+        await update.message.reply_text(
+            "📝 اكتب وصف المنتج، أو اكتب: بدون"
+        )
+        return
+
+    if s == "prod_weight":
+        try:
+            w = float(t)
+            if w <= 0:
+                raise ValueError
+        except Exception:
+            await update.message.reply_text(
+                "❌ اكتب وزن صحيح بالجرام (مثال: 5.5)"
+            )
+            return
+
+        context.user_data["weight_grams"] = w
+        context.user_data["state"] = "prod_mc_type"
+
+        await update.message.reply_text(
+            "⚖️ المصنعية إزاي؟",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "💍 مبلغ ثابت على القطعة كلها", callback_data="prodmc:piece"
+                )],
+                [InlineKeyboardButton(
+                    "🔩 مبلغ لكل جرام", callback_data="prodmc:gram"
+                )],
+            ]),
+        )
+        return
+
+    if s == "prod_mc_type":
+        await update.message.reply_text(
+            "دوس على أحد الزرارين اللي فوق 👆"
+        )
+        return
+
+    if s == "prod_mc_amount":
+        try:
+            mc = float(t)
+            if mc < 0:
+                raise ValueError
+        except Exception:
+            await update.message.reply_text(
+                "❌ اكتب رقم صحيح للمصنعية (أو 0 لو مفيش)"
+            )
+            return
+
+        context.user_data["making_charge"] = mc
         context.user_data["state"] = "prod_desc"
 
         await update.message.reply_text(
@@ -9598,8 +9724,8 @@ async def buttons(update, context):
                 parts.append(f"🔖 الكود: {p['code']}")
 
             parts.append(
-                f"💰 السعر: {round(float(p['price']))} جنيه"
-                if p.get("price") not in (None, "")
+                f"💰 السعر: {product_price_value(p)} جنيه"
+                if product_price_value(p) is not None
                 else "💰 السعر: للاستعلام"
             )
 
@@ -10970,12 +11096,24 @@ async def buttons(update, context):
             return
 
         status = p.get("status") or "available"
+        computed_price = product_price_value(p)
+        if p.get("is_dynamic_price"):
+            mc_label = "بالقطعة" if p.get("making_charge_type") == "piece" else "بالجرام"
+            price_line = (
+                f"💰 السعر (متغير مع الدهب): "
+                f"{computed_price if computed_price is not None else '-'} جنيه\n"
+                f"   ⚖️ عيار {p.get('karat')} — وزن {p.get('weight_grams')} جم — "
+                f"مصنعية {p.get('making_charge')} ({mc_label})"
+            )
+        else:
+            price_line = f"💰 السعر: {computed_price if computed_price is not None else '-'}"
+
         lines = [
             f"✏️ تعديل المنتج #{pid}",
             "",
             f"💎 الاسم: {p['name'] or '-'}",
             f"🔖 الكود: {p['code'] or '-'}",
-            f"💰 السعر: {p['price'] if p['price'] is not None else '-'}",
+            price_line,
             f"📝 الوصف: {p['description'] or '-'}",
             f"📊 الحالة: {STATUS_LABELS.get(status, status)}",
             f"👁 المشاهدات: {p.get('views_count', 0)}",
@@ -11191,12 +11329,24 @@ async def buttons(update, context):
             return
 
         status = p.get("status") or "available"
+        computed_price = product_price_value(p)
+        if p.get("is_dynamic_price"):
+            mc_label = "بالقطعة" if p.get("making_charge_type") == "piece" else "بالجرام"
+            price_line = (
+                f"💰 السعر (متغير مع الدهب): "
+                f"{computed_price if computed_price is not None else '-'} جنيه\n"
+                f"   ⚖️ عيار {p.get('karat')} — وزن {p.get('weight_grams')} جم — "
+                f"مصنعية {p.get('making_charge')} ({mc_label})"
+            )
+        else:
+            price_line = f"💰 السعر: {computed_price if computed_price is not None else '-'}"
+
         lines = [
             f"✏️ تعديل المنتج #{pid}",
             "",
             f"💎 الاسم: {p['name'] or '-'}",
             f"🔖 الكود: {p['code'] or '-'}",
-            f"💰 السعر: {p['price'] if p['price'] is not None else '-'}",
+            price_line,
             f"📝 الوصف: {p['description'] or '-'}",
             f"📊 الحالة: {STATUS_LABELS.get(status, status)}",
             f"👁 المشاهدات: {p.get('views_count', 0)}",
@@ -11276,6 +11426,54 @@ async def buttons(update, context):
         )
         return
 
+    if c.startswith("prodpricemode:"):
+        if not is_admin(update):
+            return
+
+        mode = c.split(":")[1]
+        if mode == "fixed":
+            context.user_data["state"] = "prod_price"
+            await q.edit_message_text(
+                "💰 اكتب سعر المنتج، أو اكتب: بدون"
+            )
+            return
+
+        context.user_data["is_dynamic_price"] = True
+        await q.edit_message_text(
+            "⚖️ اختار عيار القطعة:",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("21", callback_data="prodkarat:21")],
+                [InlineKeyboardButton("18", callback_data="prodkarat:18")],
+                [InlineKeyboardButton("24", callback_data="prodkarat:24")],
+            ]),
+        )
+        return
+
+    if c.startswith("prodkarat:"):
+        if not is_admin(update):
+            return
+
+        karat = int(c.split(":")[1])
+        context.user_data["karat"] = karat
+        context.user_data["state"] = "prod_weight"
+        await q.edit_message_text(
+            "⚖️ اكتب وزن القطعة بالجرام (مثال: 5.5)"
+        )
+        return
+
+    if c.startswith("prodmc:"):
+        if not is_admin(update):
+            return
+
+        mc_type = c.split(":")[1]
+        context.user_data["making_charge_type"] = mc_type
+        context.user_data["state"] = "prod_mc_amount"
+        unit = "على القطعة كلها" if mc_type == "piece" else "على الجرام الواحد"
+        await q.edit_message_text(
+            f"💰 اكتب قيمة المصنعية بالجنيه {unit} (اكتب 0 لو مفيش)."
+        )
+        return
+
     if c.startswith("prodwa:"):
         pid = int(c.split(":")[1])
         inc_product_counter(pid, "whatsapp_clicks")
@@ -11342,8 +11540,8 @@ async def buttons(update, context):
             if p["code"]:
                 parts.append(f"🔖 الكود: {p['code']}")
             parts.append(
-                f"💰 السعر: {round(float(p['price']))} جنيه"
-                if p.get("price") not in (None, "")
+                f"💰 السعر: {product_price_value(p)} جنيه"
+                if product_price_value(p) is not None
                 else "💰 السعر: للاستعلام"
             )
             status = p.get("status") or "available"
