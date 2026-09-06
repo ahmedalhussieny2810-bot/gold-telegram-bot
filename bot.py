@@ -3335,35 +3335,49 @@ async def send_karat_conversion_result(
 
 def home(admin=False, subscribed=False):
     k = [
-        # تصفح
+        [InlineKeyboardButton(
+            "🟢 الإشعارات شغالة (دوس للإيقاف)"
+            if subscribed else
+            "🔔 فعّل الإشعارات عشان يوصلك كل جديد",
+            callback_data="notifunsub" if subscribed else "notifsub",
+        )],
+        [InlineKeyboardButton(
+            "💎 هستخدم البوت للدهب", callback_data="goldcategory"
+        )],
+        [InlineKeyboardButton(
+            "📒 هستخدم البوت لمصاريفي وحساباتي", callback_data="financecategory"
+        )],
+    ]
+
+    if admin:
+        k.append([InlineKeyboardButton("👑 لوحة التحكم", callback_data="admin")])
+
+    k.append([InlineKeyboardButton(
+        "📇 بيانات المحل", callback_data="shopinfo"
+    )])
+    return InlineKeyboardMarkup(k)
+
+
+def gold_category_kb():
+    return InlineKeyboardMarkup([
         [InlineKeyboardButton("💎 أسعار الذهب", callback_data="gold")],
         [InlineKeyboardButton(
             "🧮✨ احسب دهبك دلوقتي! ✨🧮", callback_data="calcgold"
         )],
         [InlineKeyboardButton("💍 المنتجات", callback_data="products")],
         [InlineKeyboardButton("⭐ المفضلة", callback_data="favlist")],
-
-        # أدوات شخصية
         [InlineKeyboardButton(
             "💰 هدف توفير للذهب", callback_data="savegoal"
         )],
         [InlineKeyboardButton(
-            "📒 حاسبة مصروفك الشهري", callback_data="budgetmenu"
-        )],
-        [InlineKeyboardButton(
-            "📇 حساباتي (له/عليه)", callback_data="ledgermenu"
-        )],
-        [InlineKeyboardButton(
-            "🎂 سجّل تاريخ ميلادك", callback_data="birthdaymenu"
+            "🎁 نقاط الولاء", callback_data="loyaltypoints"
         )],
         [InlineKeyboardButton(
             "🔗 ادعُ صديق", callback_data="referral"
         )],
         [InlineKeyboardButton(
-            "🎁 نقاط الولاء", callback_data="loyaltypoints"
+            "🎂 سجّل تاريخ ميلادك", callback_data="birthdaymenu"
         )],
-
-        # تواصل واستفسار
         [InlineKeyboardButton(
             "🕐 المحل مفتوح دلوقتي؟", callback_data="shopstatus"
         )],
@@ -3375,23 +3389,31 @@ def home(admin=False, subscribed=False):
                 "✍️ ابعت رسالة", callback_data="contactadmin"
             ),
         ],
+        [InlineKeyboardButton("⬅️ الرئيسية", callback_data="home")],
+    ])
 
-        # إشعارات
+
+def finance_category_kb():
+    return InlineKeyboardMarkup([
         [InlineKeyboardButton(
-            "🟢 الإشعارات: شغالة (دوس للإيقاف)"
-            if subscribed else
-            "🔴 الإشعارات: متوقفة (دوس عشان توصلك)",
-            callback_data="notifunsub" if subscribed else "notifsub",
+            "📒 حاسبة مصروفك الشهري", callback_data="budgetmenu"
         )],
-    ]
-
-    if admin:
-        k.append([InlineKeyboardButton("👑 لوحة التحكم", callback_data="admin")])
-
-    k.append([InlineKeyboardButton(
-        "📇 بيانات المحل", callback_data="shopinfo"
-    )])
-    return InlineKeyboardMarkup(k)
+        [InlineKeyboardButton(
+            "📇 حساباتي (له/عليه)", callback_data="ledgermenu"
+        )],
+        [InlineKeyboardButton(
+            "🕐 المحل مفتوح دلوقتي؟", callback_data="shopstatus"
+        )],
+        [
+            InlineKeyboardButton(
+                "📞 اطلب مكالمة", callback_data="callrequest"
+            ),
+            InlineKeyboardButton(
+                "✍️ ابعت رسالة", callback_data="contactadmin"
+            ),
+        ],
+        [InlineKeyboardButton("⬅️ الرئيسية", callback_data="home")],
+    ])
 
 
 def shop_info_kb():
@@ -8586,6 +8608,20 @@ async def buttons(update, context):
         await q.edit_message_text(
             "💎 " + SHOP_NAME + "\n\nاختار من القائمة 👇",
             reply_markup=home(is_admin(update), is_gold_subscribed(update.effective_user.id)),
+        )
+        return
+
+    if c == "goldcategory":
+        await q.edit_message_text(
+            "💎 كل حاجة عن الذهب\n\nاختار من القائمة 👇",
+            reply_markup=gold_category_kb(),
+        )
+        return
+
+    if c == "financecategory":
+        await q.edit_message_text(
+            "📒 مصاريفك وحساباتك\n\nاختار من القائمة 👇",
+            reply_markup=finance_category_kb(),
         )
         return
 
