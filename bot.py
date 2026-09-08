@@ -41,6 +41,9 @@ load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 CHANNEL_ID = os.getenv("CHANNEL_ID", "").strip()
+TELEGRAM_API_ID = int(os.getenv("TELEGRAM_API_ID", "0") or 0)
+TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH", "").strip()
+TELEGRAM_SESSION_STRING = os.getenv("TELEGRAM_SESSION_STRING", "").strip()
 FACEBOOK_PAGE_ID = os.getenv("FACEBOOK_PAGE_ID", "").strip()
 FACEBOOK_PAGE_ACCESS_TOKEN = os.getenv("FACEBOOK_PAGE_TOKEN", "").strip()
 INSTAGRAM_BUSINESS_ID = os.getenv("INSTAGRAM_BUSINESS_ID", "").strip()
@@ -1567,6 +1570,17 @@ def log_publish(platform, post_id=None, permalink=None,
             c.close()
     except Exception as e:
         print("Log Publish Error:", repr(e), flush=True)
+
+
+def recent_telegram_posts(limit=10):
+    return many("""
+        SELECT post_id, content_snippet, status, created_at
+        FROM PublishLogs
+        WHERE platform='telegram' AND status='success'
+              AND post_id IS NOT NULL AND post_id != ''
+        ORDER BY created_at DESC
+        LIMIT %s
+    """, (limit,))
 
 
 def record_gold_price(p21, p24, p18, admin_id=None):
@@ -3936,6 +3950,9 @@ def gold_menu():
             callback_data="togglechannelautopost",
         )],
         [InlineKeyboardButton(
+            "📊 آخر منشورات القناة", callback_data="tgpostslist"
+        )],
+        [InlineKeyboardButton(
             "🧪 اختبار إشعار واتساب", callback_data="testwa"
         )],
         [InlineKeyboardButton(
@@ -4698,8 +4715,11 @@ async def channel_price_autopost_tick(context):
             return
 
         txt = render_template("normal", p)
-        ok = await tg(context, txt)
-        log_publish("telegram", status="success" if ok else "failed", content=txt)
+        msg_id = await tg(context, txt)
+        log_publish(
+            "telegram", post_id=msg_id,
+            status="success" if msg_id else "failed", content=txt,
+        )
     except Exception as e:
         print("Channel Autopost Tick Error:", repr(e), flush=True)
 
@@ -6720,19 +6740,56 @@ async def facebook(text):
 # TELEGRAM PUBLISH
 # =========================================================
 
-async def tg(context, text):
-    if not CHANNEL_ID:
-        return False
+def telethon_configured():
+    return bool(
+        TELEGRAM_API_ID and TELEGRAM_API_HASH
+        and TELEGRAM_SESSION_STRING and CHANNEL_ID
+    )
+
+
+async def get_telegram_post_views(message_id):
+    """
+    Fetches the view count for a single channel post via Telethon
+    (MTProto, using the admin's own logged-in Telegram account) —
+    the regular Bot API has no way to read view counts, only a real
+    user session can. Opens a short-lived connection per call since
+    this is only used on-demand (admin taps "👁 المشاهدات"), not on
+    a schedule. Returns None if Telethon isn't configured
+    (TELEGRAM_API_ID / TELEGRAM_API_HASH / TELEGRAM_SESSION_STRING
+    env vars) or if anything goes wrong.
+    """
+    if not telethon_configured():
+        return None
 
     try:
-        await context.bot.send_message(
+        from telethon import TelegramClient
+        from telethon.sessions import StringSession
+
+        async with TelegramClient(
+            StringSession(TELEGRAM_SESSION_STRING),
+            TELEGRAM_API_ID, TELEGRAM_API_HASH,
+        ) as client:
+            entity = await client.get_entity(int(CHANNEL_ID))
+            msg = await client.get_messages(entity, ids=message_id)
+            return msg.views if msg else None
+    except Exception as e:
+        print("Telethon Views Fetch Error:", repr(e), flush=True)
+        return None
+
+
+async def tg(context, text):
+    if not CHANNEL_ID:
+        return None
+
+    try:
+        msg = await context.bot.send_message(
             chat_id=CHANNEL_ID,
             text=text,
         )
-        return True
+        return msg.message_id
     except Exception as e:
         print("Telegram Error:", repr(e), flush=True)
-        return False
+        return None
 
 
 async def tg_post(context, text, photo_id=None):
@@ -9955,6 +10012,62 @@ async def buttons(update, context):
             "✅ اتوقف. غير المشتركين مش هياخدوا أي تحديثات سعر تلقائية "
             "تاني.",
             reply_markup=gold_menu(),
+        )
+        return
+
+    if c == "tgpostslist":
+        if not is_admin(update):
+            return
+
+        posts = recent_telegram_posts(10)
+        if not posts:
+            await q.edit_message_text(
+                "📊 مفيش منشورات تليجرام مسجلة لسه.",
+                reply_markup=gold_menu(),
+            )
+            return
+
+        lines = ["📊 آخر منشورات القناة", ""]
+        kb_rows = []
+        for i, p in enumerate(posts, start=1):
+            ts = p["created_at"]
+            ts_str = ts.strftime("%d/%m %H:%M") if hasattr(ts, "strftime") else str(ts)
+            snippet = (p.get("content_snippet") or "")[:30]
+            lines.append(f"{i}. {ts_str} — {snippet}")
+            kb_rows.append([InlineKeyboardButton(
+                f"👁 مشاهدات #{i}", callback_data=f"tgviews:{p['post_id']}"
+            )])
+        kb_rows.append([InlineKeyboardButton("⬅️ رجوع", callback_data="agold")])
+
+        await q.edit_message_text(
+            "\n".join(lines), reply_markup=InlineKeyboardMarkup(kb_rows)
+        )
+        return
+
+    if c.startswith("tgviews:"):
+        if not is_admin(update):
+            return
+
+        msg_id = int(c.split(":")[1])
+        await q.answer("⏳ بجيب عدد المشاهدات...")
+
+        views = await get_telegram_post_views(msg_id)
+
+        if views is None:
+            await context.bot.send_message(
+                chat_id=q.message.chat_id,
+                text=(
+                    "⚠️ مقدرتش أجيب عدد المشاهدات. تأكد إن "
+                    "TELEGRAM_API_ID و TELEGRAM_API_HASH و "
+                    "TELEGRAM_SESSION_STRING متظبطين صح في إعدادات "
+                    "Railway."
+                ),
+            )
+            return
+
+        await context.bot.send_message(
+            chat_id=q.message.chat_id,
+            text=f"👁 عدد المشاهدات: {views}",
         )
         return
 
@@ -13524,7 +13637,7 @@ async def buttons(update, context):
             await broadcast_gold_update_whatsapp(context, p)
 
         log_publish(
-            "telegram", status="success" if tg_ok else "failed",
+            "telegram", post_id=tg_ok, status="success" if tg_ok else "failed",
             content=txt,
         ) if c in ("pub_both", "pub_tg") else None
         log_publish(
@@ -13537,6 +13650,17 @@ async def buttons(update, context):
         ) if c in ("pub_both", "pub_fb") else None
 
         context.user_data.clear()
+
+        views_kb = None
+        if tg_ok and telethon_configured():
+            views_kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "👁 عدد المشاهدات", callback_data=f"tgviews:{tg_ok}"
+                )],
+                [InlineKeyboardButton(
+                    "⬅️ الرئيسية", callback_data="home"
+                )],
+            ])
 
         if c == "pub_fb":
             await q.edit_message_text(
@@ -13554,7 +13678,9 @@ async def buttons(update, context):
                 "✅ تم النشر في تليجرام."
                 if tg_ok
                 else "❌ فشل النشر في تليجرام.",
-                reply_markup=home(True, is_gold_subscribed(update.effective_user.id)),
+                reply_markup=views_kb or home(
+                    True, is_gold_subscribed(update.effective_user.id)
+                ),
             )
             return
 
@@ -13595,7 +13721,9 @@ async def buttons(update, context):
 
         await q.edit_message_text(
             "\n".join(result_lines),
-            reply_markup=home(True, is_gold_subscribed(update.effective_user.id)),
+            reply_markup=views_kb or home(
+                True, is_gold_subscribed(update.effective_user.id)
+            ),
         )
         return
 
