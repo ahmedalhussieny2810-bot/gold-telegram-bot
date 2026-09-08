@@ -6940,22 +6940,38 @@ async def get_telegram_post_views(message_id):
     this is only used on-demand (admin taps "👁 المشاهدات"), not on
     a schedule. Returns None if Telethon isn't configured
     (TELEGRAM_API_ID / TELEGRAM_API_HASH / TELEGRAM_SESSION_STRING
-    env vars) or if anything goes wrong.
+    env vars), if anything goes wrong, or if it takes too long
+    (hard-capped at 20s so a slow/unreachable MTProto connection can
+    never hang the whole bot — updates are processed concurrently,
+    but there's no reason to let one request tie up resources).
     """
     if not telethon_configured():
         return None
 
-    try:
+    async def _fetch():
         from telethon import TelegramClient
         from telethon.sessions import StringSession
 
-        async with TelegramClient(
+        client = TelegramClient(
             StringSession(TELEGRAM_SESSION_STRING),
             TELEGRAM_API_ID, TELEGRAM_API_HASH,
-        ) as client:
+        )
+        try:
+            await client.connect()
+            if not await client.is_user_authorized():
+                print("Telethon Views Fetch Error: session not authorized", flush=True)
+                return None
             entity = await client.get_entity(int(CHANNEL_ID))
             msg = await client.get_messages(entity, ids=message_id)
             return msg.views if msg else None
+        finally:
+            await client.disconnect()
+
+    try:
+        return await asyncio.wait_for(_fetch(), timeout=20)
+    except asyncio.TimeoutError:
+        print("Telethon Views Fetch Error: timed out after 20s", flush=True)
+        return None
     except Exception as e:
         print("Telethon Views Fetch Error:", repr(e), flush=True)
         return None
@@ -14489,6 +14505,7 @@ def main():
         .builder()
         .token(BOT_TOKEN)
         .post_init(setup_bot_commands)
+        .concurrent_updates(True)
         .build()
     )
 
