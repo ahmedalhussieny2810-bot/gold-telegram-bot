@@ -1779,6 +1779,10 @@ def gold_broadcast_to_all_on():
     return get_setting("gold_broadcast_to_all", "0") == "1"
 
 
+def channel_autopost_on():
+    return get_setting("channel_autopost", "1") == "1"
+
+
 def try_claim_daily_task(key, value):
     """Atomically claims a one-per-day (or one-per-period) scheduled
     task stored as a Settings flag. Only the first caller to write a
@@ -3926,6 +3930,12 @@ def gold_menu():
             callback_data="togglebroadcastall",
         )],
         [InlineKeyboardButton(
+            "🔴 إيقاف النشر التلقائي على القناة (5 مرات يوميًا)"
+            if channel_autopost_on() else
+            "🟢 تفعيل النشر التلقائي على القناة (5 مرات يوميًا)",
+            callback_data="togglechannelautopost",
+        )],
+        [InlineKeyboardButton(
             "🧪 اختبار إشعار واتساب", callback_data="testwa"
         )],
         [InlineKeyboardButton(
@@ -4658,6 +4668,40 @@ async def non_subscriber_broadcast_tick(context):
         await broadcast_gold_price_to_non_subscribers(context)
     except Exception as e:
         print("Non-Subscriber Broadcast Tick Error:", repr(e), flush=True)
+
+
+CHANNEL_AUTOPOST_HOURS = (11, 14, 17, 20, 23)
+
+
+async def channel_price_autopost_tick(context):
+    """Runs every minute via JobQueue, but only actually posts to the
+    Telegram channel (CHANNEL_ID) at the top of the hour during
+    CHANNEL_AUTOPOST_HOURS — 5 times a day total (11, 2, 5, 8, 11).
+    Controlled by the "🟢/🔴 نشر تلقائي على القناة" toggle in the
+    gold menu — on by default. Uses the "normal" post template and
+    the current saved gold price; does nothing if there's no price
+    yet or CHANNEL_ID isn't configured."""
+    try:
+        if not CHANNEL_ID or not channel_autopost_on():
+            return
+
+        now = datetime.now(TZ)
+        if now.minute != 0 or now.hour not in CHANNEL_AUTOPOST_HOURS:
+            return
+
+        slot_key = now.strftime("%Y-%m-%d-%H")
+        if not try_claim_daily_task("last_channel_autopost_slot", slot_key):
+            return
+
+        p = latest()
+        if p is None:
+            return
+
+        txt = render_template("normal", p)
+        ok = await tg(context, txt)
+        log_publish("telegram", status="success" if ok else "failed", content=txt)
+    except Exception as e:
+        print("Channel Autopost Tick Error:", repr(e), flush=True)
 
 
 async def broadcast_new_product(context, photo_id, name, code, price, desc):
@@ -9914,6 +9958,36 @@ async def buttons(update, context):
         )
         return
 
+    if c == "togglechannelautopost":
+        if not is_admin(update):
+            return
+
+        on = channel_autopost_on()
+        set_setting("channel_autopost", "0" if on else "1")
+        log_action(
+            update.effective_user.id, "ADMIN_TOGGLE_CHANNEL_AUTOPOST",
+            new_value="off" if on else "on",
+        )
+
+        if not on and not CHANNEL_ID:
+            await q.edit_message_text(
+                "⚠️ اتفعّل، لكن مفيش قناة تليجرام متظبطة في إعدادات "
+                "البوت (CHANNEL_ID) — النشر مش هيشتغل فعليًا لحد ما "
+                "تظبطها.",
+                reply_markup=gold_menu(),
+            )
+            return
+
+        await q.edit_message_text(
+            "✅ اتفعّل. البوت هينشر السعر لوحده على القناة 5 مرات "
+            "في اليوم (11 ص - 2 - 5 - 8 - 11 مساءً)."
+            if not on else
+            "✅ اتوقف. البوت مش هينشر على القناة لوحده تاني — "
+            "هتفضل تنشر يدوي من \"📢 نشر السعر\".",
+            reply_markup=gold_menu(),
+        )
+        return
+
     if c == "walistnumbers":
         if not is_admin(update):
             return
@@ -13866,6 +13940,10 @@ def main():
         app.job_queue.run_repeating(
             non_subscriber_broadcast_tick, interval=60, first=58,
             name="non_subscriber_broadcast_tick",
+        )
+        app.job_queue.run_repeating(
+            channel_price_autopost_tick, interval=60, first=59,
+            name="channel_price_autopost_tick",
         )
         print("Auto-posting scheduler started (checks every 60s).", flush=True)
     else:
