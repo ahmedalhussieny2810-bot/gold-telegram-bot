@@ -798,6 +798,11 @@ ZAKAT_RATE = 0.025  # 2.5%
 LOYALTY_EGP_PER_POINT = 10000
 LOYALTY_POINT_VALUE_EGP = 50
 LOYALTY_MIN_REDEEM_POINTS = 10
+
+# Automatic reward: whoever's referral link a NEW user joins through
+# gets this many loyalty points instantly (only once per new user,
+# and only while both the referral and loyalty features are on).
+LOYALTY_REFERRAL_BONUS_POINTS = 1
 ZAKAT_DISCLAIMER = (
     "⚠️ الحساب ده تقديري بسعر النهاردة، وبيفترض إن الذهب فاضل عندك "
     "حول (سنة هجرية) كامل وإنه فايض عن حاجتك الأساسية. فيه خلاف "
@@ -849,6 +854,14 @@ GOLD_CARE_TIPS = [
     "خواتم في إيد واحدة) عشان تقلّلي الاحتكاك اللي بيخدش السطح.",
     "💡 نصيحة اليوم: لو الدهب بدأ يفقد لمعانه، مبتستخدميش معجون "
     "أسنان أو مواد كاشطة — ده بيخدش السطح مش بينضفه.",
+    "💡 نصيحة اليوم: عيار 24 هو أنقى عيار (دهب خالص تقريبًا)، لكنه "
+    "طري جدًا وبيتخدش بسهولة — مناسب للسبائك والاستثمار مش للاستخدام "
+    "اليومي.",
+    "💡 نصيحة اليوم: عيار 21 هو الأكتر انتشارًا في مصر، لأنه بيوازن "
+    "بين النقاء والمتانة — مناسب للخواتم والسلاسل والحلق اللي "
+    "بتتلبس يوميًا.",
+    "💡 نصيحة اليوم: عيار 18 أقل نقاء من 21 و24، لكنه أكتر تحملًا "
+    "— مناسب للقطع المرصعة بالأحجار أو اللي بتتعرض لاستخدام شاق.",
 ]
 
 # Business hours: every day except Friday 11:30 AM -> 12:30 AM (next day).
@@ -1161,7 +1174,8 @@ def customer_products(cid):
 def track_user(update, referred_by=None):
     u = update.effective_user
     if not u:
-        return
+        return False
+    is_new = False
     try:
         c = db()
         try:
@@ -1187,10 +1201,12 @@ def track_user(update, referred_by=None):
                         u.id, u.first_name, u.last_name, u.username,
                         referred_by,
                     ))
+                    is_new = True
         finally:
             c.close()
     except Exception as e:
         print("Track User Error:", repr(e), flush=True)
+    return is_new
 
 
 def inc_user_inquiries(telegram_id):
@@ -2630,6 +2646,16 @@ def get_inquiry(iid):
     return one("SELECT * FROM Inquiries WHERE id=%s", (iid,))
 
 
+def my_inquiries(telegram_id, limit=10):
+    return many("""
+        SELECT id, message, status, created_at, done_at
+        FROM Inquiries
+        WHERE telegram_id=%s
+        ORDER BY created_at DESC
+        LIMIT %s
+    """, (telegram_id, limit))
+
+
 def mark_inquiry_done(iid):
     c = db()
     try:
@@ -3274,6 +3300,37 @@ def calc_result_kb(telegram_id):
     return InlineKeyboardMarkup(rows)
 
 
+async def send_trade_result(update, context, old_karat, old_weight, old_total,
+                             new_karat, new_weight, new_final, mc_line):
+    """Renders and sends the final "استبدال" (trade-in) result —
+    shared by both the with-مصنعية and without-مصنعية paths."""
+    diff = round(new_final - old_total)
+    if diff > 0:
+        diff_line = f"💰 هتدفع فرق: {diff} جنيه"
+    elif diff < 0:
+        diff_line = f"🎉 هياخدلك المحل فرق: {abs(diff)} جنيه"
+    else:
+        diff_line = "✅ مفيش فرق، القيمتين متساويتين!"
+
+    trade_text = (
+        "🔄 نتيجة الاستبدال\n\n"
+        f"قيمة قطعتك القديمة (عيار {old_karat}، {old_weight} جرام): "
+        f"{old_total} جنيه\n\n"
+        f"القطعة الجديدة (عيار {new_karat}، {new_weight} جرام):\n"
+        + mc_line
+        + f"إجمالي القطعة الجديدة: {new_final} جنيه\n\n"
+        + diff_line
+        + "\n\n⚠️ الأرقام تقريبية، والمصنعية النهائية بتتحدد في المحل."
+    )
+    context.user_data["calc_share_text"] = build_share_text(trade_text)
+
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text=trade_text,
+        reply_markup=calc_result_kb(update.effective_user.id),
+    )
+
+
 def budget_summary_view(b):
     balance = float(b["balance"])
     salary = float(b["salary"])
@@ -3380,8 +3437,16 @@ def home(admin=False, subscribed=False):
     return InlineKeyboardMarkup(k)
 
 
+def referral_enabled():
+    return get_setting("referral_enabled", "1") == "1"
+
+
+def loyalty_enabled():
+    return get_setting("loyalty_enabled", "1") == "1"
+
+
 def gold_category_kb():
-    return InlineKeyboardMarkup([
+    rows = [
         [InlineKeyboardButton("💎 أسعار الذهب", callback_data="gold")],
         [InlineKeyboardButton(
             "🧮✨ احسب دهبك دلوقتي! ✨🧮", callback_data="calcgold"
@@ -3391,12 +3456,19 @@ def gold_category_kb():
         [InlineKeyboardButton(
             "💰 هدف توفير للذهب", callback_data="savegoal"
         )],
-        [InlineKeyboardButton(
+    ]
+
+    if loyalty_enabled():
+        rows.append([InlineKeyboardButton(
             "🎁 نقاط الولاء", callback_data="loyaltypoints"
-        )],
-        [InlineKeyboardButton(
+        )])
+
+    if referral_enabled():
+        rows.append([InlineKeyboardButton(
             "🔗 ادعُ صديق", callback_data="referral"
-        )],
+        )])
+
+    rows += [
         [InlineKeyboardButton(
             "🎂 سجّل تاريخ ميلادك", callback_data="birthdaymenu"
         )],
@@ -3411,8 +3483,12 @@ def gold_category_kb():
                 "✍️ ابعت رسالة", callback_data="contactadmin"
             ),
         ],
+        [InlineKeyboardButton(
+            "📋 استفساراتي", callback_data="myinquiries"
+        )],
         [InlineKeyboardButton("⬅️ الرئيسية", callback_data="home")],
-    ])
+    ]
+    return InlineKeyboardMarkup(rows)
 
 
 def finance_category_kb():
@@ -3434,6 +3510,9 @@ def finance_category_kb():
                 "✍️ ابعت رسالة", callback_data="contactadmin"
             ),
         ],
+        [InlineKeyboardButton(
+            "📋 استفساراتي", callback_data="myinquiries"
+        )],
         [InlineKeyboardButton("⬅️ الرئيسية", callback_data="home")],
     ])
 
@@ -3459,31 +3538,61 @@ def shop_info_kb():
 
 def admin_menu(owner=False):
     rows = [
+        [InlineKeyboardButton("📢 المحتوى والنشر", callback_data="admincontent")],
+        [InlineKeyboardButton("💰 الذهب والأسعار", callback_data="admingoldcat")],
+        [InlineKeyboardButton("💍 المنتجات", callback_data="adminproductscat")],
+        [InlineKeyboardButton("👥 العملاء والتواصل", callback_data="admincustomers")],
+        [InlineKeyboardButton("📊 التقارير", callback_data="adminreports")],
+        [InlineKeyboardButton(
+            "⚙️ التحكم في الميزات (تشغيل/إيقاف)", callback_data="adminfeatures"
+        )],
+    ]
+    if owner:
+        rows.append(
+            [InlineKeyboardButton("👥 إدارة الأدمنز", callback_data="adminlist")]
+        )
+    rows.append([InlineKeyboardButton("⬅️ الرئيسية", callback_data="home")])
+    return InlineKeyboardMarkup(rows)
+
+
+def admin_content_menu():
+    return InlineKeyboardMarkup([
         [InlineKeyboardButton("📝 منشور جديد", callback_data="newpost")],
         [InlineKeyboardButton("📸 نشر ستوري", callback_data="storypost")],
         [InlineKeyboardButton(
             "📢 الإشعارات للمشتركين", callback_data="notifmenu"
         )],
+        [InlineKeyboardButton("⏰ النشر التلقائي", callback_data="schedmenu")],
+        [InlineKeyboardButton("⬅️ لوحة التحكم", callback_data="admin")],
+    ])
+
+
+def admin_gold_category_menu():
+    return InlineKeyboardMarkup([
         [InlineKeyboardButton("💰 إدارة أسعار الذهب", callback_data="agold")],
+        [InlineKeyboardButton(
+            "🔄 اقتراح سعر تلقائي (iSagha)", callback_data="isaghamenu"
+        )],
+        [InlineKeyboardButton("⬅️ لوحة التحكم", callback_data="admin")],
+    ])
+
+
+def admin_products_category_menu():
+    return InlineKeyboardMarkup([
         [InlineKeyboardButton("💍 إدارة المنتجات", callback_data="aprod")],
         [InlineKeyboardButton("📂 إدارة الأقسام", callback_data="acat")],
-        [InlineKeyboardButton("⏰ النشر التلقائي", callback_data="schedmenu")],
-        [InlineKeyboardButton("📊 الإحصائيات", callback_data="stats")],
         [InlineKeyboardButton(
             "🔥 تحليل المنتجات", callback_data="prodanalytics"
         )],
         [InlineKeyboardButton(
-            "❌ عمليات فشلت اليوم", callback_data="failedops"
-        )],
-        [InlineKeyboardButton(
             "🔥 منتج اليوم", callback_data="potdmenu"
         )],
-        [InlineKeyboardButton(
-            "🔧 وضع الصيانة", callback_data="maintmenu"
-        )],
-        [InlineKeyboardButton(
-            "🔄 اقتراح سعر تلقائي (iSagha)", callback_data="isaghamenu"
-        )],
+        [InlineKeyboardButton("⬅️ لوحة التحكم", callback_data="admin")],
+    ])
+
+
+def admin_customers_menu():
+    return InlineKeyboardMarkup([
         [InlineKeyboardButton(
             "📞 طلبات المكالمات", callback_data="callqueue"
         )],
@@ -3502,12 +3611,69 @@ def admin_menu(owner=False):
         [InlineKeyboardButton(
             "🎁 إدارة نقاط العملاء", callback_data="loyaltyadmin"
         )],
-    ]
-    if owner:
-        rows.append(
-            [InlineKeyboardButton("👥 إدارة الأدمنز", callback_data="adminlist")]
-        )
-    rows.append([InlineKeyboardButton("⬅️ الرئيسية", callback_data="home")])
+        [InlineKeyboardButton("⬅️ لوحة التحكم", callback_data="admin")],
+    ])
+
+
+def admin_reports_menu():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📊 الإحصائيات", callback_data="stats")],
+        [InlineKeyboardButton(
+            "❌ عمليات فشلت اليوم", callback_data="failedops"
+        )],
+        [InlineKeyboardButton("⬅️ لوحة التحكم", callback_data="admin")],
+    ])
+
+
+# Every on/off switch in the bot, gathered in one place so the admin
+# can see and flip all of them from a single screen. Each entry:
+# (unique key, setting name in Settings table, default value,
+#  label when currently ON, label when currently OFF).
+FEATURE_TOGGLES = [
+    ("maint", "maintenance_mode", "0",
+     "🔴 وضع الصيانة — شغال (العملاء بيشوفوا رسالة تحديث بس)",
+     "🟢 وضع الصيانة — متوقف (البوت شغال عادي)"),
+    ("prodpause", "products_paused", "0",
+     "🔴 عرض المنتجات للعملاء — متوقف مؤقتًا",
+     "🟢 عرض المنتجات للعملاء — شغال"),
+    ("refloy", "referral_enabled", "1",
+     "🟢 الدعوات ونقاط الولاء — شغالة",
+     "🔴 الدعوات ونقاط الولاء — متوقفة"),
+    ("wa", "wa_notifications_enabled", "0",
+     "🟢 الاشتراك في تحديثات واتساب — شغال",
+     "🔴 الاشتراك في تحديثات واتساب — متوقف"),
+    ("bcastall", "gold_broadcast_to_all", "0",
+     "🟢 تذكير السعر 4 مرات يوميًا (لغير المشتركين) — شغال",
+     "🔴 تذكير السعر 4 مرات يوميًا (لغير المشتركين) — متوقف"),
+    ("chautopost", "channel_autopost", "1",
+     "🟢 النشر التلقائي على القناة (5 مرات يوميًا) — شغال",
+     "🔴 النشر التلقائي على القناة (5 مرات يوميًا) — متوقف"),
+    ("isaghasug", "isagha_autosuggest", "0",
+     "🟢 اقتراح سعر تلقائي من iSagha — شغال",
+     "🔴 اقتراح سعر تلقائي من iSagha — متوقف"),
+    ("isaghapub", "isagha_autopublish", "0",
+     "🟢 نشر iSagha تلقائي (11 ص - 2 م) — شغال",
+     "🔴 نشر iSagha تلقائي (11 ص - 2 م) — متوقف"),
+    ("isaghapub2", "isagha_autopublish_after2", "0",
+     "🟢 نشر iSagha تلقائي بعد الـ2 (2:30 - 11 م) — شغال",
+     "🔴 نشر iSagha تلقائي بعد الـ2 (2:30 - 11 م) — متوقف"),
+]
+
+
+def admin_features_menu():
+    rows = []
+    for key, setting_key, default, label_on, label_off in FEATURE_TOGGLES:
+        # refloy is really two settings kept in sync — check the pair
+        # together so the label always reflects the true combined state.
+        if key == "refloy":
+            on = referral_enabled() and loyalty_enabled()
+        else:
+            on = get_setting(setting_key, default) == "1"
+        rows.append([InlineKeyboardButton(
+            label_on if on else label_off,
+            callback_data=f"hubtoggle:{key}",
+        )])
+    rows.append([InlineKeyboardButton("⬅️ لوحة التحكم", callback_data="admin")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -5236,7 +5402,25 @@ async def start(update, context):
             except ValueError:
                 pass
 
-    track_user(update, referred_by=referred_by)
+    is_new = track_user(update, referred_by=referred_by)
+
+    if is_new and referred_by and referral_enabled() and loyalty_enabled():
+        try:
+            new_balance = add_points(
+                referred_by, LOYALTY_REFERRAL_BONUS_POINTS,
+                reason="مكافأة دعوة صديق",
+            )
+            if new_balance is not None:
+                await context.bot.send_message(
+                    chat_id=referred_by,
+                    text=(
+                        f"🎉 صاحبك دخل البوت من رابط دعوتك!\n"
+                        f"🎁 حصلت على {LOYALTY_REFERRAL_BONUS_POINTS} "
+                        f"نقطة ولاء.\n⭐ رصيدك الحالي: {new_balance} نقطة"
+                    ),
+                )
+        except Exception as e:
+            print("Referral Bonus Failed:", repr(e), flush=True)
     await update.message.reply_text(
         "💎 " + SHOP_NAME + "\n\n"
         "أهلاً بيك في البوت الرسمي لـ" + SHOP_FULL_NAME + " ✨\n\n"
@@ -7621,55 +7805,110 @@ async def text(update, context):
             return
 
         context.user_data.update(
-            state="trade_new_price_input",
-            trade_karat=karat, trade_weight=weight, trade_old_total=old_total,
+            trade_old_karat=karat, trade_old_weight=weight,
+            trade_old_total=old_total,
         )
         await update.message.reply_text(
             f"✅ قيمة قطعتك القديمة تقريبًا: {old_total} جنيه.\n\n"
-            "دلوقتي اكتب سعر القطعة الجديدة اللي عايز تاخدها (زي ما "
-            "قالهولك المحل، شامل المصنعية).\nمثال: 18000"
+            "دلوقتي اختار عيار القطعة الجديدة اللي عايز تاخدها:",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "عيار 24", callback_data="calctradenewk:24"
+                )],
+                [InlineKeyboardButton(
+                    "عيار 21", callback_data="calctradenewk:21"
+                )],
+                [InlineKeyboardButton(
+                    "عيار 18", callback_data="calctradenewk:18"
+                )],
+            ]),
         )
         return
 
-    if s == "trade_new_price_input":
+    if s == "trade_new_weight_input":
         try:
-            new_price = float(t.replace(",", "."))
-            if new_price <= 0:
+            weight = float(t.replace(",", "."))
+            if weight <= 0:
                 raise ValueError
         except Exception:
             await update.message.reply_text(
-                "❌ اكتب سعر صحيح بالجنيه، مثال: 18000"
+                "❌ اكتب وزن صحيح بالجرام، مثال: 5 أو 3.5"
             )
             return
 
-        karat = context.user_data.get("trade_karat")
-        weight = context.user_data.get("trade_weight")
+        karat = context.user_data.get("trade_new_karat")
+        old_karat = context.user_data.get("trade_old_karat")
+        old_weight = context.user_data.get("trade_old_weight")
         old_total = context.user_data.get("trade_old_total")
-        context.user_data.clear()
 
-        if old_total is None:
+        if None in (karat, old_karat, old_weight, old_total):
+            context.user_data.clear()
             await update.message.reply_text("❌ حصل خطأ، ابدأ من الأول.")
             return
 
-        diff = round(new_price - old_total)
-        if diff > 0:
-            diff_line = f"💰 هتدفع فرق: {diff} جنيه"
-        elif diff < 0:
-            diff_line = f"🎉 هياخدلك المحل فرق: {abs(diff)} جنيه"
-        else:
-            diff_line = "✅ مفيش فرق، القيمتين متساويتين!"
+        ok, text, new_total, per_gram = compute_calc_result("buy", karat, weight)
+        if not ok:
+            context.user_data.clear()
+            await update.message.reply_text(text)
+            return
 
-        trade_text = (
-            "🔄 نتيجة الاستبدال\n\n"
-            f"قيمة قطعتك القديمة (عيار {karat}، {weight} جرام): "
-            f"{old_total} جنيه\n"
-            f"سعر القطعة الجديدة: {round(new_price)} جنيه\n\n"
-            + diff_line
+        context.user_data.update(
+            trade_new_karat=karat, trade_new_weight=weight,
+            trade_new_pergram=per_gram, trade_new_goldtotal=new_total,
         )
-        context.user_data["calc_share_text"] = build_share_text(trade_text)
+        context.user_data["state"] = None
+
         await update.message.reply_text(
-            trade_text,
-            reply_markup=calc_result_kb(update.effective_user.id),
+            f"قيمة الذهب في القطعة الجديدة (عيار {karat}، {weight} جرام): "
+            f"{new_total} جنيه.\n\n"
+            "تحب تضيفلك مصنعية القطعة اللي هيقولهالك المحل؟",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "✅ أضف مصنعية", callback_data="calctrademcyes"
+                )],
+                [InlineKeyboardButton(
+                    "❌ من غير مصنعية", callback_data="calctrademcno"
+                )],
+            ]),
+        )
+        return
+
+    if s == "trade_new_mc_amount_input":
+        try:
+            charge = float(t.replace(",", "."))
+            if charge < 0:
+                raise ValueError
+        except Exception:
+            await update.message.reply_text(
+                "❌ اكتب رقم صحيح بالجنيه، مثال: 50 أو 300"
+            )
+            return
+
+        old_karat = context.user_data.get("trade_old_karat")
+        old_weight = context.user_data.get("trade_old_weight")
+        old_total = context.user_data.get("trade_old_total")
+        new_karat = context.user_data.get("trade_new_karat")
+        new_weight = context.user_data.get("trade_new_weight")
+        per_gram = context.user_data.get("trade_new_pergram")
+        gold_total = context.user_data.get("trade_new_goldtotal")
+        mc_type = context.user_data.get("trade_new_mc_type")
+        context.user_data.clear()
+
+        if None in (old_karat, old_weight, old_total, new_karat,
+                    new_weight, per_gram, gold_total, mc_type):
+            await update.message.reply_text("❌ حصل خطأ، ابدأ من الأول.")
+            return
+
+        if mc_type == "piece":
+            new_final = round(gold_total + charge)
+            mc_line = f"مصنعية القطعة كلها: {round(charge)} جنيه\n"
+        else:
+            new_final = round((per_gram + charge) * new_weight)
+            mc_line = f"مصنعية الجرام: {round(charge)} جنيه\n"
+
+        await send_trade_result(
+            update, context, old_karat, old_weight, old_total,
+            new_karat, new_weight, new_final, mc_line,
         )
         return
 
@@ -8940,6 +9179,49 @@ async def buttons(update, context):
         )
         return
 
+    if c == "myinquiries":
+        track_user(update)
+        u = update.effective_user
+        rows = my_inquiries(u.id, limit=10)
+
+        if not rows:
+            await q.edit_message_text(
+                "📋 استفساراتي\n\n"
+                "معندكش استفسارات مسجلة لسه. لو عايز تبعت واحد، "
+                "استخدم زرار \"✍️ ابعت رسالة\".",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(
+                        "⬅️ الرئيسية", callback_data="home"
+                    )],
+                ]),
+            )
+            return
+
+        lines = ["📋 استفساراتي (الأحدث فوق)", ""]
+        for r in rows:
+            ts = r["created_at"]
+            ts_str = ts.strftime("%d/%m %H:%M") if hasattr(ts, "strftime") else str(ts)
+            snippet = (r["message"] or "")[:80]
+            status_label = "✅ اتردّ عليه" if r["status"] == "done" else "⏳ لسه في الانتظار"
+            lines.append(f"🕐 {ts_str}")
+            lines.append(f"💬 {snippet}")
+            lines.append(f"{status_label}")
+            lines.append("")
+
+        text = "\n".join(lines).strip()
+        if len(text) > 3800:
+            text = text[:3800] + "\n\n... (القايمة طويلة، اتقصت)"
+
+        await q.edit_message_text(
+            text,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "⬅️ الرئيسية", callback_data="home"
+                )],
+            ]),
+        )
+        return
+
     # ---- طلب مكالمة ----
 
     if c == "callrequest":
@@ -9310,6 +9592,15 @@ async def buttons(update, context):
     # ---- ادعُ صديق ----
 
     if c == "referral":
+        if not referral_enabled():
+            await q.edit_message_text(
+                "🔗 ميزة الدعوات متوقفة مؤقتًا، جرب تاني بعدين.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("⬅️ الرئيسية", callback_data="home")],
+                ]),
+            )
+            return
+
         track_user(update)
         u = update.effective_user
         link = f"{BOT_LINK}?start=ref_{u.id}"
@@ -9324,6 +9615,8 @@ async def buttons(update, context):
             "ابعت الرابط ده لأصحابك، وكل واحد يدخل من خلاله يتسجل "
             "تلقائي إنه جاله منك:\n\n"
             f"{link}\n\n"
+            f"🎁 كل صديق جديد يدخل من رابطك = {LOYALTY_REFERRAL_BONUS_POINTS} "
+            "نقطة ولاء تتضاف لرصيدك فورًا (لو نظام النقاط شغال).\n\n"
             f"👥 عدد اللي دخلوا من رابطك: {count}",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("⬅️ الرئيسية", callback_data="home")],
@@ -9332,6 +9625,15 @@ async def buttons(update, context):
         return
 
     if c == "loyaltypoints":
+        if not loyalty_enabled():
+            await q.edit_message_text(
+                "🎁 نظام نقاط الولاء متوقف مؤقتًا، جرب تاني بعدين.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("⬅️ الرئيسية", callback_data="home")],
+                ]),
+            )
+            return
+
         track_user(update)
         u = update.effective_user
         balance = get_points_balance(u.id)
@@ -9391,8 +9693,96 @@ async def buttons(update, context):
 
         context.user_data.clear()
         await q.edit_message_text(
-            "👑 لوحة التحكم\n\nاختار العملية:",
+            "👑 لوحة التحكم\n\nاختار القسم:",
             reply_markup=admin_menu(owner=is_owner(update)),
+        )
+        return
+
+    if c == "admincontent":
+        if not is_admin(update):
+            return
+        await q.edit_message_text(
+            "📢 المحتوى والنشر\n\nاختار العملية:",
+            reply_markup=admin_content_menu(),
+        )
+        return
+
+    if c == "admingoldcat":
+        if not is_admin(update):
+            return
+        await q.edit_message_text(
+            "💰 الذهب والأسعار\n\nاختار العملية:",
+            reply_markup=admin_gold_category_menu(),
+        )
+        return
+
+    if c == "adminproductscat":
+        if not is_admin(update):
+            return
+        await q.edit_message_text(
+            "💍 المنتجات\n\nاختار العملية:",
+            reply_markup=admin_products_category_menu(),
+        )
+        return
+
+    if c == "admincustomers":
+        if not is_admin(update):
+            return
+        await q.edit_message_text(
+            "👥 العملاء والتواصل\n\nاختار العملية:",
+            reply_markup=admin_customers_menu(),
+        )
+        return
+
+    if c == "adminreports":
+        if not is_admin(update):
+            return
+        await q.edit_message_text(
+            "📊 التقارير\n\nاختار العملية:",
+            reply_markup=admin_reports_menu(),
+        )
+        return
+
+    if c == "adminfeatures":
+        if not is_admin(update):
+            return
+        await q.edit_message_text(
+            "⚙️ التحكم في الميزات\n\n"
+            "دوس على أي زرار عشان تشغّله أو توقفه فورًا:",
+            reply_markup=admin_features_menu(),
+        )
+        return
+
+    if c.startswith("hubtoggle:"):
+        if not is_admin(update):
+            return
+
+        key = c.split(":")[1]
+        entry = next((f for f in FEATURE_TOGGLES if f[0] == key), None)
+        if not entry:
+            await q.answer("❌ حصل خطأ.", show_alert=True)
+            return
+
+        _, setting_key, default, _, _ = entry
+
+        if key == "refloy":
+            on = referral_enabled() and loyalty_enabled()
+            new_state = "0" if on else "1"
+            set_setting("referral_enabled", new_state)
+            set_setting("loyalty_enabled", new_state)
+        else:
+            on = get_setting(setting_key, default) == "1"
+            set_setting(setting_key, "0" if on else "1")
+
+        log_action(
+            update.effective_user.id, f"ADMIN_TOGGLE_{setting_key.upper()}",
+            new_value="off" if on else "on",
+        )
+
+        await q.edit_message_text(
+            "⚙️ التحكم في الميزات\n\n"
+            "دوس على أي زرار عشان تشغّله أو توقفه فورًا:",
+            reply_markup=admin_features_menu(),
         )
         return
 
@@ -12522,6 +12912,82 @@ async def buttons(update, context):
         )
         return
 
+    if c.startswith("calctradenewk:"):
+        karat = int(c.split(":")[1])
+
+        if "trade_old_total" not in context.user_data:
+            await q.answer("حصل خطأ، ابدأ الاستبدال تاني.", show_alert=True)
+            return
+
+        context.user_data.update(
+            trade_new_karat=karat, state="trade_new_weight_input",
+        )
+        await q.edit_message_text(
+            "⚖️ اكتب وزن القطعة الجديدة بالجرام.\nمثال: 5 أو 3.5"
+        )
+        return
+
+    if c == "calctrademcno":
+        old_karat = context.user_data.get("trade_old_karat")
+        old_weight = context.user_data.get("trade_old_weight")
+        old_total = context.user_data.get("trade_old_total")
+        new_karat = context.user_data.get("trade_new_karat")
+        new_weight = context.user_data.get("trade_new_weight")
+        gold_total = context.user_data.get("trade_new_goldtotal")
+        context.user_data.clear()
+
+        if None in (old_karat, old_weight, old_total, new_karat,
+                    new_weight, gold_total):
+            await q.answer("حصل خطأ، ابدأ الاستبدال تاني.", show_alert=True)
+            return
+
+        await q.edit_message_text("✅ تمام، من غير مصنعية.")
+        await send_trade_result(
+            update, context, old_karat, old_weight, old_total,
+            new_karat, new_weight, gold_total,
+            "⚠️ ده سعر الذهب الصافي، مش شامل المصنعية.\n",
+        )
+        return
+
+    if c == "calctrademcyes":
+        if "trade_new_goldtotal" not in context.user_data:
+            await q.answer("حصل خطأ، ابدأ الاستبدال تاني.", show_alert=True)
+            return
+
+        await q.edit_message_text(
+            "المصنعية اللي هيقولهالك المحل، على القطعة كلها ولا "
+            "على الجرام؟",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "🧾 على القطعة كلها", callback_data="calctrademctype:piece"
+                )],
+                [InlineKeyboardButton(
+                    "⚖️ على الجرام", callback_data="calctrademctype:gram"
+                )],
+            ]),
+        )
+        return
+
+    if c.startswith("calctrademctype:"):
+        mc_type = c.split(":")[1]
+
+        if "trade_new_goldtotal" not in context.user_data:
+            await q.answer("حصل خطأ، ابدأ الاستبدال تاني.", show_alert=True)
+            return
+
+        context.user_data["trade_new_mc_type"] = mc_type
+        context.user_data["state"] = "trade_new_mc_amount_input"
+
+        await q.edit_message_text(
+            "💰 اكتب قيمة المصنعية بالجنيه اللي قالهالك المحل.\n\n"
+            + (
+                "مثال: 300 (على القطعة كلها)"
+                if mc_type == "piece" else
+                "مثال: 50 (للجرام)"
+            )
+        )
+        return
+
     # ---- بكام أقدر أشتري؟ (حاسبة الميزانية) ----
 
     if c == "calcbudget":
@@ -13353,6 +13819,29 @@ async def buttons(update, context):
             "💬 رد على عميل بالآيدي\n\n"
             "اكتب آيدي التليجرام بتاع العميل (هتلاقيه في أي رسالة "
             "وصلتك منه، رقم زي 7087485592).",
+        )
+        return
+
+    if c == "togglereferralloyalty":
+        if not is_admin(update):
+            return
+
+        on = referral_enabled() and loyalty_enabled()
+        new_state = "0" if on else "1"
+        set_setting("referral_enabled", new_state)
+        set_setting("loyalty_enabled", new_state)
+        log_action(
+            update.effective_user.id, "ADMIN_TOGGLE_REFERRAL_LOYALTY",
+            new_value="off" if on else "on",
+        )
+
+        await q.edit_message_text(
+            "✅ اتوقفت الدعوات ونقاط الولاء — زرار \"ادعُ صديق\" "
+            "وزرار \"نقاط الولاء\" هيختفوا من قائمة العملاء."
+            if on else
+            "✅ اتفعّلت الدعوات ونقاط الولاء تاني — رجعوا يظهروا "
+            "للعملاء زي ما هما.",
+            reply_markup=admin_menu(owner=is_owner(update)),
         )
         return
 
