@@ -1775,6 +1775,10 @@ def isagha_autopublish_after2_on():
     return get_setting("isagha_autopublish_after2", "0") == "1"
 
 
+def gold_broadcast_to_all_on():
+    return get_setting("gold_broadcast_to_all", "0") == "1"
+
+
 def try_claim_daily_task(key, value):
     """Atomically claims a one-per-day (or one-per-period) scheduled
     task stored as a Settings flag. Only the first caller to write a
@@ -3905,6 +3909,7 @@ def status_pick_kb(pid):
 
 def gold_menu():
     wa_on = whatsapp_notifications_enabled()
+    broadcast_all = gold_broadcast_to_all_on()
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("✏️ تحديث السعر", callback_data="updategold")],
         [InlineKeyboardButton("📊 أسعار اليوم", callback_data="goldtoday")],
@@ -3914,6 +3919,12 @@ def gold_menu():
         )],
         [InlineKeyboardButton("🔔 تنبيهات السعر", callback_data="alertmenu")],
         [InlineKeyboardButton("📢 نشر السعر", callback_data="publish")],
+        [InlineKeyboardButton(
+            "🔴 إيقاف تذكير السعر 4 مرات يوميًا (لغير المشتركين)"
+            if broadcast_all else
+            "🟢 تفعيل تذكير السعر 4 مرات يوميًا (لغير المشتركين)",
+            callback_data="togglebroadcastall",
+        )],
         [InlineKeyboardButton(
             "🧪 اختبار إشعار واتساب", callback_data="testwa"
         )],
@@ -4545,14 +4556,16 @@ def delete_gold_broadcast_messages(price_id):
 async def broadcast_gold_update(context, new_price, price_id=None):
     """
     Sends the new gold price to every customer subscribed to
-    notifications (🔔 تفعيل الإشعارات on the main menu). Best-effort
-    per user — a blocked bot or deactivated account for one
-    subscriber never stops the broadcast to the rest. A small delay
-    between sends avoids hitting Telegram's flood limits on large
-    lists. When price_id is given (the GoldPriceHistory row this
-    broadcast is for), every sent message's ID is logged so it can
-    later be deleted from customers' chats if the price gets
-    corrected/removed (see "🗑 حذف سعر غلط").
+    notifications (🔔 تفعيل الإشعارات). Non-subscribers don't get
+    every single update — they instead get a limited 4x/day summary,
+    see broadcast_gold_price_to_non_subscribers(). Best-effort per
+    user — a blocked bot or deactivated account for one subscriber
+    never stops the broadcast to the rest. A small delay between
+    sends avoids hitting Telegram's flood limits on large lists.
+    When price_id is given (the GoldPriceHistory row this broadcast
+    is for), every sent message's ID is logged so it can later be
+    deleted from customers' chats if the price gets corrected/removed
+    (see "🗑 حذف سعر غلط").
     """
     ids = gold_subscriber_ids()
     if not ids:
@@ -4576,6 +4589,75 @@ async def broadcast_gold_update(context, new_price, price_id=None):
         ADMIN_ID, "GOLD_PRICE_BROADCAST",
         new_value=f"sent={sent} failed={failed}",
     )
+
+
+async def broadcast_gold_price_to_non_subscribers(context):
+    """
+    Sends the CURRENT gold price to every user who has NOT enabled
+    notifications — subscribers already get every single update via
+    broadcast_gold_update, so they're excluded here to avoid
+    double-sending. Called 4x/day by non_subscriber_broadcast_tick.
+    Controlled by the admin toggle "🟢/🔴 تذكير السعر 4 مرات يوميًا"
+    in the gold menu — if it's off, this does nothing.
+    """
+    if not gold_broadcast_to_all_on():
+        return
+
+    base = latest()
+    if base is None:
+        return
+
+    subscribers = set(gold_subscriber_ids())
+    non_subscribers = [uid for uid in all_user_ids() if uid not in subscribers]
+    if not non_subscribers:
+        return
+
+    txt = (
+        "💎 تحديث سعر الذهب\n\n" + price_text(base) +
+        "\n\n🔔 فعّل الإشعارات عشان يوصلك السعر أول بأول."
+    )
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔔 فعّل الإشعارات", callback_data="notifsub")],
+    ])
+
+    sent, failed = 0, 0
+    for uid in non_subscribers:
+        try:
+            await context.bot.send_message(chat_id=uid, text=txt, reply_markup=kb)
+            sent += 1
+        except Exception as e:
+            failed += 1
+            print(
+                f"Gold Non-Subscriber Broadcast Failed for {uid}:",
+                repr(e), flush=True,
+            )
+        await asyncio.sleep(0.05)
+
+    log_action(
+        ADMIN_ID, "GOLD_PRICE_BROADCAST_NON_SUBSCRIBERS",
+        new_value=f"sent={sent} failed={failed}",
+    )
+
+
+NON_SUBSCRIBER_BROADCAST_HOURS = (12, 15, 18, 21)
+
+
+async def non_subscriber_broadcast_tick(context):
+    """Runs every minute via JobQueue, but only actually broadcasts
+    at the top of the hour during NON_SUBSCRIBER_BROADCAST_HOURS
+    (12pm, 3pm, 6pm, 9pm) — 4 times a day total."""
+    try:
+        now = datetime.now(TZ)
+        if now.minute != 0 or now.hour not in NON_SUBSCRIBER_BROADCAST_HOURS:
+            return
+
+        slot_key = now.strftime("%Y-%m-%d-%H")
+        if not try_claim_daily_task("last_non_sub_broadcast_slot", slot_key):
+            return
+
+        await broadcast_gold_price_to_non_subscribers(context)
+    except Exception as e:
+        print("Non-Subscriber Broadcast Tick Error:", repr(e), flush=True)
 
 
 async def broadcast_new_product(context, photo_id, name, code, price, desc):
@@ -9810,6 +9892,28 @@ async def buttons(update, context):
         )
         return
 
+    if c == "togglebroadcastall":
+        if not is_admin(update):
+            return
+
+        on = gold_broadcast_to_all_on()
+        set_setting("gold_broadcast_to_all", "0" if on else "1")
+        log_action(
+            update.effective_user.id, "ADMIN_TOGGLE_GOLD_BROADCAST_ALL",
+            new_value="off" if on else "on",
+        )
+
+        await q.edit_message_text(
+            "✅ اتفعّل. غير المشتركين هياخدوا رسالة بسعر الذهب 4 مرات "
+            "في اليوم (12 - 3 - 6 - 9 مساءً)، مع تذكير إنهم يفعّلوا "
+            "الإشعارات عشان ياخدوا كل تحديث أول بأول."
+            if not on else
+            "✅ اتوقف. غير المشتركين مش هياخدوا أي تحديثات سعر تلقائية "
+            "تاني.",
+            reply_markup=gold_menu(),
+        )
+        return
+
     if c == "walistnumbers":
         if not is_admin(update):
             return
@@ -13758,6 +13862,10 @@ def main():
         app.job_queue.run_repeating(
             isagha_autopublish_tick, interval=60, first=55,
             name="isagha_autopublish_tick",
+        )
+        app.job_queue.run_repeating(
+            non_subscriber_broadcast_tick, interval=60, first=58,
+            name="non_subscriber_broadcast_tick",
         )
         print("Auto-posting scheduler started (checks every 60s).", flush=True)
     else:
