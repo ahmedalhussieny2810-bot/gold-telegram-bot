@@ -4651,25 +4651,25 @@ async def isagha_suggestion_tick(context):
 
 
 async def isagha_autopublish_tick(context):
-    """Runs every minute via JobQueue but only acts on the hour and
-    half-hour. Two independently-toggleable windows:
+    """Runs every minute via JobQueue, checking the iSagha price every
+    5 minutes (not every 30) during the same two windows as before:
       - 11:00-14:00 (inclusive), controlled by "🔁 نشر تلقائي بالكامل"
-      - 14:30-23:00, controlled by "🔁 نشر تلقائي بعد الـ2" (a
-        separate toggle, so the admin can extend auto-publish into
-        the afternoon/evening without it running all day by default)
-    Unlike isagha_suggestion_tick, this one publishes the scraped
-    iSagha 21k price immediately — no admin confirmation."""
+      - 14:05-23:00, controlled by "🔁 نشر تلقائي بعد الـ2"
+    Unlike the old fixed-schedule version, this only actually updates
+    the price and broadcasts a notification when the fetched price
+    is DIFFERENT from the currently saved one — if the market price
+    hasn't moved, nothing happens and no notification goes out."""
     try:
         if not ADMIN_ID:
             return
 
         now = datetime.now(TZ)
-        if now.minute not in (0, 30):
+        if now.minute % 5 != 0:
             return
 
-        hour = now.hour
-        in_window1 = (11 <= hour <= 14) and not (hour == 14 and now.minute != 0)
-        in_window2 = (14 <= hour <= 23) and not (hour == 14 and now.minute == 0)
+        now_minutes = now.hour * 60 + now.minute
+        in_window1 = (11 * 60) <= now_minutes <= (14 * 60)
+        in_window2 = (14 * 60 + 5) <= now_minutes <= (23 * 60)
 
         if in_window1 and isagha_autopublish_on():
             pass
@@ -4688,6 +4688,11 @@ async def isagha_autopublish_tick(context):
             return
 
         prev_p = latest()
+        if prev_p is not None and round(suggested) == round(prev_p):
+            # Price hasn't actually changed — don't touch anything,
+            # don't send any notification.
+            return
+
         new_price_id = save_latest(suggested, admin_id=ADMIN_ID)
         log_action(
             ADMIN_ID, "AUTO_ISAGHA_PUBLISH",
@@ -12577,14 +12582,16 @@ async def buttons(update, context):
 
         auto_on = isagha_autopublish_on()
         auto_status_line = (
-            "🟢 مفعّل — هينشر لوحده كل نص ساعة من 11 ص لـ 2 م."
+            "🟢 مفعّل — بيتابع السعر كل 5 دقايق من 11 ص لـ 2 م، "
+            "وينشر بس لو السعر اتغيّر فعلاً."
             if auto_on else
             "🔴 متوقف دلوقتي."
         )
 
         auto2_on = isagha_autopublish_after2_on()
         auto2_status_line = (
-            "🟢 مفعّل — هينشر لوحده كل نص ساعة من بعد 2 م لحد 11 م."
+            "🟢 مفعّل — بيتابع السعر كل 5 دقايق من بعد 2 م لحد 11 م، "
+            "وينشر بس لو السعر اتغيّر فعلاً."
             if auto2_on else
             "🔴 متوقف دلوقتي."
         )
@@ -12597,12 +12604,12 @@ async def buttons(update, context):
             "تعدّله، أو تتجاهله.\n\n"
             "🔁 نشر تلقائي بالكامل (11 ص - 2 م)\n\n"
             f"{auto_status_line}\n\n"
-            "لو مفعّل، البوت هياخد السعر من iSagha وينشره على طول "
-            "من غير ما يستنى تأكيدك — كل نص ساعة في نطاق الوقت ده "
-            "بس.\n\n"
+            "لو مفعّل، البوت بيتابع سعر iSagha كل 5 دقايق في نطاق "
+            "الوقت ده، ولو لقاه اتغيّر بيحدّثه وينشره وينبّه المشتركين "
+            "على طول — لو السعر ثابت، مفيش أي تحديث أو إشعار.\n\n"
             "🔁 نشر تلقائي بعد الـ2 (2:30 م - 11 م)\n\n"
             f"{auto2_status_line}\n\n"
-            "تحكم منفصل — تقدر تفعّله لوحده عشان النشر يكمل تلقائي "
+            "تحكم منفصل — تقدر تفعّله لوحده عشان المتابعة تكمل "
             "بعد الـ2 من غير ما يأثر على فترة 11-2.\n\n"
             "⚠️ مصدر مش رسمي (موقع خارجي)، ممكن يفشل يجيب السعر "
             "أحيانًا أو يختلف عن مصادر تانية — استخدمه كمرجع سريع "
@@ -12702,7 +12709,8 @@ async def buttons(update, context):
         )
 
         await q.edit_message_text(
-            "✅ اتفعّل النشر التلقائي (11 ص - 2 م، كل نص ساعة)."
+            "✅ اتفعّل. البوت هيتابع سعر iSagha كل 5 دقايق (11 ص - "
+            "2 م)، وهينشر بس لو السعر اتغيّر فعلاً."
             if not on else
             "✅ اتوقف النشر التلقائي.",
             reply_markup=InlineKeyboardMarkup([
@@ -12723,7 +12731,8 @@ async def buttons(update, context):
         )
 
         await q.edit_message_text(
-            "✅ اتفعّل النشر التلقائي بعد الـ2 (2:30 م - 11 م، كل نص ساعة)."
+            "✅ اتفعّل. البوت هيتابع سعر iSagha كل 5 دقايق (2:30 م - "
+            "11 م)، وهينشر بس لو السعر اتغيّر فعلاً."
             if not on else
             "✅ اتوقف النشر التلقائي بعد الـ2.",
             reply_markup=InlineKeyboardMarkup([
