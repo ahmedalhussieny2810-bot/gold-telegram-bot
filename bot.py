@@ -1160,7 +1160,9 @@ def search_products(query, limit=200):
 def customer_products(cid):
     """Products visible to customers (hidden ones excluded)."""
     return many("""
-        SELECT id,Photo_id,name,code,price,description,status
+        SELECT id,Photo_id,name,code,price,description,status,
+               is_dynamic_price,karat,weight_grams,making_charge_type,
+               making_charge
         FROM Products
         WHERE category_id=%s AND status<>'hidden'
         ORDER BY id DESC
@@ -3830,20 +3832,20 @@ def scheduler_menu():
         onoff = "🟢" if sp["enabled"] else "⏸"
         k.append([InlineKeyboardButton(
             f"{onoff} {sp['time_str']} ({sp['platforms']})",
-            callback_data=f"schedopen:{sp['id']}"
+            callback_data=f"postschedopen:{sp['id']}"
         )])
 
-    k.append([InlineKeyboardButton("➕ إضافة موعد", callback_data="schedadd")])
+    k.append([InlineKeyboardButton("➕ إضافة موعد", callback_data="postschedadd")])
     k.append([InlineKeyboardButton("👑 لوحة التحكم", callback_data="admin")])
     return InlineKeyboardMarkup(k)
 
 
 def scheduler_item_menu(sid):
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("⏯ تشغيل/إيقاف", callback_data=f"schedtoggle:{sid}")],
+        [InlineKeyboardButton("⏯ تشغيل/إيقاف", callback_data=f"postschedtoggle:{sid}")],
         [InlineKeyboardButton("📢 المنصات", callback_data=f"schedplat:{sid}")],
         [InlineKeyboardButton("🎨 القالب", callback_data=f"schedtpl:{sid}")],
-        [InlineKeyboardButton("🗑 حذف الموعد", callback_data=f"scheddel:{sid}")],
+        [InlineKeyboardButton("🗑 حذف الموعد", callback_data=f"postscheddel:{sid}")],
         [InlineKeyboardButton("⬅️ رجوع", callback_data="schedmenu")],
     ])
 
@@ -3860,7 +3862,7 @@ def scheduler_platform_menu(sid, current_platforms):
         [InlineKeyboardButton(
             f"{fb_mark} فيسبوك", callback_data=f"schedplatt:{sid}:fb"
         )],
-        [InlineKeyboardButton("⬅️ رجوع", callback_data=f"schedopen:{sid}")],
+        [InlineKeyboardButton("⬅️ رجوع", callback_data=f"postschedopen:{sid}")],
     ])
 
 
@@ -3869,7 +3871,7 @@ def scheduler_template_menu(sid):
         [InlineKeyboardButton(t["name"], callback_data=f"schedtplset:{sid}:{key}")]
         for key, t in TEMPLATES.items()
     ]
-    k.append([InlineKeyboardButton("⬅️ رجوع", callback_data=f"schedopen:{sid}")])
+    k.append([InlineKeyboardButton("⬅️ رجوع", callback_data=f"postschedopen:{sid}")])
     return InlineKeyboardMarkup(k)
 
 
@@ -7948,7 +7950,7 @@ async def text(update, context):
         )
         return
 
-    if s == "budget_amount_input":
+    if s == "calc_budget_amount_input":
         try:
             budget = float(t.replace(",", "."))
             if budget <= 0:
@@ -10956,7 +10958,7 @@ async def buttons(update, context):
         await q.edit_message_text(txt, reply_markup=scheduler_menu())
         return
 
-    if c == "schedadd":
+    if c == "postschedadd":
         if not is_admin(update):
             return
 
@@ -10969,7 +10971,7 @@ async def buttons(update, context):
         )
         return
 
-    if c.startswith("schedopen:"):
+    if c.startswith("postschedopen:"):
         if not is_admin(update):
             return
 
@@ -10999,7 +11001,7 @@ async def buttons(update, context):
         )
         return
 
-    if c.startswith("schedtoggle:"):
+    if c.startswith("postschedtoggle:"):
         if not is_admin(update):
             return
 
@@ -11017,7 +11019,7 @@ async def buttons(update, context):
         )
         return
 
-    if c.startswith("scheddel:"):
+    if c.startswith("postscheddel:"):
         if not is_admin(update):
             return
 
@@ -13055,7 +13057,7 @@ async def buttons(update, context):
         karat = int(c.split(":")[1])
         context.user_data.clear()
         context.user_data.update(
-            state="budget_amount_input", budget_karat=karat,
+            state="calc_budget_amount_input", budget_karat=karat,
         )
         await q.edit_message_text(
             "💰 اكتب الميزانية اللي معاك بالجنيه.\nمثال: 5000"
