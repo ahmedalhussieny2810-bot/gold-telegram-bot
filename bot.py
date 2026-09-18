@@ -2961,10 +2961,14 @@ def compute_calc_result(mode, karat, weight):
             "السعر تقريبي وممكن يختلف بعد فحص القطعة في المحل."
         )
     elif mode == "sell_bullion":
-        per_gram = base
+        per_gram = base - 40
         price_label = "سعر شراء الجرام"
         total_label = "الإجمالي"
-        note = "⚠️ سعر السبيكة صافي، بدون أي خصم."
+        note = (
+            "⚠️ خصم 40 جنيه/جرام عن سعر الشراء.\n"
+            "🎁 سبايك BTC و MB و SAM بتضيف كاش باك إضافي من الشركة "
+            "نفسها في حالة البيع."
+        )
     else:  # "buy"
         per_gram = base
         price_label = "سعر الجرام"
@@ -4658,7 +4662,10 @@ async def isagha_autopublish_tick(context):
     Unlike the old fixed-schedule version, this only actually updates
     the price and broadcasts a notification when the fetched price
     is DIFFERENT from the currently saved one — if the market price
-    hasn't moved, nothing happens and no notification goes out."""
+    hasn't moved, nothing happens and no notification goes out.
+    Exception: the 11:00 slot always publishes and notifies since
+    it's the first price update of the day, even if unchanged from
+    the previous day's closing price."""
     try:
         if not ADMIN_ID:
             return
@@ -4688,9 +4695,17 @@ async def isagha_autopublish_tick(context):
             return
 
         prev_p = latest()
-        if prev_p is not None and round(suggested) == round(prev_p):
+        is_first_daily_slot = (now.hour == 11 and now.minute == 0)
+
+        if (
+            not is_first_daily_slot
+            and prev_p is not None
+            and round(suggested) == round(prev_p)
+        ):
             # Price hasn't actually changed — don't touch anything,
-            # don't send any notification.
+            # don't send any notification. Exception: the 11:00 slot
+            # always publishes/notifies since it's the first update
+            # of the day, even if the price is the same as yesterday.
             return
 
         new_price_id = save_latest(suggested, admin_id=ADMIN_ID)
