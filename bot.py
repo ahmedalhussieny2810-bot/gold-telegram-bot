@@ -247,6 +247,8 @@ def init_db():
                 "ON UPDATE CURRENT_TIMESTAMP",
                 "ALTER TABLE Users ADD COLUMN loyalty_points "
                 "INT NOT NULL DEFAULT 0",
+                "ALTER TABLE Users ADD COLUMN source "
+                "VARCHAR(50) NULL",
             ):
                 _safe_alter(x, q)
 
@@ -269,6 +271,16 @@ def init_db():
                     rating TINYINT UNSIGNED NULL,
                     created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
                     rated_at TIMESTAMP NULL,
+                    INDEX(telegram_id, created_at)
+                )
+            """)
+
+            x.execute("""
+                CREATE TABLE IF NOT EXISTS BotRatings(
+                    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                    telegram_id BIGINT NOT NULL,
+                    rating TINYINT UNSIGNED NOT NULL,
+                    created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
                     INDEX(telegram_id, created_at)
                 )
             """)
@@ -1173,7 +1185,7 @@ def customer_products(cid):
 # USERS
 # =========================================================
 
-def track_user(update, referred_by=None):
+def track_user(update, referred_by=None, source=None):
     u = update.effective_user
     if not u:
         return False
@@ -1197,11 +1209,11 @@ def track_user(update, referred_by=None):
                     x.execute("""
                         INSERT INTO Users
                         (telegram_id,first_name,last_name,username,
-                         total_interactions,referred_by)
-                        VALUES(%s,%s,%s,%s,1,%s)
+                         total_interactions,referred_by,source)
+                        VALUES(%s,%s,%s,%s,1,%s,%s)
                     """, (
                         u.id, u.first_name, u.last_name, u.username,
-                        referred_by,
+                        referred_by, source,
                     ))
                     is_new = True
         finally:
@@ -1373,6 +1385,35 @@ def purchase_rating_stats():
     if not row or not row.get("n"):
         return None
     return {"count": row["n"], "avg": float(row["avg_r"])}
+
+
+def add_bot_rating(telegram_id, rating):
+    c = db()
+    try:
+        with c.cursor() as x:
+            x.execute(
+                "INSERT INTO BotRatings (telegram_id, rating) VALUES(%s,%s)",
+                (telegram_id, rating),
+            )
+    finally:
+        c.close()
+
+
+def bot_rating_stats():
+    row = one(
+        "SELECT COUNT(*) AS n, AVG(rating) AS avg_r FROM BotRatings"
+    )
+    if not row or not row.get("n"):
+        return None
+    return {"count": row["n"], "avg": float(row["avg_r"])}
+
+
+def has_rated_bot(telegram_id):
+    row = one(
+        "SELECT id FROM BotRatings WHERE telegram_id=%s LIMIT 1",
+        (telegram_id,),
+    )
+    return bool(row)
 
 
 def log_conversation(telegram_id, sender, message):
@@ -2872,6 +2913,21 @@ def user_totals():
     return row or {}
 
 
+def user_sources_breakdown(limit=20):
+    """Counts how many users came in through each /start deep-link
+    source tag (e.g. ?start=facebook), for the admin's "مصادر
+    العملاء" screen. Users with no source at all (opened the bot
+    directly, no link) show up under NULL and are labelled
+    "مباشر" in the display layer."""
+    return many("""
+        SELECT source, COUNT(*) AS cnt
+        FROM Users
+        GROUP BY source
+        ORDER BY cnt DESC
+        LIMIT %s
+    """, (limit,))
+
+
 def all_users_paginated(page, page_size=20):
     total_row = one("SELECT COUNT(*) c FROM Users")
     total = (total_row or {}).get("c", 0)
@@ -3418,7 +3474,7 @@ async def send_karat_conversion_result(
         await update.message.reply_text(text, reply_markup=kb)
 
 
-def home(admin=False, subscribed=False):
+def home(admin=False, subscribed=False, telegram_id=None):
     k = [
         [InlineKeyboardButton(
             "🟢 الإشعارات شغالة (دوس للإيقاف)"
@@ -3440,6 +3496,12 @@ def home(admin=False, subscribed=False):
     k.append([InlineKeyboardButton(
         "📇 بيانات المحل", callback_data="shopinfo"
     )])
+
+    if telegram_id is None or not has_rated_bot(telegram_id):
+        k.append([InlineKeyboardButton(
+            "⭐ قيّم تجربتك مع البوت", callback_data="ratebot"
+        )])
+
     return InlineKeyboardMarkup(k)
 
 
@@ -3624,6 +3686,9 @@ def admin_customers_menu():
 def admin_reports_menu():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📊 الإحصائيات", callback_data="stats")],
+        [InlineKeyboardButton(
+            "📍 مصادر العملاء", callback_data="usersources"
+        )],
         [InlineKeyboardButton(
             "❌ عمليات فشلت اليوم", callback_data="failedops"
         )],
@@ -5414,6 +5479,7 @@ async def start(update, context):
     context.user_data.clear()
 
     referred_by = None
+    source = None
     if context.args:
         arg = context.args[0]
         if arg.startswith("ref_"):
@@ -5423,8 +5489,14 @@ async def start(update, context):
                     referred_by = candidate
             except ValueError:
                 pass
+        else:
+            # Any other /start payload is treated as a source tag —
+            # e.g. ?start=facebook, ?start=qr_shop — so the admin can
+            # make separate links per platform/flyer/QR code and see
+            # where new users actually came from.
+            source = arg[:50]
 
-    is_new = track_user(update, referred_by=referred_by)
+    is_new = track_user(update, referred_by=referred_by, source=source)
 
     if is_new and referred_by and referral_enabled() and loyalty_enabled():
         try:
@@ -5460,7 +5532,7 @@ async def start(update, context):
         "🔔 فعّل الإشعارات تحت عشان يوصلك سعر الذهب والمنتجات "
         "الجديدة على طول من غير ما تفتح البوت كل شوية.\n\n"
         "اختار من القائمة 👇",
-        reply_markup=home(is_admin(update), is_gold_subscribed(update.effective_user.id)),
+        reply_markup=home(is_admin(update), is_gold_subscribed(update.effective_user.id), update.effective_user.id),
     )
 
 
@@ -8575,6 +8647,29 @@ async def text(update, context):
         )
         return
 
+    if s == "source_link_name_input":
+        if not is_admin(update):
+            context.user_data.clear()
+            await update.message.reply_text("❌ غير مسموح.")
+            return
+
+        name = re.sub(r"[^a-zA-Z0-9_]", "", t.strip())[:50]
+        context.user_data.clear()
+
+        if not name:
+            await update.message.reply_text(
+                "❌ اكتب اسم صحيح بالإنجليزي (حروف وأرقام و_ بس)."
+            )
+            return
+
+        link = f"{BOT_LINK}?start={name}"
+        await update.message.reply_text(
+            f"✅ الرابط بتاع مصدر \"{name}\":\n\n{link}\n\n"
+            "أي حد يدخل من الرابط ده هيتسجل تلقائي إنه جاله من "
+            f"\"{name}\"، وتقدر تشوف العدد من \"📍 مصادر العملاء\"."
+        )
+        return
+
     if s == "loyalty_id_input":
         if not is_admin(update):
             context.user_data.clear()
@@ -8805,7 +8900,7 @@ async def text(update, context):
                 await update.message.reply_text(
                     soon_text
                     + "\n\n💎 " + SHOP_NAME + "\n\nاختار من القائمة 👇",
-                    reply_markup=home(is_admin(update), True),
+                    reply_markup=home(is_admin(update), True, update.effective_user.id),
                 )
                 return
 
@@ -8828,7 +8923,7 @@ async def text(update, context):
                 "✅ تم تفعيل الإشعارات على تليجرام وواتساب."
                 + wa_note
                 + "\n\n💎 " + SHOP_NAME + "\n\nاختار من القائمة 👇",
-                reply_markup=home(is_admin(update), True),
+                reply_markup=home(is_admin(update), True, update.effective_user.id),
             )
             return
 
@@ -9041,7 +9136,7 @@ async def text(update, context):
 
     await update.message.reply_text(
         "❌ مش فاهم طلبك.\nاستخدم /start لفتح القائمة.",
-        reply_markup=home(is_admin(update), is_gold_subscribed(update.effective_user.id)),
+        reply_markup=home(is_admin(update), is_gold_subscribed(update.effective_user.id), update.effective_user.id),
     )
 
 
@@ -9067,7 +9162,7 @@ async def buttons(update, context):
         context.user_data.clear()
         await q.edit_message_text(
             "💎 " + SHOP_NAME + "\n\nاختار من القائمة 👇",
-            reply_markup=home(is_admin(update), is_gold_subscribed(update.effective_user.id)),
+            reply_markup=home(is_admin(update), is_gold_subscribed(update.effective_user.id), update.effective_user.id),
         )
         return
 
@@ -9474,6 +9569,31 @@ async def buttons(update, context):
         )
         return
 
+    if c == "ratebot":
+        track_user(update)
+        await q.edit_message_text(
+            "⭐ قيّم تجربتك مع البوت من 1 لـ 5:",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton(
+                    "⭐" * n, callback_data=f"ratebot:{n}"
+                ) for n in range(1, 6)
+            ]]),
+        )
+        return
+
+    if c.startswith("ratebot:"):
+        track_user(update)
+        rating = int(c.split(":")[1])
+        add_bot_rating(update.effective_user.id, rating)
+
+        await q.edit_message_text(
+            "🙏 شكرًا لتقييمك! " + ("⭐" * rating),
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ الرئيسية", callback_data="home")],
+            ]),
+        )
+        return
+
     # ---- هدف توفير للذهب ----
 
     if c == "savegoal":
@@ -9778,6 +9898,51 @@ async def buttons(update, context):
         await q.edit_message_text(
             "📊 التقارير\n\nاختار العملية:",
             reply_markup=admin_reports_menu(),
+        )
+        return
+
+    if c == "usersources":
+        if not is_admin(update):
+            return
+
+        rows = user_sources_breakdown()
+        total_row = one("SELECT COUNT(*) AS c FROM Users")
+        total = (total_row or {}).get("c", 0)
+
+        lines = ["📍 مصادر العملاء", "", f"👥 إجمالي المستخدمين: {total}", ""]
+        if not rows:
+            lines.append("لا يوجد مستخدمين مسجلين بعد.")
+        else:
+            for r in rows:
+                label = r["source"] or "مباشر (بدون رابط مصدر)"
+                lines.append(f"• {label}: {r['cnt']}")
+
+        lines.append("")
+        lines.append(
+            "💡 اعمل رابط مصدر جديد (لإنستجرام، فيسبوك، QR في المحل، "
+            "إلخ) من الزرار تحت، وتابع منه مين بيدخل من فين."
+        )
+
+        await q.edit_message_text(
+            "\n".join(lines),
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "🔗 اعمل رابط مصدر جديد", callback_data="makesourcelink"
+                )],
+                [InlineKeyboardButton("⬅️ رجوع", callback_data="adminreports")],
+            ]),
+        )
+        return
+
+    if c == "makesourcelink":
+        if not is_admin(update):
+            return
+
+        context.user_data.clear()
+        context.user_data["state"] = "source_link_name_input"
+        await q.edit_message_text(
+            "🔗 اكتب اسم قصير للمصدر (بالإنجليزي وبدون مسافات)، مثلاً:\n"
+            "facebook أو instagram أو qr_shop"
         )
         return
 
@@ -11232,6 +11397,12 @@ async def buttons(update, context):
             f"({rating_stats['count']} تقييم)\n\n"
             if rating_stats else ""
         )
+        bot_rating_stats_row = bot_rating_stats()
+        bot_rating_line = (
+            f"⭐ متوسط تقييم تجربة البوت: {bot_rating_stats_row['avg']:.1f}/5 "
+            f"({bot_rating_stats_row['count']} تقييم)\n\n"
+            if bot_rating_stats_row else ""
+        )
 
         txt = (
             "📊 الإحصائيات العامة\n\n"
@@ -11241,6 +11412,7 @@ async def buttons(update, context):
             f"📱 مشتركين في تحديث السعر (واتساب): {whatsapp_subscriber_count()}\n"
             f"📩 إجمالي الاستعلامات: {ut.get('inquiries') or 0}\n\n"
             f"{rating_line}"
+            f"{bot_rating_line}"
             f"💍 إجمالي المنتجات: {pt.get('total') or 0}\n"
             f"🟢 متاحة: {pt.get('available') or 0}\n"
             f"🟡 محجوزة: {pt.get('reserved') or 0}\n"
@@ -13791,7 +13963,7 @@ async def buttons(update, context):
                 "✅ تم تفعيل الإشعارات، هيوصلك تلقائي أي منتج جديد "
                 "أو تغيير في سعر الذهب على تليجرام وواتساب.\n\n"
                 "اختار من القائمة 👇",
-                reply_markup=home(is_admin(update), True),
+                reply_markup=home(is_admin(update), True, update.effective_user.id),
             )
             return
 
@@ -13829,7 +14001,7 @@ async def buttons(update, context):
             "💎 " + SHOP_NAME + "\n\n"
             "🔕 تم إيقاف الإشعارات (تليجرام وواتساب).\n\n"
             "اختار من القائمة 👇",
-            reply_markup=home(is_admin(update), False),
+            reply_markup=home(is_admin(update), False, update.effective_user.id),
         )
         return
 
@@ -14141,7 +14313,7 @@ async def buttons(update, context):
         if not txt or p is None:
             await q.edit_message_text(
                 "❌ السعر انتهى.",
-                reply_markup=home(True, is_gold_subscribed(update.effective_user.id)),
+                reply_markup=home(True, is_gold_subscribed(update.effective_user.id), update.effective_user.id),
             )
             return
 
@@ -14200,7 +14372,7 @@ async def buttons(update, context):
                     "❌ فشل النشر على Facebook."
                 ) if fb_result
                 else "❌ لم يتم تنفيذ النشر على Facebook.",
-                reply_markup=home(True, is_gold_subscribed(update.effective_user.id)),
+                reply_markup=home(True, is_gold_subscribed(update.effective_user.id), update.effective_user.id),
             )
             return
 
