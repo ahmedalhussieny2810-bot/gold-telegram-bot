@@ -7167,6 +7167,14 @@ async def _finalize_new_post_album(context):
 
 
 async def photo(update, context):
+    if not update.message:
+        # Photos/messages posted directly in the channel (or any other
+        # chat the bot happens to be in) arrive as channel_post, not
+        # message — there's no admin/customer to reply to here, so
+        # just ignore it instead of crashing on update.message being
+        # None.
+        return
+
     if not is_admin(update):
         await update.message.reply_text("❌ غير مسموح.")
         return
@@ -14623,7 +14631,14 @@ async def error(update, context):
 
     # Best-effort friendly message to whoever triggered the error.
     try:
-        if isinstance(update, Update) and update.effective_chat:
+        if (
+            isinstance(update, Update) and update.effective_chat
+            and update.effective_chat.type in ("private", "group", "supergroup")
+        ):
+            # Never post error messages into channels — a crash while
+            # processing a channel_post (someone posting directly in
+            # the channel) should stay silent there, not show up as a
+            # confusing reply under the post.
             is_the_admin = (
                 update.effective_user
                 and update.effective_user.id == ADMIN_ID
