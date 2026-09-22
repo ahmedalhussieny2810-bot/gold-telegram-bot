@@ -653,6 +653,30 @@ def init_db():
                         "INSERT INTO Categories(parent_id,name) VALUES(%s,%s)",
                         (gold_id, fixed_name),
                     )
+            # One-time migration: the old fixed, non-configurable
+            # "channel_autopost" schedule (11/2/5/8/11, Telegram-only)
+            # is superseded by the fully admin-controlled "⏰ النشر
+            # التلقائي" scheduler (ScheduledPosts / postschedadd),
+            # which covers both Telegram and Facebook with as many
+            # custom times as the admin wants. Force it off exactly
+            # once so it doesn't keep posting duplicate updates
+            # alongside the new scheduler; the admin can still turn
+            # it back on manually from the features hub if they ever
+            # want to.
+            x.execute(
+                "SELECT setting_value FROM Settings WHERE setting_key=%s",
+                ("migrated_disable_fixed_channel_autopost",),
+            )
+            if not x.fetchone():
+                x.execute("""
+                    INSERT INTO Settings (setting_key, setting_value)
+                    VALUES ('channel_autopost', '0')
+                    ON DUPLICATE KEY UPDATE setting_value='0'
+                """)
+                x.execute("""
+                    INSERT INTO Settings (setting_key, setting_value)
+                    VALUES ('migrated_disable_fixed_channel_autopost', '1')
+                """)
     finally:
         c.close()
 
@@ -1853,7 +1877,7 @@ def gold_broadcast_to_all_on():
 
 
 def channel_autopost_on():
-    return get_setting("channel_autopost", "1") == "1"
+    return get_setting("channel_autopost", "0") == "1"
 
 
 def try_claim_daily_task(key, value):
@@ -2990,22 +3014,81 @@ def calc(p):
     )
 
 
-def compute_calc_result(mode, karat, weight):
+def fetch_sell_reference_price_21():
+    """
+    For the "💰 هتبيع" (customer selling jewelry to the shop) flow:
+    the admin wants the reference price to track an external source
+    (iSagha's own "شراء"/buy-back rate, falling back to
+    gold-price-live) rather than the shop's own manually-set price —
+    the buy-back discount then gets applied on top of that external
+    number.
+
+    Cached for 5 minutes (in Settings) so back-to-back calculations
+    don't each pay the network round-trip and don't hammer the
+    external site — the cache is refreshed lazily the next time
+    someone uses "هتبيع" after it goes stale, not on a background
+    schedule. Synchronous/blocking on a cache miss (network call) —
+    always call via asyncio.to_thread from async code.
+
+    Returns a float, or None if there's no usable price at all
+    (cache empty/expired AND the live fetch also failed — callers
+    should fall back to the shop's own latest() price in that case).
+    """
+    now = datetime.now(TZ)
+    cached_price = get_setting("sell_ref_price_cache")
+    cached_at = get_setting("sell_ref_price_cache_at")
+
+    if cached_price and cached_at:
+        try:
+            cached_dt = datetime.strptime(
+                cached_at, "%Y-%m-%d %H:%M:%S"
+            ).replace(tzinfo=TZ)
+            if (now - cached_dt).total_seconds() < 300:
+                return float(cached_price)
+        except Exception:
+            pass
+
+    p = fetch_isagha_buy_price_21()
+    if not p:
+        p = fetch_goldpricelive_price_21()
+
+    if p:
+        set_setting("sell_ref_price_cache", str(p))
+        set_setting("sell_ref_price_cache_at", now.strftime("%Y-%m-%d %H:%M:%S"))
+        return p
+
+    # Live fetch failed — a stale cached value beats nothing.
+    if cached_price:
+        try:
+            return float(cached_price)
+        except Exception:
+            pass
+    return None
+
+
+def compute_calc_result(mode, karat, weight, external_price_21=None):
     """
     Shared math + message-formatting for the "🧮 احسب دهبك" calculator
     (buy / sell jewelry / sell bullion). Returns (ok, text, total) so
     every entry point — typing a weight, repeating the last calc, or
     comparing two pieces — produces an identical result and message.
+
+    external_price_21: for mode == "sell" only, an externally-fetched
+    21k reference price (see fetch_sell_reference_price_21) to use
+    INSTEAD of the shop's own saved price — the buy-back discount is
+    then subtracted from this external price. Falls back to the
+    shop's own latest() price if not given or if the fetch failed.
     """
-    p21 = latest()
+    used_external = mode == "sell" and external_price_21
+    p21 = external_price_21 if used_external else latest()
     if not p21:
-        return False, "💎 لم يتم تحديث أسعار الذهب حتى الآن.", None
+        return False, "💎 لم يتم تحديث أسعار الذهب حتى الآن.", None, None
 
     p24, p21c, p18 = calc(p21)
     per_gram_map = {24: p24, 21: p21c, 18: p18}
     base = per_gram_map.get(karat)
     if base is None:
-        return False, "❌ حصل خطأ، جرب تاني.", None
+        return False, "❌ حصل خطأ، جرب تاني.", None, None
 
     extra_line = ""
     if mode == "sell":
@@ -3013,7 +3096,14 @@ def compute_calc_result(mode, karat, weight):
         per_gram = base - discount
         price_label = "سعر شراء الجرام"
         total_label = "الإجمالي"
+        source_note = (
+            "📡 السعر المرجعي من مصدر خارجي (iSagha).\n"
+            if used_external else
+            "⚠️ مقدرناش نجيب سعر مرجعي من مصدر خارجي دلوقتي، "
+            "استخدمنا سعرك الحالي في البوت بدله.\n"
+        )
         note = (
+            source_note +
             f"⚠️ شامل خصم شراء المحل ({discount} جنيه/جرام). "
             "هذه النسبه متغيره من محل لمحل ومن توقيت لتوقيت اخر. "
             "السعر تقريبي وممكن يختلف بعد فحص القطعة في المحل."
@@ -3099,13 +3189,26 @@ def save_first(p):
 def fetch_isagha_price_21():
     """
     Best-effort scrape of iSagha's public prices page for the 21k
-    "بيع" (sell-to-customer) price. This is NOT an official API —
-    iSagha doesn't offer one — so this is fragile by nature: if they
-    redesign their page, this can start returning None or (rarely) a
-    wrong number. That's exactly why this is only ever used to build
-    a SUGGESTION the admin reviews and approves — it must never
-    auto-publish on its own. Returns a float, or None on any failure
-    (network error, page structure changed, price not found).
+    "بيع" (سعر البيع للعميل — what a trader sells to a customer at).
+    This is used to build the admin's own SELL/retail price
+    suggestion (🔄 اقتراح سعر تلقائي, نشر تلقائي). NOT an official
+    API — iSagha doesn't offer one — so this is fragile by nature: if
+    they redesign their page, this can start returning None or
+    (rarely) a wrong number. That's exactly why the plain suggestion
+    flow always goes through admin review before publishing — see
+    isagha_autopublish_tick for the one path that DOES publish
+    automatically, guarded by its own explicit toggle.
+
+    NOTE: iSagha's page lists "شراء" (buy) before "بيع" (sell) for
+    each karat row (e.g. "عيار 21 شراء 6310 بيع 6360") — this
+    function's regex specifically targets the number after "بيع",
+    not just the first number after "عيار 21", to avoid accidentally
+    grabbing their buy-back price instead. For the shop's OWN
+    buy-back reference (customer selling TO the shop), see
+    fetch_isagha_buy_price_21 instead.
+
+    Returns a float, or None on any failure (network error, page
+    structure changed, price not found).
     """
     try:
         r = requests.get(
@@ -3124,7 +3227,7 @@ def fetch_isagha_price_21():
         section = html[start:end] if start != -1 and end != -1 else html
 
         m = re.search(
-            r"عيار\s*21(?:(?!عيار).){1,400}?([\d,]+(?:\.\d+)?)\s*ج\.?م",
+            r"عيار\s*21(?:(?!عيار).)*?بيع\s*([\d,]+(?:\.\d+)?)\s*ج\.?م",
             section, re.DOTALL,
         )
         if not m:
@@ -3133,6 +3236,42 @@ def fetch_isagha_price_21():
         return float(m.group(1).replace(",", ""))
     except Exception as e:
         print("iSagha Price Fetch Error:", repr(e), flush=True)
+        return None
+
+
+def fetch_isagha_buy_price_21():
+    """
+    Same page as fetch_isagha_price_21, but targets "شراء" (سعر
+    الشراء — what a trader pays when buying gold FROM a customer)
+    instead of "بيع". Used as the market-reference price for the
+    bot's own "💰 هتبيع" flow (customer selling jewelry to THIS
+    shop) — the shop's buy-back discount is then subtracted from
+    this number, see fetch_sell_reference_price_21. Returns a float,
+    or None on any failure.
+    """
+    try:
+        r = requests.get(
+            "https://market.isagha.com/prices",
+            headers={"User-Agent": "Mozilla/5.0 (compatible; AlhussienyBot/1.0)"},
+            timeout=15,
+        )
+        r.raise_for_status()
+        html = r.text
+
+        start = html.find("أسعار الذهب في مصر اليوم")
+        end = html.find("أسعار الفضة في مصر اليوم")
+        section = html[start:end] if start != -1 and end != -1 else html
+
+        m = re.search(
+            r"عيار\s*21(?:(?!عيار).)*?شراء\s*([\d,]+(?:\.\d+)?)\s*ج\.?م",
+            section, re.DOTALL,
+        )
+        if not m:
+            return None
+
+        return float(m.group(1).replace(",", ""))
+    except Exception as e:
+        print("iSagha Buy Price Fetch Error:", repr(e), flush=True)
         return None
 
 
@@ -3716,9 +3855,11 @@ FEATURE_TOGGLES = [
     ("bcastall", "gold_broadcast_to_all", "0",
      "🟢 تذكير السعر 4 مرات يوميًا (لغير المشتركين) — شغال",
      "🔴 تذكير السعر 4 مرات يوميًا (لغير المشتركين) — متوقف"),
-    ("chautopost", "channel_autopost", "1",
-     "🟢 النشر التلقائي على القناة (5 مرات يوميًا) — شغال",
-     "🔴 النشر التلقائي على القناة (5 مرات يوميًا) — متوقف"),
+    ("chautopost", "channel_autopost", "0",
+     "🟢 النشر التلقائي الثابت على القناة (5 مرات يوميًا) — شغال — "
+     "الأفضل تستخدم \"⏰ النشر التلقائي\" بدالها",
+     "🔴 النشر التلقائي الثابت على القناة (5 مرات يوميًا) — متوقف "
+     "(استخدم \"⏰ النشر التلقائي\" بدالها)"),
     ("isaghasug", "isagha_autosuggest", "0",
      "🟢 اقتراح سعر تلقائي من iSagha — شغال",
      "🔴 اقتراح سعر تلقائي من iSagha — متوقف"),
@@ -7915,7 +8056,13 @@ async def text(update, context):
         mode = context.user_data.get("trade_mode")
         context.user_data.clear()
 
-        ok, _, old_total, _ = compute_calc_result(mode, karat, weight)
+        ext_price = None
+        if mode == "sell":
+            ext_price = await asyncio.to_thread(fetch_sell_reference_price_21)
+
+        ok, _, old_total, _ = compute_calc_result(
+            mode, karat, weight, external_price_21=ext_price
+        )
         if not ok:
             await update.message.reply_text(
                 "💎 لم يتم تحديث أسعار الذهب حتى الآن."
@@ -8163,7 +8310,13 @@ async def text(update, context):
         compare_first = context.user_data.get("calc_compare_first")
         context.user_data.clear()
 
-        ok, text, total, per_gram = compute_calc_result(mode, karat, weight)
+        ext_price = None
+        if mode == "sell":
+            ext_price = await asyncio.to_thread(fetch_sell_reference_price_21)
+
+        ok, text, total, per_gram = compute_calc_result(
+            mode, karat, weight, external_price_21=ext_price
+        )
         if not ok:
             await update.message.reply_text(text)
             return
@@ -13066,9 +13219,13 @@ async def buttons(update, context):
             await q.answer("مفيش حسبة سابقة.", show_alert=True)
             return
 
+        ext_price = None
+        if last["last_calc_mode"] == "sell":
+            ext_price = await asyncio.to_thread(fetch_sell_reference_price_21)
+
         ok, text, total, per_gram = compute_calc_result(
             last["last_calc_mode"], last["last_calc_karat"],
-            float(last["last_calc_weight"]),
+            float(last["last_calc_weight"]), external_price_21=ext_price,
         )
         if ok:
             context.user_data["calc_share_text"] = build_share_text(text)
