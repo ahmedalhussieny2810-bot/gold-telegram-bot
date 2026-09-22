@@ -57,6 +57,25 @@ except Exception:
 
 TZ = ZoneInfo("Africa/Cairo")
 
+# Used when scraping external gold-price sites (iSagha, gold-price-live).
+# A generic "...Bot/1.0" User-Agent is exactly what basic anti-scraping
+# filters look for and block outright — especially from cloud-hosting
+# IP ranges like Railway's — so these mimic an ordinary desktop Chrome
+# browser's request instead, which is far less likely to get silently
+# blocked or served a JS challenge page instead of the real content.
+BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+    ),
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;q=0.9,"
+        "image/webp,*/*;q=0.8"
+    ),
+    "Accept-Language": "ar,en-US;q=0.9,en;q=0.8",
+}
+
+
 # =========================================================
 # SHOP IDENTITY — all configurable via Railway env vars, so a new
 # client's shop can be deployed by copying this same file and
@@ -3212,7 +3231,7 @@ def fetch_isagha_price_21():
     try:
         r = requests.get(
             "https://market.isagha.com/prices",
-            headers={"User-Agent": "Mozilla/5.0 (compatible; AlhussienyBot/1.0)"},
+            headers=BROWSER_HEADERS,
             timeout=15,
         )
         r.raise_for_status()
@@ -3230,6 +3249,11 @@ def fetch_isagha_price_21():
             section, re.DOTALL,
         )
         if not m:
+            print(
+                "iSagha Price Fetch Error: pattern not found "
+                f"(status={r.status_code}, len={len(html)})",
+                flush=True,
+            )
             return None
 
         return float(m.group(1).replace(",", ""))
@@ -3251,7 +3275,7 @@ def fetch_isagha_buy_price_21():
     try:
         r = requests.get(
             "https://market.isagha.com/prices",
-            headers={"User-Agent": "Mozilla/5.0 (compatible; AlhussienyBot/1.0)"},
+            headers=BROWSER_HEADERS,
             timeout=15,
         )
         r.raise_for_status()
@@ -3266,6 +3290,11 @@ def fetch_isagha_buy_price_21():
             section, re.DOTALL,
         )
         if not m:
+            print(
+                "iSagha Buy Price Fetch Error: pattern not found "
+                f"(status={r.status_code}, len={len(html)})",
+                flush=True,
+            )
             return None
 
         return float(m.group(1).replace(",", ""))
@@ -3285,7 +3314,7 @@ def fetch_goldpricelive_price_21():
     try:
         r = requests.get(
             "https://gold-price-live.com/",
-            headers={"User-Agent": "Mozilla/5.0 (compatible; AlhussienyBot/1.0)"},
+            headers=BROWSER_HEADERS,
             timeout=15,
         )
         r.raise_for_status()
