@@ -3097,10 +3097,9 @@ def compute_calc_result(mode, karat, weight, external_price_21=None):
         price_label = "سعر شراء الجرام"
         total_label = "الإجمالي"
         source_note = (
-            "📡 السعر المرجعي من مصدر خارجي (iSagha).\n"
-            if used_external else
-            "⚠️ مقدرناش نجيب سعر مرجعي من مصدر خارجي دلوقتي، "
-            "استخدمنا سعرك الحالي في البوت بدله.\n"
+            "" if used_external else
+            "⚠️ مقدرناش نجيب سعر مرجعي دلوقتي، استخدمنا سعرك "
+            "الحالي في البوت بدله.\n"
         )
         note = (
             source_note +
