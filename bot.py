@@ -3207,8 +3207,7 @@ def save_first(p):
 def fetch_isagha_price_21():
     """
     Best-effort scrape of iSagha's public prices page for the 21k
-    "بيع" (سعر البيع للعميل — what a trader sells to a customer at).
-    This is used to build the admin's own SELL/retail price
+    price. This is used to build the admin's own SELL/retail price
     suggestion (🔄 اقتراح سعر تلقائي, نشر تلقائي). NOT an official
     API — iSagha doesn't offer one — so this is fragile by nature: if
     they redesign their page, this can start returning None or
@@ -3217,13 +3216,13 @@ def fetch_isagha_price_21():
     isagha_autopublish_tick for the one path that DOES publish
     automatically, guarded by its own explicit toggle.
 
-    NOTE: iSagha's page lists "شراء" (buy) before "بيع" (sell) for
-    each karat row (e.g. "عيار 21 شراء 6310 بيع 6360") — this
-    function's regex specifically targets the number after "بيع",
-    not just the first number after "عيار 21", to avoid accidentally
-    grabbing their buy-back price instead. For the shop's OWN
-    buy-back reference (customer selling TO the shop), see
-    fetch_isagha_buy_price_21 instead.
+    This is the original, long-proven pattern (grabs the first price
+    figure after "عيار 21", within a bounded window so it can't run
+    away across the whole page) — kept exactly as-is since it's been
+    reliable in production; don't tighten it to require a specific
+    "بيع"/"شراء" keyword next to it without testing against the
+    site's actual raw HTML first (the keyword sometimes sits in a
+    separate tag from the number, which breaks a same-text match).
 
     Returns a float, or None on any failure (network error, page
     structure changed, price not found).
@@ -3245,7 +3244,7 @@ def fetch_isagha_price_21():
         section = html[start:end] if start != -1 and end != -1 else html
 
         m = re.search(
-            r"عيار\s*21(?:(?!عيار).)*?بيع\s*([\d,]+(?:\.\d+)?)\s*ج\.?م",
+            r"عيار\s*21(?:(?!عيار).){1,400}?([\d,]+(?:\.\d+)?)\s*ج\.?م",
             section, re.DOTALL,
         )
         if not m:
