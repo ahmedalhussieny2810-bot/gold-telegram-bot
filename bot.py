@@ -772,7 +772,7 @@ def cats(parent=None):
             ORDER BY id
         """)
 
-    return many("""
+    rows = many("""
         SELECT c.id,c.name,COUNT(p.id) product_count
         FROM Categories c
         LEFT JOIN Products p ON p.category_id=c.id
@@ -784,6 +784,39 @@ def cats(parent=None):
                  ELSE 2 END,
             c.id ASC
     """, (parent,))
+
+    # product_count above only covers products sitting DIRECTLY in each
+    # child category. Categories can nest several levels deep (e.g.
+    # ذهب → مشغولات عيار 18 → خواتم), so a middle-level category would
+    # show (0) even with products further down. Replace it with the
+    # total for the whole subtree.
+    if rows:
+        all_cats = many("SELECT id, parent_id FROM Categories")
+        direct = {
+            r["category_id"]: r["n"]
+            for r in many(
+                "SELECT category_id, COUNT(*) n FROM Products "
+                "WHERE category_id IS NOT NULL GROUP BY category_id"
+            )
+        }
+        children_of = {}
+        for c in all_cats:
+            children_of.setdefault(c["parent_id"], []).append(c["id"])
+
+        def subtree_total(cid, seen=None):
+            seen = seen or set()
+            if cid in seen:  # guard against accidental cycles
+                return 0
+            seen.add(cid)
+            total = direct.get(cid, 0)
+            for ch in children_of.get(cid, []):
+                total += subtree_total(ch, seen)
+            return total
+
+        for r in rows:
+            r["product_count"] = subtree_total(r["id"])
+
+    return rows
 
 
 def flatten_categories(parent=None, depth=0):
