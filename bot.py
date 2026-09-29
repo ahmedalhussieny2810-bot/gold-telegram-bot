@@ -1094,6 +1094,27 @@ def del_product(pid):
         c.close()
 
 
+def product_code_exists(code, exclude_pid=None):
+    """Returns the existing product row (id, name, code) that already
+    uses this code — case-insensitive, ignoring surrounding spaces —
+    or None if the code is free. exclude_pid lets the edit flow skip
+    the product being edited itself."""
+    code = (code or "").strip()
+    if not code:
+        return None
+    if exclude_pid:
+        return one(
+            "SELECT id, name, code FROM Products "
+            "WHERE LOWER(TRIM(code))=LOWER(%s) AND id<>%s LIMIT 1",
+            (code, exclude_pid),
+        )
+    return one(
+        "SELECT id, name, code FROM Products "
+        "WHERE LOWER(TRIM(code))=LOWER(%s) LIMIT 1",
+        (code,),
+    )
+
+
 def product(pid):
     return one("""
         SELECT id,Photo_id,name,code,price,description,
@@ -8673,7 +8694,19 @@ async def text(update, context):
         return
 
     if s == "prod_code":
-        context.user_data["code"] = None if t.lower() == "بدون" else t
+        code = None if t.lower() == "بدون" else t.strip()
+
+        if code:
+            dup = product_code_exists(code)
+            if dup:
+                await update.message.reply_text(
+                    f"❌ الكود \"{code}\" مستخدم قبل كده في منتج تاني:\n"
+                    f"💍 {dup.get('name') or 'بدون اسم'} (#{dup['id']})\n\n"
+                    "اكتب كود مختلف، أو اكتب: بدون"
+                )
+                return
+
+        context.user_data["code"] = code
         context.user_data["state"] = "prod_price_mode"
 
         await update.message.reply_text(
@@ -8813,6 +8846,17 @@ async def text(update, context):
                     return
         else:
             value = None if t.lower() == "بدون" else t
+
+        if field == "code" and value:
+            value = value.strip()
+            dup = product_code_exists(value, exclude_pid=pid)
+            if dup:
+                await update.message.reply_text(
+                    f"❌ الكود \"{value}\" مستخدم قبل كده في منتج تاني:\n"
+                    f"💍 {dup.get('name') or 'بدون اسم'} (#{dup['id']})\n\n"
+                    "اكتب كود مختلف، أو اكتب: بدون"
+                )
+                return
 
         ok = update_product_field(pid, field, value)
 
