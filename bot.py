@@ -3873,6 +3873,9 @@ FEATURE_TOGGLES = [
     ("prodpause", "products_paused", "0",
      "🔴 عرض المنتجات للعملاء — متوقف مؤقتًا",
      "🟢 عرض المنتجات للعملاء — شغال"),
+    ("newprodnotify", "new_product_notify", "1",
+     "🟢 إشعار العملاء بالمنتجات الجديدة — شغال",
+     "🔴 إشعار العملاء بالمنتجات الجديدة — متوقف"),
     ("refloy", "referral_enabled", "1",
      "🟢 الدعوات ونقاط الولاء — شغالة",
      "🔴 الدعوات ونقاط الولاء — متوقفة"),
@@ -4192,6 +4195,12 @@ def prod_menu():
             "▶️ تفعيل عرض المنتجات للعملاء" if paused
             else "⏸️ إيقاف عرض المنتجات مؤقتاً",
             callback_data="toggleprodpause"
+        )],
+        [InlineKeyboardButton(
+            "🔔 إشعار المنتجات الجديدة: شغال (دوس للإيقاف)"
+            if get_setting("new_product_notify", "1") == "1"
+            else "🔕 إشعار المنتجات الجديدة: متوقف (دوس للتفعيل)",
+            callback_data="toggleprodnotify"
         )],
         [InlineKeyboardButton("⬅️ لوحة التحكم", callback_data="admin")],
     ])
@@ -5149,8 +5158,13 @@ async def broadcast_new_product(context, photo_id, name, code, price, desc):
     """
     Sends a "new product" notification to every customer subscribed
     to notifications (same subscriber list as gold price updates —
-    the 🔔 button is a single general notifications toggle).
+    the 🔔 button is a single general notifications toggle). Can be
+    switched off by the admin from "⚙️ التحكم في الميزات"
+    (setting: new_product_notify, on by default).
     """
+    if get_setting("new_product_notify", "1") != "1":
+        return
+
     ids = gold_subscriber_ids()
     if not ids:
         return
@@ -5784,6 +5798,39 @@ async def update_price_shortcut(update, context):
 
     await update.message.reply_text(
         "✏️ ابعت سعر عيار 21 الجديد.\nمثال: 7000"
+    )
+
+
+async def add_product_shortcut(update, context):
+    """
+    Admin-only shortcut command (/addproduct) that jumps straight to
+    the "➕ إضافة منتج" category picker instead of going through
+    لوحة التحكم → المنتجات → إدارة المنتجات → إضافة منتج. Shows up
+    next to /start in Telegram's "/" command menu for admins only.
+    """
+    if not is_admin(update):
+        return
+
+    track_user(update)
+    context.user_data.clear()
+
+    ms = cats()
+    if not ms:
+        await update.message.reply_text(
+            "➕ لازم تضيف قسم رئيسي الأول من (📂 إدارة الأقسام).",
+            reply_markup=prod_menu(),
+        )
+        return
+
+    k = [
+        [InlineKeyboardButton("💍 " + m["name"], callback_data=f"pm:{m['id']}")]
+        for m in ms
+    ]
+    k.append([InlineKeyboardButton("⬅️ رجوع", callback_data="aprod")])
+
+    await update.message.reply_text(
+        "➕ إضافة منتج جديد\n\nاختار القسم:",
+        reply_markup=InlineKeyboardMarkup(k),
     )
 
 
@@ -12062,6 +12109,27 @@ async def buttons(update, context):
         )
         return
 
+    if c == "toggleprodnotify":
+        if not is_admin(update):
+            return
+
+        on = get_setting("new_product_notify", "1") == "1"
+        set_setting("new_product_notify", "0" if on else "1")
+        log_action(
+            update.effective_user.id, "ADMIN_TOGGLE_NEW_PRODUCT_NOTIFY",
+            new_value="off" if on else "on",
+        )
+
+        await q.edit_message_text(
+            "🔕 اتوقف إشعار العملاء بالمنتجات الجديدة.\n"
+            "أي منتج هتضيفه هيتحفظ عادي من غير ما يتبعت للمشتركين."
+            if on else
+            "🔔 اتفعّل إشعار العملاء بالمنتجات الجديدة.\n"
+            "أي منتج جديد هيتبعت للمشتركين في الإشعارات.",
+            reply_markup=prod_menu(),
+        )
+        return
+
     if c == "toggleprodpause":
         if not is_admin(update):
             return
@@ -14864,6 +14932,7 @@ async def setup_bot_commands(app):
             BotCommand("start", "🏠 القائمة الرئيسية"),
             BotCommand("favorites", "⭐ المفضلة"),
             BotCommand("updateprice", "✏️ تحديث سعر الذهب"),
+            BotCommand("addproduct", "➕ إضافة منتج"),
         ]
         for admin_id in all_admin_ids():
             try:
@@ -14910,6 +14979,7 @@ def main():
     app.add_handler(CommandHandler("id", show_id))
     app.add_handler(CommandHandler("favorites", favorites_command))
     app.add_handler(CommandHandler("updateprice", update_price_shortcut))
+    app.add_handler(CommandHandler("addproduct", add_product_shortcut))
 
     app.add_handler(
         MessageHandler(filters.PHOTO, photo)
