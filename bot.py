@@ -3557,10 +3557,20 @@ def gold_screen_kb(telegram_id):
     ])
 
 
+def bars_coins_btn(ret=None):
+    """The "سعر السبايك والعملات" button, shown on every gold screen.
+    ret = where its "⬅️ رجوع" should go (default: the price screen)."""
+    return InlineKeyboardButton(
+        "🪙 لو عايز سعر السبايك والعملات دوس هنا",
+        callback_data=f"barscoins:{ret}" if ret else "barscoins",
+    )
+
+
 def gold_tools_kb():
     """Less-used gold tools, tucked behind "🧰 أدوات تانية" so the
     main price screen stays simple for new customers."""
     return InlineKeyboardMarkup([
+        [bars_coins_btn()],
         [InlineKeyboardButton(
             "🔄 استبدال قديم بجديد", callback_data="calctrade"
         )],
@@ -3728,13 +3738,15 @@ async def send_karat_conversion_result(
 
 
 def home(admin=False, subscribed=False, telegram_id=None):
-    k = [
-        [InlineKeyboardButton(
-            "🟢 الإشعارات شغالة (دوس للإيقاف)"
-            if subscribed else
+    k = []
+    # The notifications button only shows for customers who haven't
+    # turned them on yet — once subscribed it disappears entirely.
+    if not subscribed:
+        k.append([InlineKeyboardButton(
             "🔔 فعّل الإشعارات عشان يوصلك كل جديد",
-            callback_data="notifunsub" if subscribed else "notifsub",
-        )],
+            callback_data="notifsub",
+        )])
+    k += [
         [InlineKeyboardButton(
             "💎 الدهب والأسعار", callback_data="goldcategory"
         )],
@@ -3768,6 +3780,7 @@ def loyalty_enabled():
 
 def gold_category_kb():
     rows = [
+        [bars_coins_btn("goldcategory")],
         [InlineKeyboardButton("💎 أسعار الذهب", callback_data="gold")],
         [InlineKeyboardButton(
             "🧮✨ احسب دهبك دلوقتي! ✨🧮", callback_data="calcgold"
@@ -6005,6 +6018,7 @@ def welcome_kb(subscribed=False):
             "🔔 ابعتلي سعر الدهب كل يوم", callback_data="welcomesub"
         )])
     rows += [
+        [bars_coins_btn()],
         [InlineKeyboardButton("🧮 احسب دهبك", callback_data="calcgold")],
         [InlineKeyboardButton("💍 شوف المنتجات", callback_data="products")],
         [InlineKeyboardButton("📋 القائمة الرئيسية", callback_data="home")],
@@ -11018,8 +11032,11 @@ async def buttons(update, context):
         )
         return
 
-    if c == "barscoins":
+    if c == "barscoins" or c.startswith("barscoins:"):
         track_user(update)
+        bc_ret = c.split(":", 1)[1] if ":" in c else "goldback"
+        if bc_ret not in ("goldback", "goldcategory"):
+            bc_ret = "goldback"
         gold_id = find_category_by_name("ذهب")
         bars_id = find_category_by_name("سبائك", gold_id) if gold_id else None
         coins_id = find_category_by_name("عملات", gold_id) if gold_id else None
@@ -11037,7 +11054,7 @@ async def buttons(update, context):
             k.append([InlineKeyboardButton(
                 "🪙 عملات (جنيهات ذهب)", callback_data=f"cm:{coins_id}"
             )])
-        k.append([InlineKeyboardButton("⬅️ رجوع", callback_data="goldback")])
+        k.append([InlineKeyboardButton("⬅️ رجوع", callback_data=bc_ret)])
 
         # Edited in place (the "رجوع" button restores the price in
         # the same message) so nothing gets duplicated in the chat.
@@ -13758,6 +13775,7 @@ async def buttons(update, context):
             [InlineKeyboardButton(
                 "⚖️ قارن بين قطعتين", callback_data="calccompare"
             )],
+            [bars_coins_btn()],
             [InlineKeyboardButton("⬅️ رجوع", callback_data="goldback")],
         ]
 
