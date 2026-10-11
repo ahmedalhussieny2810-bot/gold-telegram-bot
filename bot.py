@@ -3266,6 +3266,63 @@ def save_first(p):
     return False
 
 
+
+_AR_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩٫٬", "0123456789.,")
+
+
+def isagha_page_text(html):
+    """Raw iSagha HTML → plain readable text: tags removed, HTML
+    entities decoded, Arabic-Indic digits converted, whitespace
+    collapsed. Parsing the TEXT (instead of the raw HTML) means extra
+    <span>/<div> wrappers, CSS classes or icons between "عيار 21" and
+    its number can no longer break the match."""
+    import html as _html
+    t = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", html)
+    t = re.sub(r"(?s)<[^>]+>", " ", t)
+    t = _html.unescape(t).translate(_AR_DIGITS)
+    return re.sub(r"\s+", " ", t)
+
+
+def _plausible_price(v):
+    try:
+        v = float(str(v).replace(",", ""))
+    except Exception:
+        return None
+    return v if 1000 <= v <= 100000 else None
+
+
+def parse_isagha_21(html, kind):
+    """kind = "sell" (بيع — what we suggest as the shop's selling
+    price) or "buy" (شراء — market buy-back reference).
+    Returns (price or None, debug snippet)."""
+    text = isagha_page_text(html)
+    num = r"([\d,]+(?:\.\d+)?)"
+    word = "بيع" if kind == "sell" else "شراء"
+
+    patterns = [
+        # "عيار 21 ▼ شراء 6100 ج.م بيع 6150 ج.م" (price list)
+        rf"عيار\s*21(?:(?!عيار).){{0,120}}?{word}\s*:?\s*{num}",
+    ]
+    if kind == "sell":
+        # Old proven behaviour: first number in the "أسعار الذهب في
+        # مصر اليوم" table row for عيار 21 (that table lists بيع first).
+        start = text.find("أسعار الذهب في مصر اليوم")
+        table = text[start:] if start != -1 else ""
+        m = re.search(rf"عيار\s*21(?:(?!عيار).){{0,80}}?{num}", table)
+        if m and _plausible_price(m.group(1)):
+            return _plausible_price(m.group(1)), ""
+
+    for pat in patterns:
+        for m in re.finditer(pat, text):
+            v = _plausible_price(m.group(1))
+            if v:
+                return v, ""
+
+    i = text.find("عيار 21")
+    snippet = text[i:i + 120] if i != -1 else "(مفيش 'عيار 21' في الصفحة)"
+    return None, snippet
+
+
 def fetch_isagha_price_21():
     """
     Best-effort scrape of iSagha's public prices page for the 21k
@@ -3308,25 +3365,13 @@ def fetch_isagha_price_21():
             if r.status_code != 200:
                 errors.append(f"HTTP {r.status_code}")
                 continue
-            html = r.text
-
-            # Scope the search to the gold-prices table only, so we
-            # don't accidentally match "عيار 21" text elsewhere on the
-            # page (silver/currency tables, articles, etc.).
-            start = html.find("أسعار الذهب في مصر اليوم")
-            end = html.find("أسعار الفضة في مصر اليوم")
-            section = html[start:end] if start != -1 and end != -1 else html
-
-            m = re.search(
-                r"عيار\s*21(?:(?!عيار).){1,400}?([\d,]+(?:\.\d+)?)\s*ج\.?م",
-                section, re.DOTALL,
-            )
-            if not m:
-                errors.append(f"السعر مش موجود في الصفحة (حجمها {len(html)})")
-                continue
+            price, snippet = parse_isagha_21(r.text, "sell")
+            if price is None:
+                errors.append(f"السعر مش موجود في الصفحة: {snippet}")
+                break  # same page again won't parse any differently
 
             LAST_ISAGHA_ERROR = None
-            return float(m.group(1).replace(",", ""))
+            return price
         except requests.Timeout:
             errors.append("الموقع مردش (timeout)")
         except requests.ConnectionError:
@@ -3350,31 +3395,21 @@ def fetch_isagha_buy_price_21():
     or None on any failure.
     """
     try:
-        r = requests.get(
-            "https://market.isagha.com/prices",
-            headers=BROWSER_HEADERS,
-            timeout=15,
-        )
-        r.raise_for_status()
-        html = r.text
-
-        start = html.find("أسعار الذهب في مصر اليوم")
-        end = html.find("أسعار الفضة في مصر اليوم")
-        section = html[start:end] if start != -1 and end != -1 else html
-
-        m = re.search(
-            r"عيار\s*21(?:(?!عيار).)*?شراء\s*([\d,]+(?:\.\d+)?)\s*ج\.?م",
-            section, re.DOTALL,
-        )
-        if not m:
-            print(
-                "iSagha Buy Price Fetch Error: pattern not found "
-                f"(status={r.status_code}, len={len(html)})",
-                flush=True,
+        r = None
+        for headers in (ISAGHA_ORIGINAL_HEADERS, BROWSER_HEADERS):
+            r = requests.get(
+                "https://market.isagha.com/prices",
+                headers=headers,
+                timeout=20,
             )
-            return None
+            if r.status_code == 200:
+                break
+        r.raise_for_status()
 
-        return float(m.group(1).replace(",", ""))
+        price, snippet = parse_isagha_21(r.text, "buy")
+        if price is None:
+            print("iSagha Buy Price Fetch Error:", snippet, flush=True)
+        return price
     except Exception as e:
         print("iSagha Buy Price Fetch Error:", repr(e), flush=True)
         return None
