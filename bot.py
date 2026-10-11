@@ -4,6 +4,7 @@ import re
 import asyncio
 import time
 from datetime import datetime, timedelta, date, time as dtime
+from datetime import timezone as dt_timezone
 from zoneinfo import ZoneInfo
 from urllib.parse import urlparse, quote
 
@@ -2056,8 +2057,7 @@ TEMPLATES = {
             "🟡 عيار 21 : {price_21}\n"
             "🟡 عيار 18 : {price_18}\n\n"
             "📍 {shop_name}\n"
-            "🤖 {bot_link}\n\n"
-            "🌐 {website}"
+            "🤖 {bot_link}"
         ),
     },
     "luxury": {
@@ -2072,41 +2072,6 @@ TEMPLATES = {
             "📍 {shop_name}\n"
             "🤖 {bot_link}\n"
             "💬 {whatsapp}"
-        ),
-    },
-    "short": {
-        "name": "قالب مختصر",
-        "body": (
-            "💰 عيار 21: {price_21} | "
-            "عيار 24: {price_24} | "
-            "عيار 18: {price_18}"
-        ),
-    },
-    "links": {
-        "name": "قالب أسعار + روابط المحل",
-        "body": (
-            "💎 أسعار الذهب الآن\n\n"
-            "🟡 عيار 24 : {price_24}\n"
-            "🟡 عيار 21 : {price_21}\n"
-            "🟡 عيار 18 : {price_18}\n\n"
-            "📍 {shop_name}\n"
-            "🤖 {bot_link}\n"
-            "🌐 الموقع: {website}\n"
-            "💬 واتساب: {whatsapp}\n"
-            "📍 الموقع على الخريطة: {maps}"
-        ),
-    },
-    "offer": {
-        "name": "قالب عروض",
-        "body": (
-            "🔥 عرض خاص اليوم في " + SHOP_NAME + " 🔥\n\n"
-            "💎 أسعار الذهب:\n"
-            "🟡 عيار 24 : {price_24}\n"
-            "🟡 عيار 21 : {price_21}\n"
-            "🟡 عيار 18 : {price_18}\n\n"
-            "زورونا اليوم في {shop_name}\n"
-            "🤖 {bot_link}\n"
-            "🌐 {website}"
         ),
     },
 }
@@ -3581,45 +3546,30 @@ def price_text(p):
 # =========================================================
 
 def gold_screen_kb(telegram_id):
-    wa_subscribed = is_whatsapp_subscribed(telegram_id)
-
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(
             "🪙 لو عايز سعر السبايك والعملات دوس هنا", callback_data="barscoins"
         )],
         [InlineKeyboardButton("🧮 احسب دهبك", callback_data="calcgold")],
-        [
-            InlineKeyboardButton(
-                "🔄 استبدال قديم بجديد", callback_data="calctrade"
-            ),
-            InlineKeyboardButton(
-                "💵 بكام أشتري؟", callback_data="calcbudget"
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                "📊 آخر 7 أيام", callback_data="pricehist7"
-            ),
-            InlineKeyboardButton(
-                "🎁 ذكرني بمناسبة", callback_data="addoccasion"
-            ),
-        ],
-        [InlineKeyboardButton(
-            "🕌 حاسبة الزكاة", callback_data="zakatcalc"
-        )],
-        [InlineKeyboardButton(
-            "⚖️ تحويل عيار", callback_data="karatconvert"
-        )],
-        [InlineKeyboardButton(
-            "💰 تتبع استثمارك", callback_data="invtrack"
-        )],
-        [InlineKeyboardButton(
-            "🔕 إلغاء الاشتراك (واتساب)"
-            if wa_subscribed else
-            "📱 اشترك في تحديثات السعر (واتساب)",
-            callback_data="goldwunsub" if wa_subscribed else "goldwsub",
-        )],
+        [InlineKeyboardButton("💵 بكام أشتري؟", callback_data="calcbudget")],
+        [InlineKeyboardButton("🧰 أدوات تانية", callback_data="goldtools")],
         [InlineKeyboardButton("⬅️ الرئيسية", callback_data="home")],
+    ])
+
+
+def gold_tools_kb():
+    """Less-used gold tools, tucked behind "🧰 أدوات تانية" so the
+    main price screen stays simple for new customers."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            "🔄 استبدال قديم بجديد", callback_data="calctrade"
+        )],
+        [InlineKeyboardButton("📊 أسعار آخر 7 أيام", callback_data="pricehist7")],
+        [InlineKeyboardButton("🕌 حاسبة الزكاة", callback_data="zakatcalc")],
+        [InlineKeyboardButton(
+            "🎁 ذكرني بمناسبة", callback_data="addoccasion"
+        )],
+        [InlineKeyboardButton("⬅️ رجوع", callback_data="goldtoolsback")],
     ])
 
 
@@ -3649,9 +3599,6 @@ def product_display_kb(p, telegram_id, show_favorite_source=None):
             "💬 واتساب", callback_data=f"prodwa:{p['id']}"
         ),
         InlineKeyboardButton("📍 الموقع", url=MAPS),
-    ])
-    rows.append([
-        InlineKeyboardButton("🌐 الموقع الإلكتروني", url=WEBSITE),
     ])
     return InlineKeyboardMarkup(rows)
 
@@ -3789,10 +3736,10 @@ def home(admin=False, subscribed=False, telegram_id=None):
             callback_data="notifunsub" if subscribed else "notifsub",
         )],
         [InlineKeyboardButton(
-            "💎 هستخدم البوت للدهب", callback_data="goldcategory"
+            "💎 الدهب والأسعار", callback_data="goldcategory"
         )],
         [InlineKeyboardButton(
-            "📒 هستخدم البوت لمصاريفي وحساباتي", callback_data="financecategory"
+            "📒 مصاريفي وحساباتي", callback_data="financecategory"
         )],
     ]
 
@@ -3846,20 +3793,6 @@ def gold_category_kb():
         [InlineKeyboardButton(
             "🎂 سجّل تاريخ ميلادك", callback_data="birthdaymenu"
         )],
-        [InlineKeyboardButton(
-            "🕐 المحل مفتوح دلوقتي؟", callback_data="shopstatus"
-        )],
-        [
-            InlineKeyboardButton(
-                "📞 اطلب مكالمة", callback_data="callrequest"
-            ),
-            InlineKeyboardButton(
-                "✍️ ابعت رسالة", callback_data="contactadmin"
-            ),
-        ],
-        [InlineKeyboardButton(
-            "📋 استفساراتي", callback_data="myinquiries"
-        )],
         [InlineKeyboardButton("⬅️ الرئيسية", callback_data="home")],
     ]
     return InlineKeyboardMarkup(rows)
@@ -3873,30 +3806,26 @@ def finance_category_kb():
         [InlineKeyboardButton(
             "📇 حساباتي (له/عليه)", callback_data="ledgermenu"
         )],
-        [InlineKeyboardButton(
-            "🕐 المحل مفتوح دلوقتي؟", callback_data="shopstatus"
-        )],
-        [
-            InlineKeyboardButton(
-                "📞 اطلب مكالمة", callback_data="callrequest"
-            ),
-            InlineKeyboardButton(
-                "✍️ ابعت رسالة", callback_data="contactadmin"
-            ),
-        ],
-        [InlineKeyboardButton(
-            "📋 استفساراتي", callback_data="myinquiries"
-        )],
         [InlineKeyboardButton("⬅️ الرئيسية", callback_data="home")],
     ])
 
 
 def shop_info_kb():
     return InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            "🕐 المحل مفتوح دلوقتي؟", callback_data="shopstatus"
+        )],
+        [
+            InlineKeyboardButton(
+                "✍️ ابعت رسالة", callback_data="contactadmin"
+            ),
+            InlineKeyboardButton(
+                "📋 استفساراتي", callback_data="myinquiries"
+            ),
+        ],
         [InlineKeyboardButton("📢 قناة التليجرام", url=TG_CHANNEL)],
         [
             InlineKeyboardButton("📍 موقع المحل", url=MAPS),
-            InlineKeyboardButton("🌐 الموقع", url=WEBSITE),
         ],
         [
             InlineKeyboardButton("💬 واتساب", url=WHATSAPP),
@@ -4007,6 +3936,9 @@ def admin_reports_menu():
 # (unique key, setting name in Settings table, default value,
 #  label when currently ON, label when currently OFF).
 FEATURE_TOGGLES = [
+    ("fajrauto", "fajr_auto", "1",
+     "🟢 ميعاد إشعار الفجر تلقائي حسب القاهرة — شغال",
+     "🔴 ميعاد إشعار الفجر تلقائي — متوقف (بيستخدم الميعاد اللي انت حاطه)"),
     ("maint", "maintenance_mode", "0",
      "🔴 وضع الصيانة — شغال (العملاء بيشوفوا رسالة تحديث بس)",
      "🟢 وضع الصيانة — متوقف (البوت شغال عادي)"),
@@ -4048,21 +3980,68 @@ FEATURE_TOGGLES = [
 ]
 
 
-def admin_features_menu():
+FEATURE_GROUPS = [
+    ("pub", "📢 النشر والأسعار",
+     ["chautopost", "isaghasug", "isaghapub", "isaghapub2"]),
+    ("prod", "💍 المنتجات",
+     ["prodpause", "potdauto", "prodsocial", "newprodnotify"]),
+    ("notif", "🔔 الإشعارات", ["fajrauto", "bcastall", "wa"]),
+    ("cust", "👥 العملاء والصيانة", ["refloy", "maint"]),
+]
+
+
+def feature_group_of(key):
+    for gkey, _, keys in FEATURE_GROUPS:
+        if key in keys:
+            return gkey
+    return None
+
+
+def feature_is_on(key, setting_key, default):
+    # refloy is really two settings kept in sync — check the pair
+    # together so the label always reflects the true combined state.
+    if key == "refloy":
+        return referral_enabled() and loyalty_enabled()
+    return get_setting(setting_key, default) == "1"
+
+
+def admin_features_menu(group=None):
+    if group is None:
+        rows = [
+            [InlineKeyboardButton(title, callback_data=f"featgroup:{gkey}")]
+            for gkey, title, _ in FEATURE_GROUPS
+        ]
+        grouped = {k for _, _, keys in FEATURE_GROUPS for k in keys}
+        # Any toggle not assigned to a group still shows up here.
+        for key, setting_key, default, label_on, label_off in FEATURE_TOGGLES:
+            if key in grouped:
+                continue
+            on = feature_is_on(key, setting_key, default)
+            rows.append([InlineKeyboardButton(
+                label_on if on else label_off,
+                callback_data=f"hubtoggle:{key}",
+            )])
+        rows.append([InlineKeyboardButton(
+            "⬅️ لوحة التحكم", callback_data="admin"
+        )])
+        return InlineKeyboardMarkup(rows)
+
+    keys = next((k for g, _, k in FEATURE_GROUPS if g == group), [])
     rows = []
     for key, setting_key, default, label_on, label_off in FEATURE_TOGGLES:
-        # refloy is really two settings kept in sync — check the pair
-        # together so the label always reflects the true combined state.
-        if key == "refloy":
-            on = referral_enabled() and loyalty_enabled()
-        else:
-            on = get_setting(setting_key, default) == "1"
+        if key not in keys:
+            continue
+        on = feature_is_on(key, setting_key, default)
         rows.append([InlineKeyboardButton(
             label_on if on else label_off,
             callback_data=f"hubtoggle:{key}",
         )])
-    rows.append([InlineKeyboardButton("⬅️ لوحة التحكم", callback_data="admin")])
+    rows.append([InlineKeyboardButton("⬅️ رجوع", callback_data="adminfeatures")])
     return InlineKeyboardMarkup(rows)
+
+
+def feature_group_title(group):
+    return next((t for g, t, _ in FEATURE_GROUPS if g == group), "")
 
 
 def call_queue_view(owner):
@@ -4672,6 +4651,63 @@ async def auto_post_tick(context):
         print("Auto Post Tick Error:", repr(e), flush=True)
 
 
+def cairo_fajr_time(d=None, lat=30.0444, lng=31.2357, angle=19.5):
+    """Calculates Fajr time for Cairo on date d (Egyptian General
+    Authority of Survey method: sun 19.5° below the horizon).
+    Returns "HH:MM" in local Egypt time (summer time handled by TZ)."""
+    import math
+    if d is None:
+        d = datetime.now(TZ).date()
+    jd = d.toordinal() + 1721424.5
+    D = jd - 2451545.0 + 0.5
+    rad = math.radians
+    g = rad((357.529 + 0.98560028 * D) % 360)
+    q = (280.459 + 0.98564736 * D) % 360
+    L = rad((q + 1.915 * math.sin(g) + 0.020 * math.sin(2 * g)) % 360)
+    e = rad(23.439 - 0.00000036 * D)
+    ra = math.degrees(
+        math.atan2(math.cos(e) * math.sin(L), math.cos(L))
+    ) / 15 % 24
+    decl = math.asin(math.sin(e) * math.sin(L))
+    eqt = (q / 15 - ra + 12) % 24 - 12
+    noon_utc = 12 - lng / 15 - eqt
+    la = rad(lat)
+    cos_t = (
+        (-math.sin(rad(angle)) - math.sin(decl) * math.sin(la))
+        / (math.cos(decl) * math.cos(la))
+    )
+    t = math.degrees(math.acos(cos_t)) / 15
+    utc_dt = datetime(d.year, d.month, d.day, tzinfo=dt_timezone.utc) \
+        + timedelta(hours=noon_utc - t)
+    return utc_dt.astimezone(TZ).strftime("%H:%M")
+
+
+def sync_fajr_notification_time():
+    """Keeps the "fajr" scheduled notification on today's real Cairo
+    Fajr time (setting fajr_auto, on by default)."""
+    if get_setting("fajr_auto", "1") != "1":
+        return
+    try:
+        new_t = cairo_fajr_time()
+    except Exception as e:
+        print("Fajr Calc Error:", repr(e), flush=True)
+        return
+    row = one(
+        "SELECT id,time_str FROM ScheduledNotifications WHERE label=%s",
+        ("fajr",),
+    )
+    if row and row.get("time_str") != new_t:
+        c = db()
+        try:
+            with c.cursor() as x:
+                x.execute(
+                    "UPDATE ScheduledNotifications SET time_str=%s "
+                    "WHERE id=%s", (new_t, row["id"]),
+                )
+        finally:
+            c.close()
+
+
 async def auto_notification_tick(context):
     """Runs every minute via JobQueue. Fires any due scheduled custom
     notifications (Fajr / opening / closing greetings, etc.) to every
@@ -4682,6 +4718,8 @@ async def auto_notification_tick(context):
         now = datetime.now(TZ)
         hhmm = now.strftime("%H:%M")
         today_str = now.strftime("%Y-%m-%d")
+
+        sync_fajr_notification_time()
 
         for sn in scheduled_notifications():
             if not sn.get("enabled"):
@@ -5936,25 +5974,42 @@ async def start(update, context):
                 )
         except Exception as e:
             print("Referral Bonus Failed:", repr(e), flush=True)
+    uid = update.effective_user.id
+    p = latest()
+
+    if is_new and p:
+        # First time ever: show something useful right away (today's
+        # price) with a one-tap subscribe, instead of a menu to read.
+        await update.message.reply_text(
+            "💎 أهلاً بيك في " + SHOP_FULL_NAME + " ✨\n\n"
+            "ده سعر الدهب دلوقتي 👇\n\n" + price_text(p),
+            reply_markup=welcome_kb(is_gold_subscribed(uid)),
+        )
+        return
+
     await update.message.reply_text(
         "💎 " + SHOP_NAME + "\n\n"
         "أهلاً بيك في البوت الرسمي لـ" + SHOP_FULL_NAME + " ✨\n\n"
-        "من غير ما تتصل بينا أو تيجي المحل، تقدر من هنا:\n\n"
-        "💎 أسعار الذهب — سعر عيار 21 و24 والسبايك والعملات "
-        "لحظة بلحظة، وجوّاها أدوات كتير:\n"
-        "  • 🧮 احسب دهبك (هتشتري ولا هتبيع)\n"
-        "  • 🔄 استبدال قطعة قديمة بجديدة\n"
-        "  • 💵 اعرف تقدر تشتري كام جرام بميزانيتك\n"
-        "  • ⚖️ تحويل الوزن من عيار لعيار\n"
-        "  • 🕌 حاسبة الزكاة\n"
-        "  • 📊 أسعار آخر 7 أيام\n"
-        "  • 🎁 تذكير بمناسباتك (خطوبة، جواز... إلخ)\n\n"
-        "💍 المنتجات — شوف قطعنا وعروضنا أول بأول.\n\n"
-        "🔔 فعّل الإشعارات تحت عشان يوصلك سعر الذهب والمنتجات "
-        "الجديدة على طول من غير ما تفتح البوت كل شوية.\n\n"
+        "💎 الدهب والأسعار — السعر لحظة بلحظة، احسب دهبك، "
+        "بكام أشتري، والمنتجات.\n"
+        "📒 مصاريفي وحساباتي — حاسبة مصروفك الشهري وحسابات له/عليه.\n\n"
         "اختار من القائمة 👇",
-        reply_markup=home(is_admin(update), is_gold_subscribed(update.effective_user.id), update.effective_user.id),
+        reply_markup=home(is_admin(update), is_gold_subscribed(uid), uid),
     )
+
+
+def welcome_kb(subscribed=False):
+    rows = []
+    if not subscribed:
+        rows.append([InlineKeyboardButton(
+            "🔔 ابعتلي سعر الدهب كل يوم", callback_data="welcomesub"
+        )])
+    rows += [
+        [InlineKeyboardButton("🧮 احسب دهبك", callback_data="calcgold")],
+        [InlineKeyboardButton("💍 شوف المنتجات", callback_data="products")],
+        [InlineKeyboardButton("📋 القائمة الرئيسية", callback_data="home")],
+    ]
+    return InlineKeyboardMarkup(rows)
 
 
 async def show_id(update, context):
@@ -9857,11 +9912,13 @@ async def buttons(update, context):
     if c == "callrequest":
         track_user(update)
         context.user_data.clear()
-        context.user_data["state"] = "call_phone_input"
         await q.edit_message_text(
-            "📞 اطلب مكالمة\n\n"
-            "اكتب رقم موبايلك وهنكلمك عليه في أقرب وقت.\n"
-            "مثال: 01012345678"
+            "الخدمة دي اتلغت 🙏\n"
+            "لو محتاج حاجة دوس «✍️ ابعت رسالة» وهنرد عليك في أقرب وقت.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✍️ ابعت رسالة", callback_data="contactadmin")],
+                [InlineKeyboardButton("⬅️ الرئيسية", callback_data="home")],
+            ]),
         )
         return
 
@@ -10448,8 +10505,19 @@ async def buttons(update, context):
             return
         await q.edit_message_text(
             "⚙️ التحكم في الميزات\n\n"
-            "دوس على أي زرار عشان تشغّله أو توقفه فورًا:",
+            "اختار القسم:",
             reply_markup=admin_features_menu(),
+        )
+        return
+
+    if c.startswith("featgroup:"):
+        if not is_admin(update):
+            return
+        group = c.split(":", 1)[1]
+        await q.edit_message_text(
+            f"⚙️ {feature_group_title(group)}\n\n"
+            "دوس على أي زرار عشان تشغّله أو توقفه فورًا:",
+            reply_markup=admin_features_menu(group),
         )
         return
 
@@ -10479,10 +10547,12 @@ async def buttons(update, context):
             new_value="off" if on else "on",
         )
 
+        group = feature_group_of(key)
         await q.edit_message_text(
-            "⚙️ التحكم في الميزات\n\n"
+            (f"⚙️ {feature_group_title(group)}" if group
+             else "⚙️ التحكم في الميزات") + "\n\n"
             "دوس على أي زرار عشان تشغّله أو توقفه فورًا:",
-            reply_markup=admin_features_menu(),
+            reply_markup=admin_features_menu(group),
         )
         return
 
@@ -13595,6 +13665,27 @@ async def buttons(update, context):
         )
         return
 
+    if c == "goldtools":
+        track_user(update)
+        await q.edit_message_reply_markup(reply_markup=gold_tools_kb())
+        return
+
+    if c == "goldtoolsback":
+        await q.edit_message_reply_markup(
+            reply_markup=gold_screen_kb(update.effective_user.id)
+        )
+        return
+
+    if c == "welcomesub":
+        track_user(update)
+        set_gold_subscription(update.effective_user.id, True)
+        await q.edit_message_reply_markup(reply_markup=welcome_kb(True))
+        await context.bot.send_message(
+            chat_id=q.message.chat_id,
+            text="✅ تمام! هيوصلك سعر الدهب والجديد أول بأول 💛",
+        )
+        return
+
     if c == "gold":
         p = latest()
         track_user(update)
@@ -14567,12 +14658,13 @@ async def buttons(update, context):
         set_gold_subscription(update.effective_user.id, True)
 
         wa_subscribed = is_whatsapp_subscribed(update.effective_user.id)
+        wa_on = get_setting("wa_notifications_enabled", "0") == "1"
 
-        if wa_subscribed:
+        if wa_subscribed or not wa_on:
             await q.edit_message_text(
                 "💎 " + SHOP_NAME + "\n\n"
                 "✅ تم تفعيل الإشعارات، هيوصلك تلقائي أي منتج جديد "
-                "أو تغيير في سعر الذهب على تليجرام وواتساب.\n\n"
+                "أو تغيير في سعر الذهب.\n\n"
                 "اختار من القائمة 👇",
                 reply_markup=home(is_admin(update), True, update.effective_user.id),
             )
