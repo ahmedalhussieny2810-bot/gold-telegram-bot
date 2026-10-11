@@ -3931,11 +3931,65 @@ def admin_customers_menu():
     ])
 
 
+def finance_usage_stats_text():
+    """Counts only — how many customers actually use the budget and
+    له/عليه tools. Amounts/names stay private and are never shown."""
+    def n(sql, args=()):
+        r = one(sql, args)
+        return int(list(r.values())[0] or 0) if r else 0
+
+    month = datetime.now(TZ).strftime("%Y-%m")
+    b_users = n("SELECT COUNT(*) FROM MonthlyBudget")
+    b_month = n("SELECT COUNT(*) FROM MonthlyBudget WHERE month_str=%s", (month,))
+    b_tx = n("SELECT COUNT(*) FROM BudgetTransactions")
+    b_week = n(
+        "SELECT COUNT(DISTINCT telegram_id) FROM BudgetTransactions "
+        "WHERE created_at >= NOW() - INTERVAL 7 DAY"
+    )
+    l_users = n(
+        "SELECT COUNT(DISTINCT telegram_id) FROM LedgerCustomers "
+        "WHERE telegram_id > 0"
+    )
+    l_people = n("SELECT COUNT(*) FROM LedgerCustomers WHERE telegram_id > 0")
+    l_entries = n("SELECT COUNT(*) FROM LedgerEntries")
+    l_week = n(
+        "SELECT COUNT(DISTINCT c.telegram_id) FROM LedgerEntries e "
+        "JOIN LedgerCustomers c ON c.id = e.customer_id "
+        "WHERE e.created_at >= NOW() - INTERVAL 7 DAY AND c.telegram_id > 0"
+    )
+    total = n(
+        "SELECT COUNT(*) FROM ("
+        " SELECT telegram_id FROM MonthlyBudget"
+        " UNION SELECT telegram_id FROM BudgetTransactions"
+        " UNION SELECT telegram_id FROM LedgerCustomers WHERE telegram_id > 0"
+        ") t"
+    )
+
+    return (
+        "📒 مستخدمين مصاريفي وحساباتي\n\n"
+        f"👥 إجمالي اللي سجّلوا بيانات: {total}\n\n"
+        "📒 حاسبة المصروف الشهري:\n"
+        f"• سجّلوا مرتب/ميزانية: {b_users}\n"
+        f"• شغالين الشهر ده: {b_month}\n"
+        f"• عدد العمليات المسجلة: {b_tx}\n"
+        f"• استخدموها آخر 7 أيام: {b_week}\n\n"
+        "📇 حساباتي (له/عليه):\n"
+        f"• عدد المستخدمين: {l_users}\n"
+        f"• عدد الأشخاص اللي سجّلوهم: {l_people}\n"
+        f"• عدد الحركات المسجلة: {l_entries}\n"
+        f"• استخدموها آخر 7 أيام: {l_week}\n\n"
+        "🔒 الأرقام دي عدد بس — مبالغ وأسامي العملاء مش بتظهر."
+    )
+
+
 def admin_reports_menu():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📊 الإحصائيات", callback_data="stats")],
         [InlineKeyboardButton(
             "📍 مصادر العملاء", callback_data="usersources"
+        )],
+        [InlineKeyboardButton(
+            "📒 مستخدمين مصاريفي وحساباتي", callback_data="financestats"
         )],
         [InlineKeyboardButton(
             "❌ عمليات فشلت اليوم", callback_data="failedops"
@@ -10512,6 +10566,27 @@ async def buttons(update, context):
             "🔗 اكتب اسم قصير للمصدر (بالإنجليزي وبدون مسافات)، مثلاً:\n"
             "facebook أو instagram أو qr_shop"
         )
+        return
+
+    if c == "financestats":
+        if not is_admin(update):
+            return
+        try:
+            txt = finance_usage_stats_text()
+        except Exception as e:
+            print("Finance Stats Error:", repr(e), flush=True)
+            txt = "❌ حصل خطأ في جلب الأرقام، جرب تاني."
+        try:
+            await q.edit_message_text(
+                txt,
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔄 تحديث", callback_data="financestats")],
+                    [InlineKeyboardButton("⬅️ رجوع", callback_data="adminreports")],
+                ]),
+            )
+        except Exception as e:
+            if "not modified" not in str(e).lower():
+                raise
         return
 
     if c == "adminfeatures":
