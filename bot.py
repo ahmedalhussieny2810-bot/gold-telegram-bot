@@ -2,6 +2,7 @@ import os
 import json
 import re
 import asyncio
+import time
 from datetime import datetime, timedelta, date, time as dtime
 from zoneinfo import ZoneInfo
 from urllib.parse import urlparse, quote
@@ -63,6 +64,13 @@ TZ = ZoneInfo("Africa/Cairo")
 # IP ranges like Railway's — so these mimic an ordinary desktop Chrome
 # browser's request instead, which is far less likely to get silently
 # blocked or served a JS challenge page instead of the real content.
+# The User-Agent the iSagha scraper used for months without problems.
+ISAGHA_ORIGINAL_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (compatible; AlhussienyBot/1.0)",
+}
+# Reason for the most recent failed iSagha fetch (shown to the admin).
+LAST_ISAGHA_ERROR = None
+
 BROWSER_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -3281,38 +3289,54 @@ def fetch_isagha_price_21():
     Returns a float, or None on any failure (network error, page
     structure changed, price not found).
     """
-    try:
-        r = requests.get(
-            "https://market.isagha.com/prices",
-            headers=BROWSER_HEADERS,
-            timeout=15,
-        )
-        r.raise_for_status()
-        html = r.text
-
-        # Scope the search to the gold-prices table only, so we don't
-        # accidentally match "عيار 21" text elsewhere on the page
-        # (silver/currency tables, articles, etc.).
-        start = html.find("أسعار الذهب في مصر اليوم")
-        end = html.find("أسعار الفضة في مصر اليوم")
-        section = html[start:end] if start != -1 and end != -1 else html
-
-        m = re.search(
-            r"عيار\s*21(?:(?!عيار).){1,400}?([\d,]+(?:\.\d+)?)\s*ج\.?م",
-            section, re.DOTALL,
-        )
-        if not m:
-            print(
-                "iSagha Price Fetch Error: pattern not found "
-                f"(status={r.status_code}, len={len(html)})",
-                flush=True,
+    global LAST_ISAGHA_ERROR
+    errors = []
+    # Try the original User-Agent first (the one that worked reliably
+    # for months), then a browser-like one, then once more after a
+    # short pause — a single slow/refused request shouldn't count as
+    # a failure.
+    attempts = [ISAGHA_ORIGINAL_HEADERS, BROWSER_HEADERS, ISAGHA_ORIGINAL_HEADERS]
+    for i, headers in enumerate(attempts):
+        if i == 2:
+            time.sleep(3)
+        try:
+            r = requests.get(
+                "https://market.isagha.com/prices",
+                headers=headers,
+                timeout=20,
             )
-            return None
+            if r.status_code != 200:
+                errors.append(f"HTTP {r.status_code}")
+                continue
+            html = r.text
 
-        return float(m.group(1).replace(",", ""))
-    except Exception as e:
-        print("iSagha Price Fetch Error:", repr(e), flush=True)
-        return None
+            # Scope the search to the gold-prices table only, so we
+            # don't accidentally match "عيار 21" text elsewhere on the
+            # page (silver/currency tables, articles, etc.).
+            start = html.find("أسعار الذهب في مصر اليوم")
+            end = html.find("أسعار الفضة في مصر اليوم")
+            section = html[start:end] if start != -1 and end != -1 else html
+
+            m = re.search(
+                r"عيار\s*21(?:(?!عيار).){1,400}?([\d,]+(?:\.\d+)?)\s*ج\.?م",
+                section, re.DOTALL,
+            )
+            if not m:
+                errors.append(f"السعر مش موجود في الصفحة (حجمها {len(html)})")
+                continue
+
+            LAST_ISAGHA_ERROR = None
+            return float(m.group(1).replace(",", ""))
+        except requests.Timeout:
+            errors.append("الموقع مردش (timeout)")
+        except requests.ConnectionError:
+            errors.append("مفيش اتصال بالموقع")
+        except Exception as e:
+            errors.append(repr(e)[:120])
+
+    LAST_ISAGHA_ERROR = " | ".join(errors)
+    print("iSagha Price Fetch Error:", LAST_ISAGHA_ERROR, flush=True)
+    return None
 
 
 def fetch_isagha_buy_price_21():
@@ -5560,13 +5584,20 @@ async def send_isagha_suggestion(context, admin_id, suggested):
     docstring for why.
     """
     if suggested is None:
+        # Don't flood the admin with the same failure every hour —
+        # one notice per 3 hours is enough.
+        now = datetime.now(TZ)
+        slot = f"{now.strftime('%Y-%m-%d')}-{now.hour // 3}"
+        if not try_claim_daily_task("last_isagha_fail_notice", slot):
+            return
         try:
             await context.bot.send_message(
                 chat_id=admin_id,
                 text=(
-                    "⚠️ مقدرتش أجيب سعر مقترح من iSagha دلوقتي "
-                    "(ممكن الموقع غيّر شكله أو فيه مشكلة اتصال). "
-                    "حدّث السعر يدوي زي العادة."
+                    "⚠️ مقدرتش أجيب سعر مقترح من iSagha دلوقتي.\n"
+                    f"السبب: {LAST_ISAGHA_ERROR or 'غير معروف'}\n\n"
+                    "حدّث السعر يدوي زي العادة. "
+                    "(الرسالة دي مش هتتكرر قبل 3 ساعات)"
                 ),
             )
         except Exception as e:
