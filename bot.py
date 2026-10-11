@@ -212,6 +212,8 @@ def init_db():
                 "VARCHAR(10) NULL",
                 "ALTER TABLE Products ADD COLUMN making_charge "
                 "DECIMAL(15,2) NULL",
+                "ALTER TABLE Products ADD COLUMN potd_posted_at "
+                "TIMESTAMP NULL",
             ]
 
             for q in upgrades:
@@ -3570,8 +3572,6 @@ def price_text(p):
         + [
             "",
             "📍 " + SHOP_ADDRESS,
-            "",
-            "🌐 " + WEBSITE,
         ]
     )
 
@@ -3584,6 +3584,9 @@ def gold_screen_kb(telegram_id):
     wa_subscribed = is_whatsapp_subscribed(telegram_id)
 
     return InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            "🪙 لو عايز سعر السبايك والعملات دوس هنا", callback_data="barscoins"
+        )],
         [InlineKeyboardButton("🧮 احسب دهبك", callback_data="calcgold")],
         [
             InlineKeyboardButton(
@@ -4010,6 +4013,12 @@ FEATURE_TOGGLES = [
     ("prodpause", "products_paused", "0",
      "🔴 عرض المنتجات للعملاء — متوقف مؤقتًا",
      "🟢 عرض المنتجات للعملاء — شغال"),
+    ("prodsocial", "products_social", "0",
+     "🟢 نشر المنتجات على فيسبوك وإنستجرام — شغال",
+     "🔴 نشر المنتجات على فيسبوك وإنستجرام — متوقف (السعر بس)"),
+    ("potdauto", "potd_auto", "1",
+     "🟢 نشر منتج اليوم (3 العصر) — شغال",
+     "🔴 نشر منتج اليوم (3 العصر) — متوقف"),
     ("newprodnotify", "new_product_notify", "1",
      "🟢 إشعار العملاء بالمنتجات الجديدة — شغال",
      "🔴 إشعار العملاء بالمنتجات الجديدة — متوقف"),
@@ -4983,30 +4992,81 @@ async def weekly_summary_tick(context):
         print("Weekly Summary Tick Error:", repr(e), flush=True)
 
 
+POTD_TIME = "15:00"
+
+
+def products_social_on():
+    """Whether products (منتج اليوم) also get posted to Facebook and
+    Instagram. Off by default — only gold prices go there unless the
+    admin turns this on."""
+    return get_setting("products_social", "0") == "1"
+
+
+def potd_auto_on():
+    return get_setting("potd_auto", "1") == "1"
+
+
+def potd_next_product_id():
+    """Next product that was NEVER posted as منتج اليوم (oldest
+    first). None once every available product with a photo has had
+    its turn — new products start as not-posted, so adding one makes
+    the daily post resume on its own."""
+    row = one("""
+        SELECT id FROM Products
+        WHERE status='available'
+          AND Photo_id IS NOT NULL AND Photo_id <> ''
+          AND potd_posted_at IS NULL
+        ORDER BY id ASC
+        LIMIT 1
+    """)
+    return row["id"] if row else None
+
+
+def potd_remaining_count():
+    row = one("""
+        SELECT COUNT(*) n FROM Products
+        WHERE status='available'
+          AND Photo_id IS NOT NULL AND Photo_id <> ''
+          AND potd_posted_at IS NULL
+    """)
+    return (row or {}).get("n", 0)
+
+
 async def potd_tick(context):
-    """Runs every minute via JobQueue but only acts once at 10:30
-    daily. If the admin hasn't already picked today's "منتج اليوم"
-    manually, auto-selects the product with the most combined
-    engagement (views + inquiries) and publishes it."""
+    """Runs every minute via JobQueue but only acts once a day at
+    POTD_TIME. Posts the next not-yet-posted product as "🔥 منتج
+    اليوم" (each product once, oldest first). When every product has
+    been posted it stops and tells the admin once; it resumes by
+    itself as soon as a new product is added. Skipped if the admin
+    already picked a product manually today, or turned it off."""
     try:
         now = datetime.now(TZ)
-        if now.strftime("%H:%M") != "10:30":
+        if now.strftime("%H:%M") != POTD_TIME or not potd_auto_on():
             return
 
         today_str = now.strftime("%Y-%m-%d")
-        if not try_claim_daily_task("potd_date", today_str):
-            return  # already set (manually or by an earlier tick) today
+        if get_setting("potd_date") == today_str:
+            return  # admin already published one manually today
 
-        row = one("""
-            SELECT id FROM Products
-            WHERE status='available' AND Photo_id IS NOT NULL
-            ORDER BY (views_count + inquiries_count) DESC, id DESC
-            LIMIT 1
-        """)
-        if not row:
+        pid = potd_next_product_id()
+        if not pid:
+            if get_setting("potd_exhausted_notified", "0") != "1" and ADMIN_ID:
+                set_setting("potd_exhausted_notified", "1")
+                try:
+                    await context.bot.send_message(
+                        ADMIN_ID,
+                        "🔥 منتج اليوم: كل المنتجات اتنشرت خلاص.\n"
+                        "النشر اليومي واقف لحد ما تضيف منتج جديد، "
+                        "وهيرجع يشتغل لوحده بعدها.",
+                    )
+                except Exception as e:
+                    print("POTD Exhausted Notify Failed:", repr(e), flush=True)
             return
 
-        await publish_product_of_day(context, row["id"])
+        if not try_claim_daily_task("potd_date", today_str):
+            return  # another instance already handled today
+
+        await publish_product_of_day(context, pid)
     except Exception as e:
         print("POTD Tick Error:", repr(e), flush=True)
 
@@ -5386,6 +5446,19 @@ async def publish_product_of_day(context, pid):
     today_str = datetime.now(TZ).strftime("%Y-%m-%d")
     set_setting("potd_product_id", str(pid))
     set_setting("potd_date", today_str)
+    try:
+        c = db()
+        try:
+            with c.cursor() as x:
+                x.execute(
+                    "UPDATE Products SET potd_posted_at=NOW() WHERE id=%s",
+                    (pid,),
+                )
+        finally:
+            c.close()
+    except Exception as e:
+        print("POTD Mark Posted Error:", repr(e), flush=True)
+    set_setting("potd_exhausted_notified", "0")
 
     tg_ok = False
     dm_sent, dm_failed = 0, 0
@@ -5406,17 +5479,21 @@ async def publish_product_of_day(context, pid):
                 print(f"POTD DM Failed for {uid}:", repr(e), flush=True)
             await asyncio.sleep(0.05)
 
-        try:
-            f = await context.bot.get_file(p["Photo_id"])
-            photo_url = (
-                f.file_path if f.file_path.startswith("http")
-                else f"https://api.telegram.org/file/bot"
-                     f"{BOT_TOKEN}/{f.file_path}"
-            )
-            fb_result = await facebook_photo(caption, photo_url)
-            ig_result = await instagram_photo(caption, photo_url)
-        except Exception as e:
-            print("POTD FB/IG Publish Error:", repr(e), flush=True)
+        # Products go to Facebook/Instagram only if the admin turned it
+        # on ("📘 نشر المنتجات على فيسبوك وإنستجرام", off by default) —
+        # gold prices keep publishing there regardless.
+        if products_social_on():
+            try:
+                f = await context.bot.get_file(p["Photo_id"])
+                photo_url = (
+                    f.file_path if f.file_path.startswith("http")
+                    else f"https://api.telegram.org/file/bot"
+                         f"{BOT_TOKEN}/{f.file_path}"
+                )
+                fb_result = await facebook_photo(caption, photo_url)
+                ig_result = await instagram_photo(caption, photo_url)
+            except Exception as e:
+                print("POTD FB/IG Publish Error:", repr(e), flush=True)
 
     log_action(
         ADMIN_ID, "PRODUCT_OF_THE_DAY",
@@ -5435,6 +5512,7 @@ async def publish_product_of_day(context, pid):
         "dm_sent": dm_sent,
         "fb_ok": bool(fb_result and fb_result.get("ok")),
         "ig_ok": bool(ig_result and ig_result.get("ok")),
+        "social_off": not products_social_on(),
     }
 
 
@@ -10870,6 +10948,39 @@ async def buttons(update, context):
         )
         return
 
+    if c == "barscoins":
+        track_user(update)
+        gold_id = find_category_by_name("ذهب")
+        bars_id = find_category_by_name("سبائك", gold_id) if gold_id else None
+        coins_id = find_category_by_name("عملات", gold_id) if gold_id else None
+        if not bars_id:
+            bars_id = find_category_by_name("سبائك")
+        if not coins_id:
+            coins_id = find_category_by_name("عملات")
+
+        k = []
+        if bars_id:
+            k.append([InlineKeyboardButton(
+                "🟡 سبايك (عيار 24)", callback_data=f"cm:{bars_id}"
+            )])
+        if coins_id:
+            k.append([InlineKeyboardButton(
+                "🪙 عملات (جنيهات ذهب)", callback_data=f"cm:{coins_id}"
+            )])
+        k.append([InlineKeyboardButton("⬅️ رجوع", callback_data="gold")])
+
+        # New message (like the "gold" screen) so the price message
+        # the customer tapped from stays visible above it.
+        await context.bot.send_message(
+            chat_id=q.message.chat_id,
+            text=
+            "💰 أسعار السبايك والعملات\n\nاختار النوع:"
+            if len(k) > 1 else
+            "💰 أسعار السبايك والعملات مش متاحة دلوقتي.",
+            reply_markup=InlineKeyboardMarkup(k),
+        )
+        return
+
     if c.startswith("cm:") or c.startswith("cs:"):
         cid = int(c.split(":")[1])
         cur = cat(cid)
@@ -13068,16 +13179,68 @@ async def buttons(update, context):
                 pname = p["name"] or f"#{p['id']}"
                 current_text = f"منتج اليوم الحالي: {pname}"
 
+        remaining = potd_remaining_count()
+        auto_on = potd_auto_on()
         await q.edit_message_text(
             f"🔥 منتج اليوم\n\n{current_text}\n\n"
-            "كل يوم الساعة 10:30 الصبح، البوت بيختار تلقائي المنتج "
-            "الأكتر تفاعلًا وينشره على تليجرام وفيسبوك وإنستجرام "
-            "(لو مفيش حد مختار يدوي قبلها).",
+            "كل يوم الساعة 3 العصر، البوت بينشر منتج واحد من المنتجات "
+            "اللي ما اتنشرتش قبل كده (من الأقدم للأحدث)، على تليجرام "
+            "(وفيسبوك وإنستجرام لو مفعّلين). لما المنتجات تخلص بيقف، ويرجع لوحده "
+            "أول ما تضيف منتج جديد.\n\n"
+            f"📦 منتجات لسه ما اتنشرتش: {remaining}\n"
+            f"الحالة: {'🟢 شغال' if auto_on else '🔴 متوقف'}",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton(
                     "✏️ اختار منتج يدوي دلوقتي", callback_data="potdpick"
                 )],
+                [InlineKeyboardButton(
+                    "🔴 إيقاف النشر اليومي" if auto_on
+                    else "🟢 تشغيل النشر اليومي",
+                    callback_data="potdautotoggle",
+                )],
+                [InlineKeyboardButton(
+                    "📘 نشر المنتجات على فيس وإنستا: شغال (دوس للإيقاف)"
+                    if products_social_on() else
+                    "📘 نشر المنتجات على فيس وإنستا: متوقف (دوس للتفعيل)",
+                    callback_data="hubtoggle:prodsocial",
+                )],
+                [InlineKeyboardButton(
+                    "🔁 ابدأ اللفة من الأول (كل المنتجات تتنشر تاني)",
+                    callback_data="potdreset",
+                )],
                 [InlineKeyboardButton("⬅️ رجوع", callback_data="admin")],
+            ]),
+        )
+        return
+
+    if c == "potdautotoggle":
+        if not is_admin(update):
+            return
+        on = potd_auto_on()
+        set_setting("potd_auto", "0" if on else "1")
+        await q.edit_message_text(
+            "🔴 اتوقف نشر منتج اليوم التلقائي." if on
+            else "🟢 اتفعّل نشر منتج اليوم التلقائي (كل يوم 3 العصر).",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ رجوع", callback_data="potdmenu")],
+            ]),
+        )
+        return
+
+    if c == "potdreset":
+        if not is_admin(update):
+            return
+        c2 = db()
+        try:
+            with c2.cursor() as x:
+                x.execute("UPDATE Products SET potd_posted_at=NULL")
+        finally:
+            c2.close()
+        set_setting("potd_exhausted_notified", "0")
+        await q.edit_message_text(
+            "🔁 تمام، كل المنتجات رجعت في الدور وهتتنشر تاني من الأول.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ رجوع", callback_data="potdmenu")],
             ]),
         )
         return
@@ -13132,8 +13295,12 @@ async def buttons(update, context):
             "✅ اتنشر منتج اليوم:\n\n"
             f"📢 تليجرام (قناة): {'✅' if result['tg_ok'] else '❌'}\n"
             f"📩 رسائل مباشرة: {result['dm_sent']} مشترك\n"
-            f"📘 فيسبوك: {'✅' if result['fb_ok'] else '❌'}\n"
-            f"📸 إنستجرام: {'✅' if result['ig_ok'] else '❌'}",
+            + (
+                "📘 فيسبوك وإنستجرام: ⏸ متوقف (من الإعدادات)"
+                if result.get("social_off") else
+                f"📘 فيسبوك: {'✅' if result['fb_ok'] else '❌'}\n"
+                f"📸 إنستجرام: {'✅' if result['ig_ok'] else '❌'}"
+            ),
             reply_markup=admin_menu(owner=is_owner(update)),
         )
         return
