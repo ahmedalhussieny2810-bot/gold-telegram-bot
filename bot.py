@@ -3415,6 +3415,29 @@ def fetch_isagha_buy_price_21():
         return None
 
 
+# Which site the last fetch_retail_price_21() result came from.
+LAST_PRICE_SOURCE = "iSagha"
+
+
+def fetch_retail_price_21():
+    """iSagha first; if that fails for any reason, fall back to
+    gold-price-live.com automatically so the hourly suggestion and
+    the 5-minute auto-publish keep working while iSagha is broken.
+    Sets LAST_PRICE_SOURCE so callers can tell the admin where the
+    number came from. Returns a float or None (both failed)."""
+    global LAST_PRICE_SOURCE
+    p = fetch_isagha_price_21()
+    if p:
+        LAST_PRICE_SOURCE = "iSagha"
+        return p
+    p = fetch_goldpricelive_price_21()
+    if p:
+        LAST_PRICE_SOURCE = "gold-price-live (احتياطي)"
+        print("Price fallback used: gold-price-live", flush=True)
+        return p
+    return None
+
+
 def fetch_goldpricelive_price_21():
     """
     Best-effort scrape of gold-price-live.com for the 21k sell price,
@@ -3430,7 +3453,7 @@ def fetch_goldpricelive_price_21():
             timeout=15,
         )
         r.raise_for_status()
-        html = r.text
+        html = isagha_page_text(r.text)
 
         # The FAQ answer on the homepage states the 21k price in a
         # clean, stable sentence — prefer that over the price table
@@ -3441,15 +3464,16 @@ def fetch_goldpricelive_price_21():
         )
         if not m:
             # Fallback: the "عيار 21" row in the price table, taking
-            # the first (buy) figure.
+            # the first figure.
             m = re.search(
                 r"عيار\s*21[^\d]{0,40}([\d,]+(?:\.\d+)?)\s*جنيه",
                 html,
             )
         if not m:
+            print("GoldPriceLive Fetch Error: price not found", flush=True)
             return None
 
-        return float(m.group(1).replace(",", ""))
+        return _plausible_price(m.group(1))
     except Exception as e:
         print("GoldPriceLive Fetch Error:", repr(e), flush=True)
         return None
@@ -5005,7 +5029,7 @@ async def isagha_suggestion_tick(context):
         if not try_claim_daily_task("last_isagha_suggestion_hour", hour_key):
             return
 
-        suggested = await asyncio.to_thread(fetch_isagha_price_21)
+        suggested = await asyncio.to_thread(fetch_retail_price_21)
         await send_isagha_suggestion(context, ADMIN_ID, suggested)
     except Exception as e:
         print("iSagha Suggestion Tick Error:", repr(e), flush=True)
@@ -5046,12 +5070,29 @@ async def isagha_autopublish_tick(context):
         if not try_claim_daily_task("last_isagha_autopublish_slot", slot_key):
             return
 
-        suggested = await asyncio.to_thread(fetch_isagha_price_21)
+        suggested = await asyncio.to_thread(fetch_retail_price_21)
         if not suggested or suggested <= 0:
             print("iSagha Autopublish: no valid price, skipped.", flush=True)
             return
+        source = LAST_PRICE_SOURCE
+        using_backup = source != "iSagha"
 
         prev_p = latest()
+
+        if using_backup and prev_p:
+            diff_abs = abs(suggested - prev_p)
+            # Backup site: never auto-publish a suspicious jump, and
+            # ignore tiny differences that only come from the two
+            # sites rounding differently (avoids price ping-pong if
+            # iSagha keeps failing on and off).
+            if diff_abs > prev_p * 0.05:
+                print(
+                    f"Autopublish skipped: backup price {suggested} too far "
+                    f"from current {prev_p}", flush=True,
+                )
+                return
+            if diff_abs < 10 and not (now.hour == 11 and now.minute == 0):
+                return
         is_first_daily_slot = (now.hour == 11 and now.minute == 0)
 
         if (
@@ -5069,7 +5110,7 @@ async def isagha_autopublish_tick(context):
         log_action(
             ADMIN_ID, "AUTO_ISAGHA_PUBLISH",
             old_value=prev_p,
-            new_value=f"price_21={round(suggested)} (auto iSagha)",
+            new_value=f"price_21={round(suggested)} (auto {source})",
         )
         if first_today() is None:
             save_first(suggested)
@@ -5080,7 +5121,7 @@ async def isagha_autopublish_tick(context):
         try:
             await context.bot.send_message(
                 ADMIN_ID,
-                "🤖 نشر تلقائي من iSagha (" + now.strftime("%I:%M %p") + ")\n\n"
+                f"🤖 نشر تلقائي من {source} (" + now.strftime("%I:%M %p") + ")\n\n"
                 + price_text(suggested),
                 disable_notification=True,
             )
@@ -5656,7 +5697,7 @@ async def send_isagha_suggestion(context, admin_id, suggested):
             diff_line = f"\n\nمقارنة بسعرك الحالي: {diff:+d} ج"
 
     text = (
-        "🔄 اقتراح سعر من iSagha\n\n"
+        f"🔄 اقتراح سعر من {LAST_PRICE_SOURCE}\n\n"
         f"عيار 21 (بيع): {round(suggested)} جنيه"
         f"{diff_line}\n\n"
         "⚠️ مصدر غير رسمي — راجع السعر قبل ما تنشره."
@@ -13333,8 +13374,8 @@ async def buttons(update, context):
         if not is_admin(update):
             return
 
-        await q.edit_message_text("⏳ بجيب السعر من iSagha...")
-        suggested = await asyncio.to_thread(fetch_isagha_price_21)
+        await q.edit_message_text("⏳ بجيب السعر...")
+        suggested = await asyncio.to_thread(fetch_retail_price_21)
         await send_isagha_suggestion(context, update.effective_user.id, suggested)
         return
 
