@@ -11037,12 +11037,11 @@ async def buttons(update, context):
             k.append([InlineKeyboardButton(
                 "🪙 عملات (جنيهات ذهب)", callback_data=f"cm:{coins_id}"
             )])
-        k.append([InlineKeyboardButton("⬅️ رجوع", callback_data="gold")])
+        k.append([InlineKeyboardButton("⬅️ رجوع", callback_data="goldback")])
 
-        # New message (like the "gold" screen) so the price message
-        # the customer tapped from stays visible above it.
-        await context.bot.send_message(
-            chat_id=q.message.chat_id,
+        # Edited in place (the "رجوع" button restores the price in
+        # the same message) so nothing gets duplicated in the chat.
+        await q.edit_message_text(
             text=
             "💰 أسعار السبايك والعملات\n\nاختار النوع:"
             if len(k) > 1 else
@@ -11315,7 +11314,7 @@ async def buttons(update, context):
                 [InlineKeyboardButton(
                     "🆕 الجديد بس (CSV)", callback_data="waexport:new"
                 )],
-                [InlineKeyboardButton("⬅️ رجوع", callback_data="gold")],
+                [InlineKeyboardButton("⬅️ رجوع", callback_data="goldback")],
             ]),
         )
         return
@@ -13686,6 +13685,24 @@ async def buttons(update, context):
         )
         return
 
+    if c == "goldback":
+        # "⬅️ رجوع" from a gold tool: turn the SAME message back into
+        # the price screen instead of sending a new copy of the price.
+        p = latest()
+        txt = (price_text(p) if p
+               else "💎 لم يتم تحديث أسعار الذهب حتى الآن.")
+        kb = gold_screen_kb(update.effective_user.id)
+        try:
+            await q.edit_message_text(txt, reply_markup=kb)
+        except Exception as e:
+            if "not modified" in str(e).lower():
+                return
+            # e.g. the message is a photo/chart and can't become text
+            await context.bot.send_message(
+                chat_id=q.message.chat_id, text=txt, reply_markup=kb,
+            )
+        return
+
     if c == "gold":
         p = latest()
         track_user(update)
@@ -13741,7 +13758,7 @@ async def buttons(update, context):
             [InlineKeyboardButton(
                 "⚖️ قارن بين قطعتين", callback_data="calccompare"
             )],
-            [InlineKeyboardButton("⬅️ رجوع", callback_data="gold")],
+            [InlineKeyboardButton("⬅️ رجوع", callback_data="goldback")],
         ]
 
         await q.edit_message_text(
@@ -13810,7 +13827,7 @@ async def buttons(update, context):
                 [InlineKeyboardButton(
                     "عيار 18", callback_data="calctradek:18"
                 )],
-                [InlineKeyboardButton("⬅️ رجوع", callback_data="gold")],
+                [InlineKeyboardButton("⬅️ رجوع", callback_data="goldback")],
             ]),
         )
         return
@@ -13922,7 +13939,7 @@ async def buttons(update, context):
                 [InlineKeyboardButton(
                     "عيار 18", callback_data="calcbudgetk:18"
                 )],
-                [InlineKeyboardButton("⬅️ رجوع", callback_data="gold")],
+                [InlineKeyboardButton("⬅️ رجوع", callback_data="goldback")],
             ]),
         )
         return
@@ -14169,7 +14186,7 @@ async def buttons(update, context):
                 [InlineKeyboardButton(
                     "📊 استثماراتي", callback_data="invlist"
                 )],
-                [InlineKeyboardButton("⬅️ رجوع", callback_data="gold")],
+                [InlineKeyboardButton("⬅️ رجوع", callback_data="goldback")],
             ]),
         )
         return
