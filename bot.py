@@ -3750,10 +3750,11 @@ def home(admin=False, subscribed=False, telegram_id=None):
         [InlineKeyboardButton(
             "💎 الدهب والأسعار", callback_data="goldcategory"
         )],
-        [InlineKeyboardButton(
-            "📒 مصاريفي وحساباتي", callback_data="financecategory"
-        )],
     ]
+    if finance_enabled():
+        k.append([InlineKeyboardButton(
+            "📒 مصاريفي وحساباتي", callback_data="financecategory"
+        )])
 
     if admin:
         k.append([InlineKeyboardButton("👑 لوحة التحكم", callback_data="admin")])
@@ -3809,6 +3810,12 @@ def gold_category_kb():
         [InlineKeyboardButton("⬅️ الرئيسية", callback_data="home")],
     ]
     return InlineKeyboardMarkup(rows)
+
+
+def finance_enabled():
+    """The whole "📒 مصاريفي وحساباتي" section on/off — controlled
+    from ⚙️ التحكم في الميزات. Off by default."""
+    return get_setting("finance_enabled", "0") == "1"
 
 
 def ledger_enabled():
@@ -4035,6 +4042,9 @@ FEATURE_TOGGLES = [
     ("newprodnotify", "new_product_notify", "1",
      "🟢 إشعار العملاء بالمنتجات الجديدة — شغال",
      "🔴 إشعار العملاء بالمنتجات الجديدة — متوقف"),
+    ("finance", "finance_enabled", "0",
+     "🟢 مصاريفي وحساباتي للعملاء — شغالة",
+     "🔴 مصاريفي وحساباتي للعملاء — مقفولة"),
     ("ledger", "ledger_enabled", "0",
      "🟢 حساباتي (له/عليه) للعملاء — شغالة",
      "🔴 حساباتي (له/عليه) للعملاء — مقفولة"),
@@ -4070,7 +4080,7 @@ FEATURE_GROUPS = [
     ("prod", "💍 المنتجات",
      ["prodpause", "potdauto", "prodsocial", "newprodnotify"]),
     ("notif", "🔔 الإشعارات", ["fajrauto", "bcastall", "wa"]),
-    ("cust", "👥 العملاء والصيانة", ["ledger", "refloy", "maint"]),
+    ("cust", "👥 العملاء والصيانة", ["finance", "ledger", "refloy", "maint"]),
 ]
 
 
@@ -4999,6 +5009,8 @@ async def budget_month_end_tick(context):
     budget into a fresh cycle for the new month (same salary,
     balance reset)."""
     try:
+        if not finance_enabled():
+            return
         now = datetime.now(TZ)
         if now.strftime("%H:%M") != "21:00":
             return
@@ -6076,8 +6088,11 @@ async def start(update, context):
         "أهلاً بيك في البوت الرسمي لـ" + SHOP_FULL_NAME + " ✨\n\n"
         "💎 الدهب والأسعار — السعر لحظة بلحظة، احسب دهبك، "
         "بكام أشتري، والمنتجات.\n"
-        "📒 مصاريفي وحساباتي — حاسبة مصروفك الشهري وحسابات له/عليه.\n\n"
-        "اختار من القائمة 👇",
+        + (
+            "📒 مصاريفي وحساباتي — حاسبة مصروفك الشهري.\n"
+            if finance_enabled() else ""
+        )
+        + "\nاختار من القائمة 👇",
         reply_markup=home(is_admin(update), is_gold_subscribed(uid), uid),
     )
 
@@ -9807,6 +9822,20 @@ async def buttons(update, context):
         await q.edit_message_text(
             "💎 كل حاجة عن الذهب\n\nاختار من القائمة 👇",
             reply_markup=gold_category_kb(),
+        )
+        return
+
+    if (
+        c == "financecategory" or c.startswith("budget")
+        or c.startswith("ledger")
+    ) and not finance_enabled():
+        # Section switched off — old buttons in a chat just get a
+        # polite notice instead of opening it.
+        await q.edit_message_text(
+            "📒 خدمة مصاريفي وحساباتي متوقفة دلوقتي 🙏",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ الرئيسية", callback_data="home")],
+            ]),
         )
         return
 
