@@ -3811,16 +3811,22 @@ def gold_category_kb():
     return InlineKeyboardMarkup(rows)
 
 
+def ledger_enabled():
+    """"📇 حساباتي (له/عليه)" on/off — controlled from
+    ⚙️ التحكم في الميزات. Off by default."""
+    return get_setting("ledger_enabled", "0") == "1"
+
+
 def finance_category_kb():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(
-            "📒 حاسبة مصروفك الشهري", callback_data="budgetmenu"
-        )],
-        [InlineKeyboardButton(
+    rows = [[InlineKeyboardButton(
+        "📒 حاسبة مصروفك الشهري", callback_data="budgetmenu"
+    )]]
+    if ledger_enabled():
+        rows.append([InlineKeyboardButton(
             "📇 حساباتي (له/عليه)", callback_data="ledgermenu"
-        )],
-        [InlineKeyboardButton("⬅️ الرئيسية", callback_data="home")],
-    ])
+        )])
+    rows.append([InlineKeyboardButton("⬅️ الرئيسية", callback_data="home")])
+    return InlineKeyboardMarkup(rows)
 
 
 def shop_info_kb():
@@ -3940,7 +3946,14 @@ def finance_usage_stats_text():
 
     month = datetime.now(TZ).strftime("%Y-%m")
     b_users = n("SELECT COUNT(*) FROM MonthlyBudget")
-    b_month = n("SELECT COUNT(*) FROM MonthlyBudget WHERE month_str=%s", (month,))
+    # month_str in MonthlyBudget rolls over automatically for everyone
+    # at month end, so "active this month" is measured from actual
+    # transactions instead.
+    b_tx_users = n("SELECT COUNT(DISTINCT telegram_id) FROM BudgetTransactions")
+    b_month = n(
+        "SELECT COUNT(DISTINCT telegram_id) FROM BudgetTransactions "
+        "WHERE DATE_FORMAT(created_at, '%%Y-%%m') = %s", (month,)
+    )
     b_tx = n("SELECT COUNT(*) FROM BudgetTransactions")
     b_week = n(
         "SELECT COUNT(DISTINCT telegram_id) FROM BudgetTransactions "
@@ -3969,9 +3982,10 @@ def finance_usage_stats_text():
         "📒 مستخدمين مصاريفي وحساباتي\n\n"
         f"👥 إجمالي اللي سجّلوا بيانات: {total}\n\n"
         "📒 حاسبة المصروف الشهري:\n"
-        f"• سجّلوا مرتب/ميزانية: {b_users}\n"
-        f"• شغالين الشهر ده: {b_month}\n"
-        f"• عدد العمليات المسجلة: {b_tx}\n"
+        f"• كتبوا مرتبهم: {b_users}\n"
+        f"• سجّلوا مصروف أو دخل فعلًا: {b_tx_users}\n"
+        f"• سجّلوا حاجة الشهر ده: {b_month}\n"
+        f"• إجمالي العمليات المسجلة: {b_tx}\n"
         f"• استخدموها آخر 7 أيام: {b_week}\n\n"
         "📇 حساباتي (له/عليه):\n"
         f"• عدد المستخدمين: {l_users}\n"
@@ -4021,6 +4035,9 @@ FEATURE_TOGGLES = [
     ("newprodnotify", "new_product_notify", "1",
      "🟢 إشعار العملاء بالمنتجات الجديدة — شغال",
      "🔴 إشعار العملاء بالمنتجات الجديدة — متوقف"),
+    ("ledger", "ledger_enabled", "0",
+     "🟢 حساباتي (له/عليه) للعملاء — شغالة",
+     "🔴 حساباتي (له/عليه) للعملاء — مقفولة"),
     ("refloy", "referral_enabled", "1",
      "🟢 الدعوات ونقاط الولاء — شغالة",
      "🔴 الدعوات ونقاط الولاء — متوقفة"),
@@ -4053,7 +4070,7 @@ FEATURE_GROUPS = [
     ("prod", "💍 المنتجات",
      ["prodpause", "potdauto", "prodsocial", "newprodnotify"]),
     ("notif", "🔔 الإشعارات", ["fajrauto", "bcastall", "wa"]),
-    ("cust", "👥 العملاء والصيانة", ["refloy", "maint"]),
+    ("cust", "👥 العملاء والصيانة", ["ledger", "refloy", "maint"]),
 ]
 
 
@@ -14938,6 +14955,17 @@ async def buttons(update, context):
         return
 
     # ---- حساباتي الشخصية (له/عليه) — لأي مستخدم للبوت ----
+
+    if c.startswith("ledger") and not ledger_enabled():
+        # Feature switched off — old buttons still sitting in a chat
+        # just get a polite notice instead of opening the tool.
+        await q.edit_message_text(
+            "📇 خدمة حساباتي (له/عليه) متوقفة دلوقتي 🙏",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ الرئيسية", callback_data="home")],
+            ]),
+        )
+        return
 
     if c == "ledgermenu":
         track_user(update)
