@@ -576,6 +576,17 @@ def init_db():
             """)
 
             x.execute("""
+                CREATE TABLE IF NOT EXISTS ButtonClicks(
+                    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                    btn VARCHAR(64) NOT NULL,
+                    telegram_id BIGINT NOT NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    INDEX(created_at),
+                    INDEX(btn, created_at)
+                )
+            """)
+
+            x.execute("""
                 CREATE TABLE IF NOT EXISTS SavingsGoals(
                     telegram_id BIGINT PRIMARY KEY,
                     weight DECIMAL(10,3) NOT NULL,
@@ -3750,6 +3761,7 @@ def home(admin=False, subscribed=False, telegram_id=None):
         [InlineKeyboardButton(
             "💎 الدهب والأسعار", callback_data="goldcategory"
         )],
+        [InlineKeyboardButton("💍 المنتجات", callback_data="products")],
     ]
     if finance_enabled():
         k.append([InlineKeyboardButton(
@@ -3944,6 +3956,139 @@ def admin_customers_menu():
     ])
 
 
+# Customer-facing buttons, with readable names for the usage report.
+# Callback data like "cm:12" is logged by its prefix ("cm").
+BUTTON_LABELS = {
+    "start": "▶️ فتح البوت (/start)",
+    "home": "🏠 القائمة الرئيسية",
+    "goldcategory": "💎 الدهب والأسعار",
+    "gold": "💎 أسعار الذهب",
+    "barscoins": "🪙 السبايك والعملات",
+    "calcgold": "🧮 احسب دهبك",
+    "calcmode": "🧮 احسب دهبك ← اختيار شراء/بيع",
+    "calccompare": "⚖️ قارن بين قطعتين",
+    "calcrepeat": "🔁 كرر آخر حسبة",
+    "calcshare": "📤 شارك النتيجة",
+    "calcbudget": "💵 بكام أشتري؟",
+    "goldtools": "🧰 أدوات تانية",
+    "calctrade": "🔄 استبدال قديم بجديد",
+    "pricehist7": "📊 أسعار آخر 7 أيام",
+    "zakatcalc": "🕌 حاسبة الزكاة",
+    "addoccasion": "🎁 ذكرني بمناسبة",
+    "products": "💍 المنتجات",
+    "cm": "💍 فتح قسم منتجات",
+    "inq": "📩 استعلام عن منتج",
+    "prodwa": "💬 واتساب من منتج",
+    "favtoggle": "⭐ إضافة/شيل من المفضلة",
+    "favlist": "⭐ المفضلة",
+    "savegoal": "💰 هدف توفير للذهب",
+    "loyaltypoints": "🎁 نقاط الولاء",
+    "referral": "🔗 ادعُ صديق",
+    "birthdaymenu": "🎂 تاريخ الميلاد",
+    "shopinfo": "📇 بيانات المحل",
+    "shopstatus": "🕐 المحل مفتوح؟",
+    "contactadmin": "✍️ ابعت رسالة",
+    "myinquiries": "📋 استفساراتي",
+    "phone": "📞 رقم المحل",
+    "notifsub": "🔔 تفعيل الإشعارات",
+    "welcomesub": "🔔 اشتراك من رسالة الترحيب",
+    "financecategory": "📒 مصاريفي وحساباتي",
+    "budgetmenu": "📒 حاسبة المصروف",
+    "ledgermenu": "📇 حساباتي (له/عليه)",
+    "ratebot": "⭐ قيّم البوت",
+}
+
+# Buttons that only exist to navigate back — not useful in the report.
+_USAGE_SKIP = {"goldback", "goldtoolsback"}
+
+
+def log_button_click(update, key):
+    """Records one customer button press (admins are not counted).
+    Never raises — the report is nice-to-have, the bot comes first."""
+    try:
+        if not update.effective_user or is_admin(update):
+            return
+        key = (key or "").split(":", 1)[0][:64]
+        if not key or key in _USAGE_SKIP:
+            return
+        c = db()
+        try:
+            with c.cursor() as x:
+                x.execute(
+                    "INSERT INTO ButtonClicks(btn, telegram_id) VALUES(%s,%s)",
+                    (key, update.effective_user.id),
+                )
+        finally:
+            c.close()
+    except Exception as e:
+        print("Button Click Log Error:", repr(e), flush=True)
+
+
+def button_usage_text(days=7):
+    rows = many(
+        "SELECT btn, COUNT(*) AS clicks, COUNT(DISTINCT telegram_id) AS users "
+        "FROM ButtonClicks WHERE created_at >= NOW() - INTERVAL %s DAY "
+        "GROUP BY btn ORDER BY clicks DESC",
+        (days,),
+    )
+    period = "آخر 7 أيام" if days == 7 else f"آخر {days} يوم"
+    lines = [f"📊 أكتر الزراير استخدامًا — {period}", ""]
+
+    used = set()
+    if not rows:
+        lines.append("لسه مفيش بيانات — العدّ بيبدأ من وقت التحديث ده.")
+    else:
+        total_users = one(
+            "SELECT COUNT(DISTINCT telegram_id) AS n FROM ButtonClicks "
+            "WHERE created_at >= NOW() - INTERVAL %s DAY", (days,),
+        )
+        n_users = int((total_users or {}).get("n") or 0)
+        lines.append(f"👥 عملاء استخدموا البوت: {n_users}")
+        lines.append("")
+        for i, r in enumerate(rows[:20], start=1):
+            used.add(r["btn"])
+            name = BUTTON_LABELS.get(r["btn"], r["btn"])
+            lines.append(
+                f"{i}. {name} — {int(r['clicks'])} مرة ({int(r['users'])} عميل)"
+            )
+        for r in rows[20:]:
+            used.add(r["btn"])
+
+    # Features currently switched off can't be pressed — don't list them.
+    hidden = set()
+    if not finance_enabled():
+        hidden |= {"financecategory", "budgetmenu", "ledgermenu"}
+    if not ledger_enabled():
+        hidden.add("ledgermenu")
+    if not loyalty_enabled():
+        hidden.add("loyaltypoints")
+    if not referral_enabled():
+        hidden.add("referral")
+
+    unused = [
+        BUTTON_LABELS[k] for k in BUTTON_LABELS
+        if k not in used and k != "start" and k not in hidden
+    ]
+    if rows and unused:
+        lines += ["", f"😴 زراير محدش داسها في {period}:"]
+        lines += [f"• {u}" for u in unused]
+
+    lines += ["", "ℹ️ ضغطات الأدمن مش بتتحسب."]
+    return "\n".join(lines)
+
+
+def button_usage_kb(days):
+    other = 30 if days == 7 else 7
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄 تحديث", callback_data=f"btnusage:{days}")],
+        [InlineKeyboardButton(
+            "📅 آخر 30 يوم" if other == 30 else "📅 آخر 7 أيام",
+            callback_data=f"btnusage:{other}",
+        )],
+        [InlineKeyboardButton("⬅️ رجوع", callback_data="adminreports")],
+    ])
+
+
 def finance_usage_stats_text():
     """Counts only — how many customers actually use the budget and
     له/عليه tools. Amounts/names stay private and are never shown."""
@@ -4008,6 +4153,9 @@ def admin_reports_menu():
         [InlineKeyboardButton("📊 الإحصائيات", callback_data="stats")],
         [InlineKeyboardButton(
             "📍 مصادر العملاء", callback_data="usersources"
+        )],
+        [InlineKeyboardButton(
+            "📊 أكتر الزراير استخدامًا", callback_data="btnusage:7"
         )],
         [InlineKeyboardButton(
             "📒 مستخدمين مصاريفي وحساباتي", callback_data="financestats"
@@ -6052,6 +6200,7 @@ async def start(update, context):
             source = arg[:50]
 
     is_new = track_user(update, referred_by=referred_by, source=source)
+    log_button_click(update, "start")
 
     if is_new and referred_by and referral_enabled() and loyalty_enabled():
         try:
@@ -9809,6 +9958,7 @@ async def buttons(update, context):
 
     await q.answer()
     track_user(update)
+    log_button_click(update, c)
 
     if c == "home":
         context.user_data.clear()
@@ -10612,6 +10762,26 @@ async def buttons(update, context):
             "🔗 اكتب اسم قصير للمصدر (بالإنجليزي وبدون مسافات)، مثلاً:\n"
             "facebook أو instagram أو qr_shop"
         )
+        return
+
+    if c.startswith("btnusage:"):
+        if not is_admin(update):
+            return
+        try:
+            days = int(c.split(":", 1)[1])
+        except ValueError:
+            days = 7
+        days = 30 if days == 30 else 7
+        try:
+            txt = button_usage_text(days)
+        except Exception as e:
+            print("Button Usage Report Error:", repr(e), flush=True)
+            txt = "❌ حصل خطأ في جلب التقرير، جرب تاني."
+        try:
+            await q.edit_message_text(txt, reply_markup=button_usage_kb(days))
+        except Exception as e:
+            if "not modified" not in str(e).lower():
+                raise
         return
 
     if c == "financestats":
